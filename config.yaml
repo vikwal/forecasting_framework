@@ -1,0 +1,41 @@
+data:
+  pv_path: '../../Daten'
+  wind_path:
+  timestamp_col: 'timestamp'
+  target_col: 'Active_Power'
+  freq: 'h'
+  train_end: '2017-12-31'
+  train_val_end: '2016-12-31'
+  val_start: '2017-01-01'
+  test_start: '2018-01-01'
+  lag_dim: 48
+  horizon: 48
+  scale_y: False
+  lag_in_col: False
+  return_index: True 
+  rel_features: ['Global_Horizontal_Radiation',
+                 'Diffuse_Horizontal_Radiation', 
+                 'Weather_Temperature_Celsius', 
+                 'Weather_Relative_Humidity']
+
+hpo:
+  trials: 1000
+  kfolds: 5
+  batch_size: [16, 256]
+  epochs: [2, 50]
+  n_layers: [1, 4]
+  learning_rate: [0.00001, 0.1]
+  fnn:
+    units: [32, 256]
+  cnn:
+    filters: [16, 64]
+    kernel_size: [2, 5]
+  rnn:
+    units: [16, 128]
+  
+model:
+  output_dim: 1
+  optimizer: 'adam'
+  loss: 'mse'
+  metrics: 'mae'
+  verbose: 0

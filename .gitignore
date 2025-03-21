@@ -2,9 +2,18 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.DS_Store/
+.vscode
 
 # C extensions
 *.so
+
+# python envs and other directories 
+frcst/
+data/
+studies/
+results/
+models/
 
 # Distribution / packaging
 .Python
