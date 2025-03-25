@@ -1,5 +1,5 @@
 data:
-  pv_path: '../../Daten'
+  pv_path: 'data'
   wind_path:
   timestamp_col: 'timestamp'
   target_col: 'Active_Power'
@@ -19,10 +19,11 @@ data:
                  'Weather_Relative_Humidity']
 
 hpo:
+  studies_dir: 'studies'
   trials: 1000
   kfolds: 5
   batch_size: [16, 256]
-  epochs: [2, 50]
+  epochs: [2, 100]
   n_layers: [1, 4]
   learning_rate: [0.00001, 0.1]
   fnn:
@@ -38,4 +39,5 @@ model:
   optimizer: 'adam'
   loss: 'mse'
   metrics: 'mae'
+  callbacks: True
   verbose: 0

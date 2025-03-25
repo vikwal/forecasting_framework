@@ -1,3 +1,5 @@
+import os
+import yaml
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
@@ -10,6 +12,11 @@ import optuna
 
 import preprocessing
 import models
+
+def load_config(path: str):
+    with open('config.yaml','r') as file_object:
+        config = yaml.load(file_object,Loader=yaml.SafeLoader)
+    return config
 
 def persistence_2daysago(y:pd.Series,
                          horizon: int,
@@ -166,8 +173,10 @@ def create_or_load_study(path, study_name, direction):
     )
     return study
 
-def load_study(path, study_name):
-    storage = f'sqlite:///{path}{study_name}.db'
+def load_study(studies_dir: str, 
+               study_name: str):
+    path = os.path.join(studies_dir, study_name)
+    storage = f'sqlite:///{path}.db'
     try:
         study = optuna.load_study(
             study_name=study_name,
@@ -261,6 +270,14 @@ def get_hyperparameters(model_name: str,
                 hyperparameters['units'] = fnn_units[0]
     return hyperparameters
 
+def load_hyperparams(study_name: str,
+                     config: dict):
+    studies_dir = config['hpo']['studies_dir']
+    study = load_study(studies_dir=studies_dir, 
+                       study_name=study_name)
+    if study:
+        return study.best_trial.params
+    return None
 
 def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                       val: Tuple[np.ndarray, np.ndarray],
@@ -272,6 +289,8 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                              n_features=n_features,
                              output_dim=config['model']['output_dim'],
                              hyperparameters=hyperparameters)
+    if config['model']['callbacks']:
+        callbacks = [keras.callbacks.ModelCheckpoint('models/best.keras', save_best_only=True)]
     history = model.fit(
         x = X_train,
         y = y_train,
@@ -279,7 +298,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
         epochs = hyperparameters['epochs'],
         verbose = config['model']['verbose'],
         validation_data = val,
-        #callbacks = callbacks,
+        callbacks = callbacks if config['model']['callbacks'] else None,
         shuffle = False
     )
     return history
