@@ -1,5 +1,5 @@
 data:
-  pv_path: 'data'
+  pv_path: '../Daten'
   wind_path:
   timestamp_col: 'timestamp'
   target_col: 'Active_Power'
@@ -12,10 +12,10 @@ data:
   horizon: 48
   scale_y: False
   lag_in_col: False
-  return_index: True 
+  return_index: True
   rel_features: ['Global_Horizontal_Radiation',
-                 'Diffuse_Horizontal_Radiation', 
-                 'Weather_Temperature_Celsius', 
+                 'Diffuse_Horizontal_Radiation',
+                 'Weather_Temperature_Celsius',
                  'Weather_Relative_Humidity']
 
 hpo:
@@ -33,7 +33,7 @@ hpo:
     kernel_size: [2, 5]
   rnn:
     units: [16, 128]
-  
+
 model:
   output_dim: 1
   optimizer: 'adam'
