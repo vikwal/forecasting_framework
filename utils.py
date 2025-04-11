@@ -4,148 +4,52 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import r2_score
 from tensorflow import keras
+import logging
 import optuna
 
 import preprocessing
 import models
+import utils_eval
+
+
 
 def load_config(path: str):
     with open('config.yaml','r') as file_object:
         config = yaml.load(file_object,Loader=yaml.SafeLoader)
     return config
 
-def persistence_2daysago(y:pd.Series,
-                         horizon: int,
-                         from_date=None) -> pd.Series:
-    '''
-    Persistence model which takes the realized scenario 2 days before.
-    '''
-    freq = (y.index[1] - y.index[0]).total_seconds() / 60
-    if freq == 60:
-        shifted = y.shift(horizon)
-    elif freq == 15:
-        shifted = y.shift(horizon*4)
-        
-    y_pers = pd.Series(data=shifted, index=y.index)
-    if from_date:
-        y_pers = y_pers[from_date:]
-    return y_pers
-
-def persistence_today(data:pd.DataFrame,
-                      horizon: int):
-    '''
-    Persistence model which takes the last 12 hours and forecasts the next 12 hours.
-    For 48 hours horizon this results in 2 identical days.
-    '''
-    y_pers = None
-    return y_pers
-
-def lin_reg(data: pd.DataFrame,
-            train_end: str,
-            test_start: str,
-            target_col: str):
-    '''
-    Persistence model which uses linear regression.
-    '''
+def impute_index(data: pd.DataFrame) -> pd.DataFrame:
     df = data.copy()
-    df.dropna(inplace=True)
-    y_train = df[:train_end][target_col].values
-    df.drop([target_col], axis=1, inplace=True)
-    X_train = df[:train_end].values
-    X_test = df[test_start:].values
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    y_pers = model.predict(X_test)
-    return y_pers
-
-def benchmark_models(data: pd.DataFrame,
-                     target_col: str,
-                     horizon: int,
-                     train_end: str,
-                     test_start: str,
-                     output_dim: int,
-                     index_test: np.ndarray,
-                     t_0=None):
-    '''
-    Pipeline for applying different benchmark models.
-    '''
-    results = {}
-    # 2 days ago persistence
-    y_pers = persistence_2daysago(y=data[target_col],
-                                  horizon=horizon,
-                                  from_date=test_start)
-    y_pers = preprocessing.make_windows(data=y_pers,
-                                        output_dim=output_dim)
-    df_pers = y_to_df(y=y_pers,
-                      output_dim=output_dim,
-                      horizon=horizon,
-                      index_test=index_test,
-                      t_0=t_0)
-    results['2daysago'] = df_pers
-    # linear regression persistence
-    y_pers = lin_reg(data=data,
-                     train_end=train_end,
-                     test_start=test_start,
-                     target_col=target_col)
-    y_pers = preprocessing.make_windows(data=y_pers,
-                                        output_dim=output_dim)
-    
-    df_pers = y_to_df(y=y_pers,
-                      output_dim=output_dim,
-                      horizon=horizon,
-                      index_test=index_test,
-                      t_0=t_0)
-    results['LinearRegression'] = df_pers
-    return results
-
-def evaluate_models(pred: pd.DataFrame,
-                    true: pd.DataFrame,
-                    persistence: list,
-                    persistence_model: str) -> pd.DataFrame:
-    evaluation = get_metrics(y_pred=pred.values,
-                             y_true=true.values)
-    evaluation['Models'] = ['Main'] 
-    for model, y_pred in persistence.items():
-        evaluation['Models'].append(model)
-        metrics = get_metrics(y_pred=y_pred.values,
-                              y_true=true.values)
-        for metric, value in metrics.items():
-            evaluation[metric].append(value[0])
-    results = pd.DataFrame(data=evaluation)
-    results.set_index('Models', inplace=True)
-    # skill factor
-    results['Skill'] = 0.0
-    for model in evaluation['Models']:
-        results.loc[model, 'Skill'] = 1 - results.loc[model].RMSE / results.loc[persistence_model].RMSE
-    return results
-
-def get_metrics(y_pred: np.ndarray,
-                y_true: np.ndarray) -> dict:
-    error = y_pred - y_true
-    r2 = r2_score(y_true.flatten(), y_pred.flatten())
-    rmse = np.sqrt(np.square(error).mean())
-    mae = np.abs(error).mean()
-    metrics = {'R^2': [r2],
-               'RMSE': [rmse],
-               'MAE': [mae]}
-    return metrics
+    freq = df.index[1] - df.index[0]
+    start = df.index[0]
+    end = df.index[-1]
+    date_range = pd.date_range(start=start, end=end, freq=freq)
+    if len(df) == len(date_range):
+        return df
+    df = df.reindex(date_range)
+    if freq == pd.Timedelta('1h'):
+        shift = 24
+    elif freq == pd.Timedelta('15min'):
+        shift = 96
+    while df.isna().any().any():
+        df = df.fillna(df.shift(shift))
+    return df
 
 def get_y(X_test: np.ndarray,
           y_test: np.ndarray,
           output_dim: int,
-          scaler_y: StandardScaler,
-          model: keras.Model) -> Tuple[np.ndarray, np.ndarray]:
+          model: keras.Model,
+          scaler_y: StandardScaler = None) -> Tuple[np.ndarray, np.ndarray]:
     if scaler_y:
         y_pred = scaler_y.inverse_transform(model.predict(X_test))
         y_true = scaler_y.inverse_transform(y_test.reshape(-1, output_dim))
     else:
-        y_pred = model.predict(X_test) 
-        y_true = y_test#.reshape(-1, output_dim) 
-    y_pred[y_pred < 0] = 0    
+        y_pred = model.predict(X_test)
+        y_true = y_test#.reshape(-1, output_dim)
+    y_pred[y_pred < 0] = 0
     return y_true, y_pred
 
 def y_to_df(y: np.ndarray,
@@ -156,8 +60,14 @@ def y_to_df(y: np.ndarray,
     cols = [f't+{i+1}' for i in range(output_dim)]
     df = pd.DataFrame(data=y, columns=cols, index=index_test)
     if output_dim == 1:
+        new_columns_dict = {}
+        base_col_series = df.iloc[:, 0]
         for i in range(2, horizon + 1):
-            df[f't+{i}'] = df.iloc[:, 0].shift(-i)
+            shift_amount = -(i - 1)
+            new_columns_dict[f't+{i}'] = base_col_series.shift(shift_amount)
+        if new_columns_dict: # Nur konkatenieren, wenn neue Spalten erstellt wurden
+            new_cols_df = pd.DataFrame(new_columns_dict, index=df.index)
+            df = pd.concat([df, new_cols_df], axis=1)
         df.dropna(inplace=True)
     if t_0:
         df = df.loc[(df.index.time == pd.to_datetime(f'{t_0}:00:00').time())]
@@ -166,14 +76,14 @@ def y_to_df(y: np.ndarray,
 def create_or_load_study(path, study_name, direction):
     storage = f'sqlite:///{path}{study_name}.db'
     study = optuna.create_study(
-        storage=storage, 
+        storage=storage,
         study_name=study_name,
         direction=direction,
         load_if_exists=True
     )
     return study
 
-def load_study(studies_dir: str, 
+def load_study(studies_dir: str,
                study_name: str):
     path = os.path.join(studies_dir, study_name)
     storage = f'sqlite:///{path}.db'
@@ -197,10 +107,10 @@ def kfolds(X: np.ndarray,
         kfolds.append(((X_train, y_train), (X_val, y_val)))
     return kfolds
 
-def get_hyperparameters(model_name: str, 
+def get_hyperparameters(model_name: str,
                         config: dict,
-                        hpo=False, 
-                        trial=None, 
+                        hpo=False,
+                        trial=None,
                         study=None) -> dict:
     hyperparameters = {}
     hyperparameters['model_name'] = model_name
@@ -273,16 +183,16 @@ def get_hyperparameters(model_name: str,
 def load_hyperparams(study_name: str,
                      config: dict):
     studies_dir = config['hpo']['studies_dir']
-    study = load_study(studies_dir=studies_dir, 
+    study = load_study(studies_dir=studies_dir,
                        study_name=study_name)
     if study:
         return study.best_trial.params
     return None
 
 def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
-                      val: Tuple[np.ndarray, np.ndarray],
                       hyperparameters: dict,
-                      config: dict):
+                      config: dict,
+                      val: Tuple[np.ndarray, np.ndarray] = None):
     X_train, y_train = train
     n_features = X_train.shape[2]
     model = models.get_model(config=config,
@@ -290,7 +200,8 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                              output_dim=config['model']['output_dim'],
                              hyperparameters=hyperparameters)
     if config['model']['callbacks']:
-        callbacks = [keras.callbacks.ModelCheckpoint('models/best.keras', save_best_only=True)]
+        callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model_name"]}.keras', save_best_only=True)]
+    logging.info(f'Training: {config["model_name"]} model')
     history = model.fit(
         x = X_train,
         y = y_train,
@@ -299,6 +210,22 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
         verbose = config['model']['verbose'],
         validation_data = val,
         callbacks = callbacks if config['model']['callbacks'] else None,
-        shuffle = False
+        shuffle = True
     )
-    return history
+    return history, model
+
+def handle_freq(freq: str,
+                lag_dim: int,
+                horizon: int,
+                output_dim: int) -> Tuple[int, int]:
+    '''
+    Handle frequency and output dimension.
+    '''
+    if freq == '15min':
+        if not output_dim == 1:
+            output_dim = output_dim * 4
+        horizon = horizon * 4
+        lag_dim = lag_dim * 4
+    if not output_dim == 1:
+        horizon = output_dim
+    return output_dim, lag_dim, horizon

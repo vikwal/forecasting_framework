@@ -8,15 +8,16 @@ from datetime import datetime, timedelta
 from tensorflow import keras
 
 import utils
+import utils_eval
 
 
 def plot_training(history,
                   validation=False,
                   save_name=None):
-    loss = history.history['loss'] 
+    loss = history.history['loss']
     if validation:
-        val_loss = history.history['val_loss'] 
-    epochs = range(1, len(loss) + 1) 
+        val_loss = history.history['val_loss']
+    epochs = range(1, len(loss) + 1)
     plt.figure()
     plt.plot(epochs, loss, 'blue', label='Training loss')
     if validation:
@@ -41,45 +42,57 @@ def random_date(start_date: str,
 def plot_forecast(pred: pd.DataFrame,
                   true: pd.DataFrame,
                   date: str,
-                  t_0: int,
                   horizon: int,
                   figsize: Tuple[int, int],
+                  t_0=None,
                   print_metric=False,
                   grid=True):
     fig = plt.figure(figsize=figsize)
-    time_index = pd.to_datetime(f'{date} {t_0}:00:00')
-    if time_index not in pred.index or time_index not in true.index:
-      print('Der Zeitindex ist nicht in den Dataframes vorhanden.')
-      return
-    y_pred = pred.loc[time_index, f't+1':f't+{horizon}'].values
-    y_true = true.loc[time_index, f't+1':f't+{horizon}'].values
+    if t_0:
+        time_index = pd.to_datetime(f'{date} {t_0}:00:00')
+        y_pred = pred.loc[time_index].values
+        y_true = true.loc[time_index].values
+    else:
+        y_pred = pred.loc[date].values
+        y_true = true.loc[date].values
     if print_metric:
-        metrics = utils.get_metrics(y_pred=y_pred,
+        metrics = utils_eval.get_metrics(y_pred=y_pred,
                                     y_true=y_true)
         for key, value in metrics.items():
             print(f"{key}: {value[0]}")
     x_values = np.arange(1, len(y_pred) + 1, 1)
-    x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
+    #x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
     plt.plot(x_values, y_pred, label='Predicted')
     plt.plot(x_values, y_true, label='True')
-    if horizon > 35:
-        plt.axvline(x=13, color='r', linestyle='--')
-        plt.axvline(x=36, color='r', linestyle='--')
-        plt.axvspan(13, 36, color='gray', alpha=0.2)
-    xticks_positions = x_values[::2]
-    xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 2 == 0]
-    if len(xticks_positions) > len(xticks_labels):
-        xticks_positions = xticks_positions[:len(xticks_labels)]
-    elif len(xticks_labels) > len(xticks_positions):
-        xticks_labels = xticks_labels[:len(xticks_positions)]
+    # if horizon > 35:
+    #     plt.axvline(x=13, color='r', linestyle='--')
+    #     plt.axvline(x=36, color='r', linestyle='--')
+    #     plt.axvspan(13, 36, color='gray', alpha=0.2)
+    #xticks_positions = x_values[::2]
+    # xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 2 == 0]
+    # if len(xticks_positions) > len(xticks_labels):
+    #     xticks_positions = xticks_positions[:len(xticks_labels)]
+    # elif len(xticks_labels) > len(xticks_positions):
+    #     xticks_labels = xticks_labels[:len(xticks_positions)]
+    #plt.xticks(xticks_positions, xticks_labels)
+    x_values = np.arange(1, horizon + 1, 1)
+    if isinstance(t_0, int):  # Assuming hourly resolution
+        x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
+        xticks_positions = x_values[::6]  # Every third position
+        xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 6 == 0]  # Every third label
+    else:  # Assuming finer resolution, e.g., 15 minutes
+        time_resolution = pd.to_timedelta(t_0).seconds // 60  # Convert to minutes
+        x_ticks = [(time_resolution * i) % (24 * 60) for i in range(horizon)]
+        xticks_positions = x_values[::24]  # Every 3 hours (12 * 15 minutes = 180 minutes)
+        xticks_labels = [f"{x_ticks[i] // 60:02}:{x_ticks[i] % 60:02}" for i in range(len(x_ticks)) if i % 24 == 0]
     plt.xticks(xticks_positions, xticks_labels)
     plt.title(f'Forecast for {date}')
-    plt.xlabel('Hour')
-    plt.ylabel('Power [kW]')
+    plt.xlabel('Time')
+    plt.ylabel('Power')
     plt.legend()
     plt.grid(grid, linestyle='--', alpha=0.6)
     plt.show()
-    
+
 def plot_error(pred: pd.DataFrame,
                true: pd.DataFrame,
                t_0: int,
@@ -91,21 +104,32 @@ def plot_error(pred: pd.DataFrame,
     t_0_errors = error[(error.index.time == pd.to_datetime(f'{t_0}:00:00').time())]
     t_0_errors = t_0_errors.mean(axis=0).values
     x_values = np.arange(1, len(t_0_errors) + 1, 1)
-    x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
+    #x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
     plt.plot(x_values, t_0_errors)
-    if horizon > 35:
-        plt.axvline(x=13, color='r', linestyle='--')
-        plt.axvline(x=36, color='r', linestyle='--')
-        plt.axvspan(13, 36, color='gray', alpha=0.2)
-    xticks_positions = x_values[::2]  # Jedes zweite Element der Positionen
-    xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 2 == 0]  # Jedes zweite Label
+    # if horizon > 35:
+    #     plt.axvline(x=13, color='r', linestyle='--')
+    #     plt.axvline(x=36, color='r', linestyle='--')
+    #     plt.axvspan(13, 36, color='gray', alpha=0.2)
+    #xticks_positions = x_values[::2]  # Jedes zweite Element der Positionen
+    #xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 2 == 0]  # Jedes zweite Label
+    #plt.xticks(xticks_positions, xticks_labels)
+    x_values = np.arange(1, horizon + 1, 1)
+    if isinstance(t_0, int):  # Assuming hourly resolution
+        x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
+        xticks_positions = x_values[::6]  # Every third position
+        xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 6 == 0]  # Every third label
+    else:  # Assuming finer resolution, e.g., 15 minutes
+        time_resolution = pd.to_timedelta(t_0).seconds // 60  # Convert to minutes
+        x_ticks = [(time_resolution * i) % (24 * 60) for i in range(horizon)]
+        xticks_positions = x_values[::24]  # Every 3 hours (12 * 15 minutes = 180 minutes)
+        xticks_labels = [f"{x_ticks[i] // 60:02}:{x_ticks[i] % 60:02}" for i in range(len(x_ticks)) if i % 24 == 0]
     plt.xticks(xticks_positions, xticks_labels)
     plt.title('Mean error in forecasted hour')
     plt.ylabel('Error')
-    plt.xlabel('Hour')
+    plt.xlabel('Time')
     plt.grid(grid, linestyle='--', alpha=0.6)
     plt.show()
-    
+
 def plot_boxplots(pred: pd.DataFrame,
                  true: pd.DataFrame,
                  t_0: int,
@@ -127,20 +151,22 @@ def plot_boxplots(pred: pd.DataFrame,
     for median in boxplot_return['medians']:
         median.set(color='black')
     x_values = np.arange(1, horizon + 1, 1)
-    x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
-    if horizon > 35:
-        plt.axvline(x=13, color='r', linestyle='--')
-        plt.axvline(x=36, color='r', linestyle='--')
-        plt.axvspan(13, 36, color='gray', alpha=0.2)
-    xticks_positions = x_values[::2] 
-    xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 2 == 0]  
+    if isinstance(t_0, int):  # Assuming hourly resolution
+        x_ticks = [(t_0 + i) % 24 for i in range(horizon)]
+        xticks_positions = x_values[::6]  # Every third position
+        xticks_labels = [x_ticks[i] for i in range(len(x_ticks)) if i % 6 == 0]  # Every third label
+    else:  # Assuming finer resolution, e.g., 15 minutes
+        time_resolution = pd.to_timedelta(t_0).seconds // 60  # Convert to minutes
+        x_ticks = [(time_resolution * i) % (24 * 60) for i in range(horizon)]
+        xticks_positions = x_values[::24]  # Every 3 hours (12 * 15 minutes = 180 minutes)
+        xticks_labels = [f"{x_ticks[i] // 60:02}:{x_ticks[i] % 60:02}" for i in range(len(x_ticks)) if i % 24 == 0]
     plt.xticks(xticks_positions, xticks_labels)
     plt.title('Error in forecasted hour')
     plt.ylabel('Error')
-    plt.xlabel('Hour')
+    plt.xlabel('Time')
     plt.grid(grid, linestyle='--', alpha=0.6)
     plt.show()
-    
+
 def plot_error_distribution(pred: pd.DataFrame,
                             true: pd.DataFrame,
                             figsize: Tuple[int, int],
@@ -151,7 +177,7 @@ def plot_error_distribution(pred: pd.DataFrame,
     if t_0:
         errors = errors[(errors.index.time == pd.to_datetime(f'{t_0}:00:00').time())]
     errors = errors.values.flatten()
-    plt.figure(figsize=figsize) 
+    plt.figure(figsize=figsize)
     sns.histplot(data=errors, stat='probability', bins=bins)
     plt.xlabel("Error")
     plt.ylabel("Probability")
