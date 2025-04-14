@@ -1,5 +1,5 @@
 data:
-  path: '../../Daten'
+  path: '../Data'
   freq: '1h'
   train_frac: 0.75
   lag_dim: 48
@@ -9,11 +9,12 @@ data:
 
 hpo:
   studies_dir: 'studies'
+  metric: 'rmse'
   trials: 1000
   kfolds: 5
   val_split: 0.75
   batch_size: [16, 256]
-  epochs: [2, 100]
+  epochs: [1, 50]
   n_layers: [1, 4]
   n_cnn_layers: [1, 4]
   n_rnn_layers: [1, 4]
@@ -34,7 +35,7 @@ model:
   callbacks: False
   save_model: True
   shuffle: False
-  verbose: 1
+  verbose: 0
 
 eval:
   results_path: 'results'

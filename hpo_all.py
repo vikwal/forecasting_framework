@@ -25,6 +25,7 @@ logging.basicConfig(level=logging.DEBUG,
 
 
 def main() -> None:
+    utils.initialize_gpu(2)
     logger = logging.getLogger(__name__)
     # argument parser
     parser = argparse.ArgumentParser(description="Simulation with Tensorflow/Keras")
@@ -101,11 +102,12 @@ def main() -> None:
                                     n_splits=config['hpo']['kfolds'])
             for fold in kfolds:
                 train, val = fold
-                history = utils.training_pipeline(train=train,
+                history, _ = utils.training_pipeline(train=train,
                                                     val=val,
                                                     hyperparameters=hyperparameters,
                                                     config=config)
-                accuracies.append(history.history[config['model']['metrics']['rmse']][-1])
+                accuracies.append(history.history[config['hpo']['metric']][-1])
+                logging.info(f'Processed {len(accuracies)} folds.')
             average_accuracy = sum(accuracies) / len(accuracies)
             study.tell(trial, average_accuracy)
         else:
@@ -113,11 +115,11 @@ def main() -> None:
             X_train, y_train = X_train[:int(len(X_train)*val_split)], y_train[:int(len(y_train)*val_split)]
             train = X_train, y_train
             val = X_train[int(len(X_train)*val_split):], y_train[int(len(y_train)*val_split):]
-            history = utils.training_pipeline(train=train,
+            history, _ = utils.training_pipeline(train=train,
                                               val=val,
                                               hyperparameters=hyperparameters,
                                               config=config)
-            accuracy = history.history[config['model']['metrics']['rmse']][-1]
+            accuracy = history.history[config['hpo']['metric']][-1]
             study.tell(trial, accuracy)
 
 if __name__ == '__main__':

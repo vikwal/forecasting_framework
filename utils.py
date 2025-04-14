@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import r2_score
+import tensorflow as tf
 from tensorflow import keras
 import logging
 import optuna
@@ -169,7 +170,6 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                              hyperparameters=hyperparameters)
     if config['model']['callbacks']:
         callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model_name"]}.keras', save_best_only=True)]
-    logging.info(f'Training: {config["model_name"]} model')
     history = model.fit(
         x = X_train,
         y = y_train,
@@ -197,3 +197,12 @@ def handle_freq(freq: str,
     if not output_dim == 1:
         horizon = output_dim
     return output_dim, lag_dim, horizon
+
+def initialize_gpu(use_gpu: int = 0):
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        tf.config.experimental.set_visible_devices(gpus[use_gpu], 'GPU')
+    else:
+        print("No Physical GPUs found.")

@@ -316,9 +316,7 @@ def get_model(config: Dict[str, Any],
         raise ValueError(f"Unbekannter Modellname: '{model_name}'. Verfügbar: {list(MODEL_BUILDERS.keys())}")
 
     # Baue das Modell
-    print(f"Building model: {model_name}")
     model = builder(n_features, output_dim, hyperparameters)
-    print(f"Model {model_name} built successfully.")
     # model.summary() # Optional: Modellzusammenfassung ausgeben
 
     # Wähle den Optimizer
@@ -329,7 +327,6 @@ def get_model(config: Dict[str, Any],
         raise ValueError(f"Unbekannter Optimizer: '{optimizer_name}'. Verfügbar: {list(OPTIMIZERS.keys())}")
 
     optimizer = optimizer_class(learning_rate=learning_rate)
-    print(f"Using optimizer: {optimizer_name} with lr={learning_rate}")
 
     # Kompiliere das Modell
     loss = config.get('model', {}).get('loss', 'mse') # Default zu MSE
@@ -339,7 +336,6 @@ def get_model(config: Dict[str, Any],
     if isinstance(metrics, str):
         metrics = [metrics]
 
-    print(f"Compiling model with loss='{loss}' and metrics={metrics}")
     model.compile(optimizer=optimizer,
                   loss=loss,
                   metrics=metrics)
