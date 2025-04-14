@@ -43,9 +43,11 @@ def main() -> None:
                                                      output_dim=config['model']['output_dim'],
                                                      lag_dim=config['data']['lag_dim'],
                                                      horizon=config['data']['horizon'])
+    output_dim = 48
     config['model']['output_dim'] = output_dim
     config['data']['horizon'] = horizon
     config['data']['lag_dim'] = lag_dim
+    config['model']['shuffle'] = True
 
     conf_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     config['model_name'] = conf_name

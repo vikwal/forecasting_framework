@@ -88,10 +88,11 @@ def apply_scaling(df_train,
 
 def prepare_data(data: pd.DataFrame,
                  output_dim: int,
-                 train_frac=0.75,
-                 scale_x=True,
-                 scale_y=False,
-                 target_col='power'):
+                 train_frac: float = 0.75,
+                 scale_x: bool = True,
+                 scale_y: bool = False,
+                 target_col: str = 'power',
+                 seq2seq: bool = False):
     df = data.copy()
     df.dropna(inplace=True)
     target = df[[target_col]]
@@ -115,7 +116,6 @@ def prepare_data(data: pd.DataFrame,
                                                   StandardScaler)
         scaler[1] = scaler_y
     else:
-
         Y_train = target[:train_end]
         Y_test = target[test_start:]
     index_train = np.array([df[:train_end].index[i] for i in range(X_train.shape[0]-output_dim+1)])
@@ -124,14 +124,14 @@ def prepare_data(data: pd.DataFrame,
     X_test = make_windows(data=X_test, seq_len=output_dim)
     y_train = make_windows(data=Y_train, seq_len=output_dim).reshape(-1, output_dim)
     y_test = make_windows(data=Y_test, seq_len=output_dim).reshape(-1, output_dim)
+    if seq2seq:
+        y_train = y_train.reshape(-1, output_dim, 1)
+        y_test = y_test.reshape(-1, output_dim, 1)
     windows = {}
-    windows['X_train'] = X_train
-    windows['y_train'] = y_train
-    windows['X_test'] = X_test
-    windows['y_test'] = y_test
+    windows['X_train'], windows['y_train'] = X_train, y_train
+    windows['index_train'], windows['index_test'] = index_train, index_test
+    windows['X_test'], windows['y_test'] = X_test, y_test
     windows['scaler'] = scaler
-    windows['index_train'] = index_train
-    windows['index_test'] = index_test
     return windows
 
 def preprocess_pvod(path: str,

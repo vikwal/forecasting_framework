@@ -39,9 +39,11 @@ def main() -> None:
                                                      output_dim=config['model']['output_dim'],
                                                      lag_dim=config['data']['lag_dim'],
                                                      horizon=config['data']['horizon'])
+    output_dim = 1 # dont forget to delete
     config['model']['output_dim'] = output_dim
     config['data']['horizon'] = horizon
     config['data']['lag_dim'] = lag_dim
+    config['model']['shuffle'] = False
     # load and prepare training and test data
     dfs = preprocessing.get_data(data=args.data,
                                  data_dir=config['data']['path'],

@@ -11,6 +11,7 @@ hpo:
   studies_dir: 'studies'
   trials: 1000
   kfolds: 5
+  val_split: 0.75
   batch_size: [16, 256]
   epochs: [2, 100]
   n_layers: [1, 4]
@@ -26,12 +27,13 @@ hpo:
     units: [16, 128]
 
 model:
-  output_dim: 48
+  output_dim: 1
   optimizer: 'adam'
   loss: 'mse'
-  metrics: 'mae'
+  metrics: ['mae', 'rmse']
   callbacks: False
   save_model: True
+  shuffle: False
   verbose: 1
 
 eval:

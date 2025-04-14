@@ -47,8 +47,10 @@ def get_y(X_test: np.ndarray,
         y_pred = scaler_y.inverse_transform(model.predict(X_test))
         y_true = scaler_y.inverse_transform(y_test.reshape(-1, output_dim))
     else:
-        y_pred = model.predict(X_test)
-        y_true = y_test#.reshape(-1, output_dim)
+        y_pred = model.predict(X_test)#.reshape(-1, output_dim)
+        y_true = y_test.reshape(-1, output_dim)
+    if len(y_pred.shape) == 3: # if seq2seq output
+        y_pred = y_pred[:,:,-1] # take last output from seq
     y_pred[y_pred < 0] = 0
     return y_true, y_pred
 
@@ -114,36 +116,11 @@ def get_hyperparameters(model_name: str,
                         study=None) -> dict:
     hyperparameters = {}
     hyperparameters['model_name'] = model_name
-    if model_name == 'xgb':
-        hyperparameters['objective'] = config['model']['xgb']['objective']
-        hyperparameters['eval_metric'] = config['model']['xgb']['eval_metric']
-        booster = config['model']['xgb']['booster']
-        eta = config['model']['xgb']['eta']
-        max_depth = config['model']['xgb']['max_depth']
-        num_parallel_tree = config['model']['xgb']['num_parallel_tree']
-        subsample = config['model']['xgb']['subsample']
-        tree_method = config['model']['xgb']['tree_method']
-        num_local_round = config['model']['xgb']['num_local_round']
-        if hpo:
-            #hyperparameters['booster'] = trial.suggest_categorical('booster', booster)
-            hyperparameters['eta'] = trial.suggest_float('eta', eta[0], eta[1])
-            hyperparameters['max_depth'] = trial.suggest_int('max_depth', max_depth[0], max_depth[1])
-            hyperparameters['num_parallel_tree'] = trial.suggest_int('num_parallel_tree', num_parallel_tree[0], num_parallel_tree[1])
-            hyperparameters['subsample'] = trial.suggest_float('subsample', subsample[0], subsample[1])
-            hyperparameters['tree_method'] = trial.suggest_categorical('tree_method', tree_method)
-            hyperparameters['num_local_round'] = trial.suggest_int('num_local_round', num_local_round[0], num_local_round[1])
-            return hyperparameters
-        hyperparameters['booster'] = booster#[0]
-        hyperparameters['eta'] = eta[0]
-        hyperparameters['max_depth'] = max_depth[0]
-        hyperparameters['num_parallel_tree'] = num_parallel_tree[0]
-        hyperparameters['subsample'] = subsample[0]
-        hyperparameters['tree_method'] = tree_method[0]
-        hyperparameters['num_local_round'] = num_local_round[0]
-        return hyperparameters
     batch_size = config['hpo']['batch_size']
     epochs = config['hpo']['epochs']
     n_layers = config['hpo']['n_layers']
+    n_cnn_layers = config['hpo']['n_cnn_layers']
+    n_rnn_layers = config['hpo']['n_rnn_layers']
     learning_rate = config['hpo']['learning_rate']
     filters = config['hpo']['cnn']['filters']
     kernel_size = config['hpo']['cnn']['kernel_size']
@@ -152,32 +129,23 @@ def get_hyperparameters(model_name: str,
     if hpo:
         hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
         hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
-        hyperparameters['n_layers'] = trial.suggest_int('n_layers', n_layers[0], n_layers[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
-        if model_name == 'cnn' or model_name == 'tcn':
+        is_cnn_type = 'cnn' in model_name or 'tcn' in model_name
+        is_rnn_type = 'lstm' in model_name or 'gru' in model_name
+        is_fnn_type = model_name == 'fnn'
+        if is_cnn_type:
             hyperparameters['filters'] = trial.suggest_int('filters', filters[0], filters[1])
             hyperparameters['kernel_size'] = trial.suggest_int('kernel_size', kernel_size[0], kernel_size[1])
-        elif model_name == 'lstm' or model_name == 'bilstm':
+            hyperparameters['n_cnn_layers'] = trial.suggest_int('n_cnn_layers', n_cnn_layers[0], n_cnn_layers[1])
+        if is_rnn_type:
             hyperparameters['units'] = trial.suggest_int('units', rnn_units[0], rnn_units[1])
-        else:
+            hyperparameters['n_rnn_layers'] = trial.suggest_int('n_rnn_layers', n_rnn_layers[0], n_rnn_layers[1])
+        if is_fnn_type:
+            hyperparameters['n_layers'] = trial.suggest_int('n_layers', n_layers[0], n_layers[1])
             hyperparameters['units'] = trial.suggest_int('units', fnn_units[0], fnn_units[1])
     else:
-        if study:
-            trial = study.best_trial
-            for key, value in trial.params.items():
-                hyperparameters[key] =  value
-        else:
-            hyperparameters['batch_size'] = batch_size[0]
-            hyperparameters['epochs'] = epochs[0]
-            hyperparameters['n_layers'] = n_layers[0]
-            hyperparameters['lr'] = learning_rate[0]
-            if model_name == 'cnn' or model_name == 'tcn':
-                hyperparameters['filters'] = filters[0]
-                hyperparameters['kernel_size'] = kernel_size[0]
-            elif model_name == 'lstm' or model_name == 'bilstm':
-                hyperparameters['units'] = rnn_units
-            else:
-                hyperparameters['units'] = fnn_units[0]
+        if study and study.best_trial:
+            hyperparameters.update(study.best_trial)
     return hyperparameters
 
 def load_hyperparams(study_name: str,
@@ -210,7 +178,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
         verbose = config['model']['verbose'],
         validation_data = val,
         callbacks = callbacks if config['model']['callbacks'] else None,
-        shuffle = True
+        shuffle = config['model']['shuffle']
     )
     return history, model
 

@@ -8,12 +8,13 @@ __pycache__/
 # C extensions
 *.so
 
-# python envs and other directories 
+# python envs and other directories
 frcst/
 data/
 studies/
 results/
 models/
+Archiv/
 
 # Distribution / packaging
 .Python
