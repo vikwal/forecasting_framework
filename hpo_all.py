@@ -103,9 +103,9 @@ def main() -> None:
             for fold in kfolds:
                 train, val = fold
                 history, _ = utils.training_pipeline(train=train,
-                                                    val=val,
-                                                    hyperparameters=hyperparameters,
-                                                    config=config)
+                                                     val=val,
+                                                     hyperparameters=hyperparameters,
+                                                     config=config)
                 accuracies.append(history.history[config['hpo']['metric']][-1])
                 logging.info(f'Processed {len(accuracies)} folds.')
             average_accuracy = sum(accuracies) / len(accuracies)
