@@ -12,17 +12,12 @@ import logging
 
 import optuna
 
-import models
-import preprocessing
-import utils
+from utils import utils, preprocessing
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-def load_config(config_path):
-    with open(config_path, "r") as file:
-        return yaml.safe_load(file)
 
 def main() -> None:
     logger = logging.getLogger(__name__)
@@ -37,7 +32,7 @@ def main() -> None:
     os.makedirs('models', exist_ok=True)
     os.makedirs('studies', exist_ok=True)
     # read config
-    config = load_config('config.yaml')
+    config = utils.load_config('config.yaml')
     # decide on pv or wind
     if args.data == 'pv':
         data_path = config['data']['pv_path']

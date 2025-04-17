@@ -4,9 +4,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-import preprocessing
-import utils_eval
-import utils
+from utils import utils, eval, preprocessing
 
 
 def main() -> None:
@@ -46,9 +44,9 @@ def main() -> None:
         y_test = windows['y_test']
         index_test = windows['index_test']
         test_start = str(index_test[0].date())
-        y_pers = utils_eval.persistence(y=df['power'],
-                                        horizon=horizon,
-                                        from_date=test_start)
+        y_pers = eval.persistence(y=df['power'],
+                                horizon=horizon,
+                                from_date=test_start)
         y_pers = preprocessing.make_windows(data=y_pers,
                                             seq_len=output_dim)
         df_pers = utils.y_to_df(y=y_pers,
@@ -61,7 +59,7 @@ def main() -> None:
                                 horizon=horizon,
                                 index_test=index_test,
                                 t_0=None if config['eval']['eval_on_all_test_data'] else config['eval']['t_0'])
-        entry = utils_eval.get_metrics(y_pred=df_pers.values,
+        entry = eval.get_metrics(y_pred=df_pers.values,
                                          y_true=df_true.values)
         entry['key'] = [key]
         entry['output_dim'] = [output_dim]

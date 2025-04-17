@@ -1,23 +1,16 @@
 # Hyperparameter optimization for model which is trained on all parks data at once
 
 import os
-import yaml
 import json
 import argparse
-import pandas as pd
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
 from tqdm import tqdm
 import logging
 
 import optuna
 
-import models
-import preprocessing
-import utils
-import utils_eval
-import pickle
+from utils import utils, preprocessing
+
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.DEBUG,
@@ -25,7 +18,7 @@ logging.basicConfig(level=logging.DEBUG,
 
 
 def main() -> None:
-    utils.initialize_gpu(2)
+    #utils.initialize_gpu(2)
     logger = logging.getLogger(__name__)
     # argument parser
     parser = argparse.ArgumentParser(description="Simulation with Tensorflow/Keras")
@@ -40,15 +33,17 @@ def main() -> None:
     # read config
     config = utils.load_config('config.yaml')
     freq = config['data']['freq']
-    output_dim, lag_dim, horizon = utils.handle_freq(freq=freq,
+    config['model']['output_dim'] = 48
+    output_dim, lookback, horizon = utils.handle_freq(freq=freq,
                                                      output_dim=config['model']['output_dim'],
-                                                     lag_dim=config['data']['lag_dim'],
-                                                     horizon=config['data']['horizon'])
-    output_dim = 48
+                                                     lookback=config['model']['lookback'],
+                                                     horizon=config['model']['horizon'])
     config['model']['output_dim'] = output_dim
-    config['data']['horizon'] = horizon
-    config['data']['lag_dim'] = lag_dim
+    config['model']['horizon'] = horizon
+    config['model']['lookback'] = lookback
     config['model']['shuffle'] = True
+    # get observed, known and static features
+    known, observed, static = preprocessing.get_features(data='pvod')
 
     conf_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     config['model_name'] = conf_name
@@ -57,31 +52,26 @@ def main() -> None:
     dfs = preprocessing.get_data(data=args.data,
                                 data_dir=config['data']['path'],
                                 freq=freq)
-    X_train = None
+    kfolds = []
     for key, df in tqdm(dfs.items()):
-        df = utils.impute_index(data=df)
-        df = preprocessing.lag_features(df=df,
-                                            lag_dim=lag_dim,
-                                            horizon=horizon,
-                                            lag_in_col=config['data']['lag_in_col'])
-        windows = preprocessing.prepare_data(data=df,
-                                            output_dim=output_dim,
-                                            train_frac=config['data']['train_frac'],
-                                            scale_y=config['data']['scale_y'])
-        if X_train is None:
-            X_train, y_train = windows['X_train'], windows['y_train']
-        else:
-            X_train = np.concatenate((X_train, windows['X_train']))
-            y_train = np.concatenate((y_train, windows['y_train']))
-        scaler = windows['scaler']
-        scaler_x, scaler_y = scaler[0], scaler[1]
-    print(f'X_train.shape: {X_train.shape}', f'y_train.shape: {y_train.shape}')
+        prepared_data, df = preprocessing.pipeline(data=df,
+                                            model=args.model,
+                                            config=config,
+                                            known_cols=known,
+                                            observed_cols=observed,
+                                            static_cols=static)
+        scalers = prepared_data['scalers']
+        scaler_y = scalers['y']
+        new_kfolds = utils.kfolds(X=prepared_data['X_train'],
+                                  y=prepared_data['y_train'],
+                                  n_splits=config['hpo']['kfolds'] if args.kfolds else 1,
+                                  val_split=config['hpo']['val_split'])
+        kfolds.append(new_kfolds)
+
+    combined_kfolds = utils.combine_kfolds(n_splits=config['hpo']['kfolds'] if args.kfolds else 1,
+                                    kfolds_per_series=kfolds)
 
     len_trials = len(study.trials)
-    n_samples = X_train.shape[0]
-    shuffled_indices = np.random.permutation(n_samples)
-    X_train = X_train[shuffled_indices]
-    y_train = y_train[shuffled_indices]
     for i in tqdm(range(len_trials, config['hpo']['trials'])):
         combinations = [trial.params for trial in study.trials]
         trial = study.ask()
@@ -95,32 +85,17 @@ def main() -> None:
             study.tell(trial, state=optuna.trial.TrialState.PRUNED)
             continue
         logger.info(json.dumps(hyperparameters))
-        if args.kfolds:
-            accuracies = []
-            kfolds = utils.kfolds(X=X_train,
-                                    y=y_train,
-                                    n_splits=config['hpo']['kfolds'])
-            for fold in kfolds:
-                train, val = fold
-                history, _ = utils.training_pipeline(train=train,
-                                                     val=val,
-                                                     hyperparameters=hyperparameters,
-                                                     config=config)
-                accuracies.append(history.history[config['hpo']['metric']][-1])
-                logging.info(f'Processed {len(accuracies)} folds.')
-            average_accuracy = sum(accuracies) / len(accuracies)
-            study.tell(trial, average_accuracy)
-        else:
-            val_split = config['hpo']['val_split']
-            X_train, y_train = X_train[:int(len(X_train)*val_split)], y_train[:int(len(y_train)*val_split)]
-            train = X_train, y_train
-            val = X_train[int(len(X_train)*val_split):], y_train[int(len(y_train)*val_split):]
+        accuracies = []
+        for fold in combined_kfolds:
+            train, val = fold
             history, _ = utils.training_pipeline(train=train,
-                                              val=val,
-                                              hyperparameters=hyperparameters,
-                                              config=config)
-            accuracy = history.history[config['hpo']['metric']][-1]
-            study.tell(trial, accuracy)
+                                                 val=val,
+                                                 hyperparameters=hyperparameters,
+                                                 config=config)
+            accuracies.append(history.history[config['hpo']['metric']][-1])
+            logging.info(f'Processed {len(accuracies)} folds.')
+        average_accuracy = sum(accuracies) / len(accuracies)
+        study.tell(trial, average_accuracy)
 
 if __name__ == '__main__':
     main()

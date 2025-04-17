@@ -1,7 +1,7 @@
 # Train model on all parks sequentially
 
 import os
-import yaml
+import pickle
 import argparse
 import pandas as pd
 from tensorflow import keras
@@ -10,10 +10,8 @@ import logging
 
 import optuna
 
-import preprocessing
-import utils
-import utils_eval
-import pickle
+from utils import utils, eval, preprocessing
+
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.DEBUG,
@@ -35,15 +33,18 @@ def main() -> None:
     # read config
     config = utils.load_config('config.yaml')
     freq = config['data']['freq']
-    output_dim, lag_dim, horizon = utils.handle_freq(freq=freq,
+    config['model']['output_dim'] = 1
+    output_dim, lookback, horizon = utils.handle_freq(freq=freq,
                                                      output_dim=config['model']['output_dim'],
-                                                     lag_dim=config['data']['lag_dim'],
-                                                     horizon=config['data']['horizon'])
-    output_dim = 1 # dont forget to delete
+                                                     lookback=config['model']['lookback'],
+                                                     horizon=config['model']['horizon'])
     config['model']['output_dim'] = output_dim
-    config['data']['horizon'] = horizon
-    config['data']['lag_dim'] = lag_dim
+    config['model']['horizon'] = horizon
+    config['model']['lookback'] = lookback
     config['model']['shuffle'] = False
+    study_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
+    # get observed, known and static features
+    known, observed, static = preprocessing.get_features(data='pvod')
     # load and prepare training and test data
     dfs = preprocessing.get_data(data=args.data,
                                  data_dir=config['data']['path'],
@@ -52,25 +53,20 @@ def main() -> None:
     # create lag features
     evaluation = pd.DataFrame()
     for key, df in tqdm(dfs.items()):
-        df = utils.impute_index(data=df)
-        df = preprocessing.lag_features(df=df,
-                                              lag_dim=lag_dim,
-                                              horizon=horizon,
-                                              lag_in_col=config['data']['lag_in_col'])
-        windows = preprocessing.prepare_data(data=df,
-                                            output_dim=output_dim,
-                                            train_frac=config['data']['train_frac'],
-                                            scale_y=config['data']['scale_y'])
-        X_train, y_train, X_test, y_test = windows['X_train'], windows['y_train'], windows['X_test'], windows['y_test']
-        #X_train, y_train = X_train[:len(X_train)*0.75], y_train[:len(y_train)*0.75]
-        #X_val, y_val = X_train[len(X_train)*0.75:], y_train[len(y_train)*0.75:]
+        logging.info(f'Preprocessing pipeline for {key} started.')
+        prepared_data, df = preprocessing.pipeline(data=df,
+                                               model=args.model,
+                                               config=config,
+                                               known_cols=known,
+                                               observed_cols=observed,
+                                               static_cols=static)
+        X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
+        X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
         results[key] = {}  # Initialize the key in the results dictionary
-        #results[key]['test_data'] = (X_test, y_test)
-        index_train, index_test = windows['index_train'], windows['index_test']
-        scaler = windows['scaler']
-        scaler_x = scaler[0]
-        scaler_y = scaler[1]
-        study = None#utils.load_study('studies/', f'{args.data}_{args.model}')
+        index_test = prepared_data['index_test']
+        scalers = prepared_data['scalers']
+        scaler_y = scalers['y']
+        study = utils.load_study('studies/', study_name)
         hyperparameters = utils.get_hyperparameters(model_name=args.model,
                                                     config=config,
                                                     study=study)
@@ -85,11 +81,18 @@ def main() -> None:
         hyperparameters['lr'] = 0.0004
         hyperparameters['units'] = 64
 
+        hyperparameters['n_heads'] = 2
+        hyperparameters['lookback'] = lookback
+        hyperparameters['horizon'] = horizon
+        hyperparameters['hidden_dim'] = 60
+        hyperparameters['dropout'] = 0.1
+
         #logger.info(json.dumps(hyperparameters))
         train = X_train, y_train
         test = X_test, y_test #X_val, y_val
         id = key.split('.')[0][-2:]
         config['model_name'] = f'm-{args.model}_id-{id}_out-{output_dim}_freq-{freq}'
+        logging.info(f'Training pipeline for {key} started.')
         history, model = utils.training_pipeline(train=train,
                                                  val=test,
                                                  hyperparameters=hyperparameters,
@@ -97,8 +100,8 @@ def main() -> None:
         # save history and model
         results[key]['history'] = history
         results[key]['model'] = model
-
-        new_evaluation = utils_eval.evaluation_pipeline(data=df,
+        logging.info(f'Evaluation pipeline for {key} started.')
+        new_evaluation = eval.evaluation_pipeline(data=df,
                                                model=model,
                                                model_name=args.model,
                                                X_test=X_test,

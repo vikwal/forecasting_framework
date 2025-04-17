@@ -7,8 +7,7 @@ from typing import Tuple
 from datetime import datetime, timedelta
 from tensorflow import keras
 
-import utils
-import utils_eval
+from . import eval
 
 
 def plot_training(history,
@@ -56,7 +55,7 @@ def plot_forecast(pred: pd.DataFrame,
         y_pred = pred.loc[date].values
         y_true = true.loc[date].values
     if print_metric:
-        metrics = utils_eval.get_metrics(y_pred=y_pred,
+        metrics = eval.get_metrics(y_pred=y_pred,
                                     y_true=y_true)
         for key, value in metrics.items():
             print(f"{key}: {value[0]}")

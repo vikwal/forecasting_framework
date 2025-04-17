@@ -5,8 +5,8 @@ from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
 
-import utils
-import preprocessing
+from . import utils
+from . import preprocessing
 
 def persistence(y: pd.Series,
                 horizon: int,
@@ -70,7 +70,6 @@ def benchmark_models(data: pd.DataFrame,
                      target_col=target_col)
     y_pers = preprocessing.make_windows(data=y_pers,
                                         seq_len=output_dim)
-
     df_pers = utils.y_to_df(y=y_pers,
                       output_dim=output_dim,
                       horizon=horizon,
@@ -134,9 +133,6 @@ def evaluation_pipeline(data: pd.DataFrame,
                            output_dim=output_dim,
                            scaler_y=scaler_y,
                            model=model)
-    if len(y_pred.shape) == 3:
-        if y_pred.shape[1] == 1 & y_pred.shape[2] == 1:
-            y_pred = y_pred.reshape(y_pred.shape[0], y_pred.shape[2])
     df_pred = utils.y_to_df(y=y_pred,
                  output_dim=output_dim,
                  horizon=horizon,
@@ -151,7 +147,7 @@ def evaluation_pipeline(data: pd.DataFrame,
                         horizon=horizon,
                         from_date=str(index_test[0].date()))
     y_pers = preprocessing.make_windows(data=y_pers,
-                                        seq_len=output_dim)
+                                        seq_len=y_pred.shape[-1])
     df_pers = utils.y_to_df(y=y_pers,
                       output_dim=output_dim,
                       horizon=horizon,
