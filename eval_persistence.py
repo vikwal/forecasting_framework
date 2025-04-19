@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from utils import utils, eval, preprocessing
+from utils import tools
+from utils import eval, preprocessing
 
 
 def main() -> None:
@@ -16,9 +17,9 @@ def main() -> None:
     os.makedirs('models', exist_ok=True)
     os.makedirs('studies', exist_ok=True)
     # read config
-    config = utils.load_config('config.yaml')
+    config = tools.load_config('config.yaml')
     freq = config['data']['freq']
-    output_dim, lag_dim, horizon = utils.handle_freq(freq=freq,
+    output_dim, lag_dim, horizon = tools.handle_freq(freq=freq,
                                                      output_dim=config['model']['output_dim'],
                                                      lag_dim=config['data']['lag_dim'],
                                                      horizon=config['data']['horizon'])
@@ -32,7 +33,7 @@ def main() -> None:
     # create lag features
     evaluation = pd.DataFrame()
     for key, df in tqdm(dfs.items()):
-        df = utils.impute_index(data=df)
+        df = tools.impute_index(data=df)
         df = preprocessing.lag_features(df=df,
                                 lag_dim=lag_dim,
                                 horizon=horizon,
@@ -49,12 +50,12 @@ def main() -> None:
                                 from_date=test_start)
         y_pers = preprocessing.make_windows(data=y_pers,
                                             seq_len=output_dim)
-        df_pers = utils.y_to_df(y=y_pers,
+        df_pers = tools.y_to_df(y=y_pers,
                     output_dim=output_dim,
                     horizon=horizon,
                     index_test=index_test,
                     t_0=None if config['eval']['eval_on_all_test_data'] else config['eval']['t_0'])
-        df_true = utils.y_to_df(y=y_test,
+        df_true = tools.y_to_df(y=y_test,
                                 output_dim=output_dim,
                                 horizon=horizon,
                                 index_test=index_test,

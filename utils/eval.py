@@ -5,7 +5,7 @@ from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
 
-from . import utils
+from . import tools
 from . import preprocessing
 
 def persistence(y: pd.Series,
@@ -57,7 +57,7 @@ def benchmark_models(data: pd.DataFrame,
                         from_date=test_start)
     y_pers = preprocessing.make_windows(data=y_pers,
                                         seq_len=output_dim)
-    df_pers = utils.y_to_df(y=y_pers,
+    df_pers = tools.y_to_df(y=y_pers,
                       output_dim=output_dim,
                       horizon=horizon,
                       index_test=index_test,
@@ -70,7 +70,7 @@ def benchmark_models(data: pd.DataFrame,
                      target_col=target_col)
     y_pers = preprocessing.make_windows(data=y_pers,
                                         seq_len=output_dim)
-    df_pers = utils.y_to_df(y=y_pers,
+    df_pers = tools.y_to_df(y=y_pers,
                       output_dim=output_dim,
                       horizon=horizon,
                       index_test=index_test,
@@ -128,17 +128,17 @@ def evaluation_pipeline(data: pd.DataFrame,
                         t_0: int,
                         target_col='power',
                         evaluate_on_all_test_data=True) -> pd.DataFrame:
-    y_true, y_pred = utils.get_y(X_test=X_test,
+    y_true, y_pred = tools.get_y(X_test=X_test,
                            y_test=y_test,
                            output_dim=output_dim,
                            scaler_y=scaler_y,
                            model=model)
-    df_pred = utils.y_to_df(y=y_pred,
+    df_pred = tools.y_to_df(y=y_pred,
                  output_dim=output_dim,
                  horizon=horizon,
                  index_test=index_test,
                  t_0=None if evaluate_on_all_test_data else t_0)
-    df_true = utils.y_to_df(y=y_true,
+    df_true = tools.y_to_df(y=y_true,
                       output_dim=output_dim,
                       horizon=horizon,
                       index_test=index_test,
@@ -148,7 +148,7 @@ def evaluation_pipeline(data: pd.DataFrame,
                         from_date=str(index_test[0].date()))
     y_pers = preprocessing.make_windows(data=y_pers,
                                         seq_len=y_pred.shape[-1])
-    df_pers = utils.y_to_df(y=y_pers,
+    df_pers = tools.y_to_df(y=y_pers,
                       output_dim=output_dim,
                       horizon=horizon,
                       index_test=index_test,

@@ -7,7 +7,6 @@ from typing import List, Tuple, Dict, Any
 
 
 def pipeline(data: pd.DataFrame,
-             model: str,
              config: Dict[str, Any],
              known_cols: List[str] = None,
              observed_cols: List[str] = None,
@@ -15,7 +14,7 @@ def pipeline(data: pd.DataFrame,
              df_static: pd.DataFrame = pd.DataFrame()) -> Tuple[Dict, pd.DataFrame]:
     df = data.copy()
     df = impute_index(data=df)
-    if model == 'tft':
+    if config['model']['name'] == 'tft':
         df = lag_features(data=df,
                           lookback=config['model']['lookback'],
                           horizon=config['model']['horizon'],
@@ -128,7 +127,10 @@ def apply_scaling(df_train,
         df_test = df_test.values.reshape(-1, 1)
     # Important: Fit scaler ONLY on training data!
     scaled_train = scaler.fit_transform(df_train)
-    scaled_test = scaler.transform(df_test) # Use fitted scaler to transform test data
+    if len(df_test) == 0:
+        scaled_test = df_test
+    else:
+        scaled_test = scaler.transform(df_test) # Use fitted scaler to transform test data
     return scaled_train, scaled_test, scaler
 
 def prepare_data(data: pd.DataFrame,
@@ -299,6 +301,10 @@ def prepare_data_for_tft(data: pd.DataFrame,
         'static_input': X_static_test # Static Testdaten hinzufügen
     }
     results['X_train'], results['X_test'] = X_train, X_test
+    static_is_zero = X_train['static_input'].shape[-1] == 0
+    if static_is_zero:
+        del X_train['static_input']
+        del X_test['static_input']
     return results
 
 def get_static_features(data: pd.DataFrame,

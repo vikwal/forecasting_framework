@@ -2,9 +2,39 @@ data:
   path: '../../Data'
   freq: '1h'
   train_frac: 0.75
-  val_frac: 0.75 # from train_frac
+  val_frac: 0.25 # from train_frac
   scale_y: False
   lag_in_col: False
+
+model:
+  output_dim: 1
+  lookback: 48
+  horizon: 48
+  batch_size: 16
+  epochs: 20
+  lr: 0.0004
+  optimizer: 'adam'
+  loss: 'mse'
+  metrics: ['mae', 'rmse']
+  fnn:
+    units: 128
+    n_layers: 2
+  cnn:
+    filters: 64
+    kernel_size: 2
+    n_cnn_layers: 2
+  rnn:
+    n_rnn_layers: 2
+    units: 64
+    dropout: 0.1
+  tft:
+    n_heads: 2
+    hidden_dim: 60
+    dropout: 0.1
+  callbacks: False
+  save_model: True
+  shuffle: False
+  verbose: 1
 
 hpo:
   studies_dir: 'studies'
@@ -31,19 +61,14 @@ hpo:
     hidden_dim: [8, 128]
     dropout: [0.0, 0.5]
 
-model:
-  output_dim: 1
-  lookback: 48
-  horizon: 48
-  optimizer: 'adam'
-  loss: 'mse'
-  metrics: ['mae', 'rmse']
-  callbacks: False
-  save_model: True
-  shuffle: False
-  verbose: 1
-
 eval:
   results_path: 'results'
   eval_on_all_test_data: False
   t_0: 12
+
+fl:
+  parts: []
+  n_rounds: 2
+  n_clients: 9
+  verbose: True
+  save_history: True

@@ -8,7 +8,6 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import r2_score
 import tensorflow as tf
 from tensorflow import keras
-import logging
 import optuna
 
 from . import models
@@ -55,6 +54,7 @@ def y_to_df(y: np.ndarray,
             new_cols_df = pd.DataFrame(new_columns_dict, index=df.index)
             df = pd.concat([df, new_cols_df], axis=1)
         df.dropna(inplace=True)
+
     if t_0:
         df = df.loc[(df.index.time == pd.to_datetime(f'{t_0}:00:00').time())]
     return df
@@ -83,23 +83,34 @@ def load_study(studies_dir: str,
         study = None
     return study
 
+def split_val(X: Any,
+              y: np.ndarray,
+              val_split):
+    if val_split == 0:
+        return X, y, None, None
+    val_index = int(len(y)*(1-val_split))
+    # case for tft
+    if type(X) == dict:
+        X_train, X_val = {}, {}
+        for key, value in X.items():
+            if len(value) == 0:
+                continue
+            X_train[key] = value[:val_index]
+            X_val[key] = value[val_index:]
+    else:
+        X_train = X[:val_index]
+        X_val = X[val_index:]
+    y_train = y[:val_index]
+    y_val = y[val_index:]
+    return X_train, y_train, X_val, y_val
+
 def kfolds(X: Any,
            y: np.ndarray,
            n_splits: int,
            val_split: float = None) -> List:
     kfolds = []
     if n_splits == 1: # if not kfolds
-        val_index = int(len(y)*val_split)
-        if type(X) == dict:
-            X_train, X_val = {}, {}
-            for key, value in X.items():
-                X_train[key] = value[:val_index]
-                X_val[key] = value[val_index:]
-        else:
-            X_train = X[:val_index]
-            X_val = X[val_index:]
-        y_train = y[:val_index]
-        y_val = y[val_index:]
+        X_train, y_train, X_val, y_val = split_val(X=X, y=y, val_split=val_split)
         kfolds.append(((X_train, y_train), (X_val, y_val)))
         return kfolds
     tscv = TimeSeriesSplit(n_splits=n_splits)
@@ -119,13 +130,12 @@ def kfolds(X: Any,
 
 
 
-def get_hyperparameters(model_name: str,
-                        config: dict,
+def get_hyperparameters(config: dict,
                         hpo=False,
                         trial=None,
                         study=None) -> dict:
     hyperparameters = {}
-    hyperparameters['model_name'] = model_name
+    model_name = config['model']['name']
     batch_size = config['hpo']['batch_size']
     epochs = config['hpo']['epochs']
     n_layers = config['hpo']['n_layers']
@@ -141,14 +151,14 @@ def get_hyperparameters(model_name: str,
     dropout = config['hpo']['tft']['dropout']
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
+    is_cnn_type = 'cnn' in model_name or 'tcn' in model_name
+    is_rnn_type = 'lstm' in model_name or 'gru' in model_name
+    is_fnn_type = model_name == 'fnn'
+    is_tft_type = model_name == 'tft'
     if hpo:
         hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
         hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
-        is_cnn_type = 'cnn' in model_name or 'tcn' in model_name
-        is_rnn_type = 'lstm' in model_name or 'gru' in model_name
-        is_fnn_type = model_name == 'fnn'
-        is_tft_type = model_name == 'tft'
         if is_cnn_type:
             hyperparameters['filters'] = trial.suggest_int('filters', filters[0], filters[1])
             hyperparameters['kernel_size'] = trial.suggest_int('kernel_size', kernel_size[0], kernel_size[1])
@@ -168,6 +178,26 @@ def get_hyperparameters(model_name: str,
     else:
         if study and study.best_trial:
             hyperparameters.update(study.best_trial)
+        else:
+            hyperparameters['batch_size'] = config['model']['batch_size']
+            hyperparameters['epochs'] = config['model']['epochs']
+            hyperparameters['lr'] = config['model']['lr']
+            if is_cnn_type:
+                hyperparameters['filters'] = config['model']['cnn']['filters']
+                hyperparameters['kernel_size'] = config['model']['cnn']['kernel_size']
+                hyperparameters['n_cnn_layers'] = config['model']['cnn']['n_cnn_layers']
+            if is_rnn_type:
+                hyperparameters['units'] = config['model']['rnn']['units']
+                hyperparameters['n_rnn_layers'] = config['model']['rnn']['n_rnn_layers']
+            if is_fnn_type:
+                hyperparameters['n_layers'] = config['model']['fnn']['n_layers']
+                hyperparameters['units'] = config['model']['fnn']['units']
+            if is_tft_type:
+                hyperparameters['horizon'] = config['model']['tft']['horizon']
+                hyperparameters['lookback'] = config['model']['tft']['lookback']
+                hyperparameters['n_heads'] = config['model']['tft']['n_heads']
+                hyperparameters['hidden_dim'] = config['model']['tft']['hidden_dim']
+                hyperparameters['dropout'] = config['model']['tft']['dropout']
     return hyperparameters
 
 def load_hyperparams(study_name: str,
@@ -179,33 +209,28 @@ def load_hyperparams(study_name: str,
         return study.best_trial.params
     return None
 
+def get_feature_dim(X: Any):
+    if type(X) == np.ndarray:
+        feature_dim = X.shape[2]
+    # relevant for tft
+    elif (len(X) <= 3):
+        feature_dim = {}
+        feature_dim['observed_dim'] = X['observed_input'].shape[-1]
+        feature_dim['known_dim'] = X['known_input'].shape[-1]
+        feature_dim['static_dim'] = X['static_input'].shape[-1] if 'static_input' in X else 0
+    return feature_dim
+
 def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                       hyperparameters: dict,
                       config: dict,
                       val: Tuple[np.ndarray, np.ndarray] = None):
     X_train, y_train = train
     if val: X_val, y_val = val
-    if type(X_train) == np.ndarray:
-        feature_dim = X_train.shape[2]
-    # relevant for tft
-    if (len(X_train) <= 3):
-        feature_dim = {}
-        feature_dim['observed_dim'] = X_train['observed_input'].shape[-1]
-        feature_dim['known_dim'] = X_train['known_input'].shape[-1]
-        feature_dim['static_dim'] = 0
-    if len(X_train) == 3:
-        feature_dim['static_dim'] = X_train['static_input'].shape[-1]
-        if feature_dim['static_dim'] == 0:
-            del X_train['static_input']
-            if val is not None:
-                del X_val['static_input']
-
+    config['model']['feature_dim'] = get_feature_dim(X=X_train)
     model = models.get_model(config=config,
-                             feature_dim=feature_dim,
-                             output_dim=config['model']['output_dim'],
                              hyperparameters=hyperparameters)
     if config['model']['callbacks']:
-        callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model_name"]}.keras', save_best_only=True)]
+        callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model"]["name"]}.keras', save_best_only=True)]
     history = model.fit(
         x = X_train,
         y = y_train,
@@ -218,13 +243,14 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     )
     return history, model
 
-def handle_freq(freq: str,
-                lookback: int,
-                horizon: int,
-                output_dim: int) -> Tuple[int, int]:
+def handle_freq(config: Dict[str, Any]) -> Tuple[int, int, int]:
     '''
-    Handle frequency and output dimension.
+    Adjust config output_dim, horizon and lookback in dependency of time series resolution (freq).
     '''
+    freq = config['data']['freq']
+    lookback = config['model']['lookback']
+    horizon = config['model']['horizon']
+    output_dim = config['model']['output_dim']
     if freq == '15min':
         if not output_dim == 1:
             output_dim = output_dim * 4
@@ -232,7 +258,11 @@ def handle_freq(freq: str,
         lookback = lookback * 4
     if not output_dim == 1:
         horizon = output_dim
-    return output_dim, lookback, horizon
+    config['data']['freq'] = freq
+    config['model']['lookback'] = lookback
+    config['model']['horizon'] = horizon
+    config['model']['output_dim'] = output_dim
+    return config
 
 def concatenate_data(old, new):
     if type(old) == np.ndarray:
@@ -242,7 +272,7 @@ def concatenate_data(old, new):
         known_new = np.concatenate((old['known_input'], new['known_input']))
         static_new = np.concatenate((old['static_input'], new['static_input']))
         new = {
-             'observed_input': obs_new,
+            'observed_input': obs_new,
             'known_input': known_new,
             'static_input': static_new}
         return new

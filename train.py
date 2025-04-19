@@ -8,13 +8,14 @@ from tensorflow import keras
 from tqdm import tqdm
 import logging
 
+from utils import tools
 import optuna
 
-from utils import utils, eval, preprocessing
+from utils import eval, preprocessing
 
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
-logging.basicConfig(level=logging.DEBUG,
+logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 
@@ -30,21 +31,18 @@ def main() -> None:
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
     os.makedirs('studies', exist_ok=True)
-    # read config
-    config = utils.load_config('config.yaml')
+    # read config and initialize variables
+    config = tools.load_config('config.yaml')
     freq = config['data']['freq']
     config['model']['output_dim'] = 1
-    output_dim, lookback, horizon = utils.handle_freq(freq=freq,
-                                                     output_dim=config['model']['output_dim'],
-                                                     lookback=config['model']['lookback'],
-                                                     horizon=config['model']['horizon'])
-    config['model']['output_dim'] = output_dim
-    config['model']['horizon'] = horizon
-    config['model']['lookback'] = lookback
+    config = tools.handle_freq(config=config)
+    output_dim = config['model']['output_dim']
+    lookback = config['model']['lookback']
+    horizon = config['model']['horizon']
     config['model']['shuffle'] = False
     study_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     # get observed, known and static features
-    known, observed, static = preprocessing.get_features(data='pvod')
+    known, observed, static = preprocessing.get_features(data=args.data)
     # load and prepare training and test data
     dfs = preprocessing.get_data(data=args.data,
                                  data_dir=config['data']['path'],
@@ -55,7 +53,6 @@ def main() -> None:
     for key, df in tqdm(dfs.items()):
         logging.info(f'Preprocessing pipeline for {key} started.')
         prepared_data, df = preprocessing.pipeline(data=df,
-                                               model=args.model,
                                                config=config,
                                                known_cols=known,
                                                observed_cols=observed,
@@ -66,26 +63,9 @@ def main() -> None:
         index_test = prepared_data['index_test']
         scalers = prepared_data['scalers']
         scaler_y = scalers['y']
-        study = utils.load_study('studies/', study_name)
-        hyperparameters = utils.get_hyperparameters(model_name=args.model,
-                                                    config=config,
+        study = tools.load_study('studies/', study_name)
+        hyperparameters = tools.get_hyperparameters(config=config,
                                                     study=study)
-        # set hyperparameters manually
-        hyperparameters['batch_size'] = 16
-        hyperparameters['epochs'] = 20
-        hyperparameters['filters'] = 64
-        hyperparameters['kernel_size'] = 2
-        hyperparameters['n_layers'] = 2
-        hyperparameters['n_cnn_layers'] = 2
-        hyperparameters['n_rnn_layers'] = 2
-        hyperparameters['lr'] = 0.0004
-        hyperparameters['units'] = 64
-
-        hyperparameters['n_heads'] = 2
-        hyperparameters['lookback'] = lookback
-        hyperparameters['horizon'] = horizon
-        hyperparameters['hidden_dim'] = 60
-        hyperparameters['dropout'] = 0.1
 
         #logger.info(json.dumps(hyperparameters))
         train = X_train, y_train
@@ -93,7 +73,7 @@ def main() -> None:
         id = key.split('.')[0][-2:]
         config['model_name'] = f'm-{args.model}_id-{id}_out-{output_dim}_freq-{freq}'
         logging.info(f'Training pipeline for {key} started.')
-        history, model = utils.training_pipeline(train=train,
+        history, model = tools.training_pipeline(train=train,
                                                  val=test,
                                                  hyperparameters=hyperparameters,
                                                  config=config)

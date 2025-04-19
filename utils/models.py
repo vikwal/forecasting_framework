@@ -549,26 +549,24 @@ def get_metrics(config: dict) -> list:
     return metrics
 
 def get_model(config: Dict[str, Any],
-              feature_dim: Any, # Integer or Dict
-              output_dim: int,
               hyperparameters: Dict[str, Any]) -> Model:
     """
     Erstellt und kompiliert ein Keras-Modell basierend auf der Konfiguration
     und den Hyperparametern.
     """
-    model_name = hyperparameters.get('model_name')
+    model_name = config.get('model').get('name')
     if not model_name:
-        raise ValueError("Hyperparameter 'model_name' ist erforderlich.")
+        raise ValueError("Hyperparameter 'model_name' erforderlich.")
 
     builder = MODEL_BUILDERS.get(model_name)
     if not builder:
         raise ValueError(f"Unbekannter Modellname: '{model_name}'. Verfügbar: {list(MODEL_BUILDERS.keys())}")
 
-    # Baue das Modell
+    output_dim = config['model']['output_dim']
+    feature_dim = config['model']['feature_dim']
     model = builder(feature_dim, output_dim, hyperparameters)
-    # model.summary() # Optional: Modellzusammenfassung ausgeben
 
-    # Wähle den Optimizer
+    # optimizer
     optimizer_name = config.get('model', {}).get('optimizer', 'adam') # Default zu Adam
     learning_rate = hyperparameters.get('lr', 0.001) # Default Learning Rate
     optimizer_class = OPTIMIZERS.get(optimizer_name)

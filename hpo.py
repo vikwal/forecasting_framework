@@ -10,9 +10,10 @@ import tensorflow as tf
 from tensorflow import keras
 import logging
 
+from utils import tools
 import optuna
 
-from utils import utils, preprocessing
+from utils import preprocessing
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.DEBUG,
@@ -32,7 +33,7 @@ def main() -> None:
     os.makedirs('models', exist_ok=True)
     os.makedirs('studies', exist_ok=True)
     # read config
-    config = utils.load_config('config.yaml')
+    config = tool.load_config('config.yaml')
     # decide on pv or wind
     if args.data == 'pv':
         data_path = config['data']['pv_path']
@@ -68,12 +69,12 @@ def main() -> None:
     scaler_y = None
     if config['data']['scale_y']:
         scaler_y = windows[6]
-    study = utils.create_or_load_study('studies/', f'{args.data}_{args.model}', direction='minimize')
+    study = tool.create_or_load_study('studies/', f'{args.data}_{args.model}', direction='minimize')
     len_trials = len(study.trials)
     for i in range(len_trials, config['hpo']['trials']):
         combinations = [trial.params for trial in study.trials]
         trial = study.ask()
-        hyperparameters = utils.get_hyperparameters(model_name=args.model,
+        hyperparameters = tool.get_hyperparameters(model_name=args.model,
                                                     config=config,
                                                     hpo=True,
                                                     trial=trial)
@@ -85,12 +86,12 @@ def main() -> None:
         logger.info(json.dumps(hyperparameters))
         if args.kfolds:
             accuracies = []
-            kfolds = utils.kfolds(X=X_train,
+            kfolds = tools.kfolds(X=X_train,
                                     y=y_train,
                                     n_splits=config['hpo']['kfolds'])
             for fold in kfolds:
                 train, val = fold
-                history = utils.training_pipeline(train=train,
+                history = tools.training_pipeline(train=train,
                                                     val=val,
                                                     hyperparameters=hyperparameters,
                                                     config=config)
@@ -108,7 +109,7 @@ def main() -> None:
             X_train, y_train, X_val, y_val = windows[0], windows[1], windows[2], windows[3]
             train = X_train, y_train
             val = X_val, y_val
-            history = utils.training_pipeline(train=train,
+            history = tools.training_pipeline(train=train,
                                                 val=val,
                                                 hyperparameters=hyperparameters,
                                                 config=config)

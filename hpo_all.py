@@ -7,9 +7,10 @@ import numpy as np
 from tqdm import tqdm
 import logging
 
+from utils import tools
 import optuna
 
-from utils import utils, preprocessing
+from utils import preprocessing
 
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
@@ -31,23 +32,18 @@ def main() -> None:
     os.makedirs('models', exist_ok=True)
     os.makedirs('studies', exist_ok=True)
     # read config
-    config = utils.load_config('config.yaml')
+    config = tools.load_config('config.yaml')
     freq = config['data']['freq']
     config['model']['output_dim'] = 48
-    output_dim, lookback, horizon = utils.handle_freq(freq=freq,
-                                                     output_dim=config['model']['output_dim'],
-                                                     lookback=config['model']['lookback'],
-                                                     horizon=config['model']['horizon'])
-    config['model']['output_dim'] = output_dim
-    config['model']['horizon'] = horizon
-    config['model']['lookback'] = lookback
+    config = tools.handle_freq(config=config)
+    output_dim = config['output_dim']['freq']
     config['model']['shuffle'] = True
     # get observed, known and static features
-    known, observed, static = preprocessing.get_features(data='pvod')
+    known, observed, static = preprocessing.get_features(data=args.data)
 
     conf_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     config['model_name'] = conf_name
-    study = utils.create_or_load_study('studies/', conf_name, direction='minimize')
+    study = tools.create_or_load_study('studies/', conf_name, direction='minimize')
     # load and prepare training and test data
     dfs = preprocessing.get_data(data=args.data,
                                 data_dir=config['data']['path'],
@@ -62,20 +58,20 @@ def main() -> None:
                                             static_cols=static)
         scalers = prepared_data['scalers']
         scaler_y = scalers['y']
-        new_kfolds = utils.kfolds(X=prepared_data['X_train'],
+        new_kfolds = tools.kfolds(X=prepared_data['X_train'],
                                   y=prepared_data['y_train'],
                                   n_splits=config['hpo']['kfolds'] if args.kfolds else 1,
                                   val_split=config['hpo']['val_split'])
         kfolds.append(new_kfolds)
 
-    combined_kfolds = utils.combine_kfolds(n_splits=config['hpo']['kfolds'] if args.kfolds else 1,
+    combined_kfolds = tools.combine_kfolds(n_splits=config['hpo']['kfolds'] if args.kfolds else 1,
                                     kfolds_per_series=kfolds)
 
     len_trials = len(study.trials)
     for i in tqdm(range(len_trials, config['hpo']['trials'])):
         combinations = [trial.params for trial in study.trials]
         trial = study.ask()
-        hyperparameters = utils.get_hyperparameters(model_name=args.model,
+        hyperparameters = tools.get_hyperparameters(model_name=args.model,
                                                     config=config,
                                                     hpo=True,
                                                     trial=trial)
@@ -88,7 +84,7 @@ def main() -> None:
         accuracies = []
         for fold in combined_kfolds:
             train, val = fold
-            history, _ = utils.training_pipeline(train=train,
+            history, _ = tools.training_pipeline(train=train,
                                                  val=val,
                                                  hyperparameters=hyperparameters,
                                                  config=config)
