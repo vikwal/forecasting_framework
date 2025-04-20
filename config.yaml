@@ -1,7 +1,7 @@
 data:
   path: '../../Data'
   freq: '1h'
-  train_frac: 0.75
+  train_frac: 0.5
   val_frac: 0.25 # from train_frac
   scale_y: False
   lag_in_col: False
@@ -63,7 +63,8 @@ hpo:
 
 eval:
   results_path: 'results'
-  eval_on_all_test_data: False
+  eval_on_all_test_data: True
+  retrain_interval: 24 # in hours - 0 if no retraining is wanted
   t_0: 12
 
 fl:

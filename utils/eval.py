@@ -161,3 +161,70 @@ def evaluation_pipeline(data: pd.DataFrame,
                                  main_model_name=model_name,
                                  drop_except_main=True)
     return evaluation
+
+def evaluate_retrain(config,
+                     data,
+                     index_test,
+                     model,
+                     hyperparameters,
+                     cols,
+                     scaler_y=None,
+                     target_col='power'):
+    t_0 = None if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+    retrain_interval = config['eval']['retrain_interval']
+    output_dim = config['model']['output_dim']
+    horizon = config['model']['horizon']
+    freq = config['data']['freq']
+    known, observed, static = cols
+    if freq == '15min':
+        retrain_interval /= 4
+    full_days = len(index_test) // retrain_interval - 1
+    y_true, y_pred, y_pers, index = None, None, None, None
+    for day in range(full_days):
+        from_index = day * retrain_interval
+        to_index = day * retrain_interval + horizon
+        index_day = index_test[from_index:to_index]
+        prepared_data, df = preprocessing.pipeline(data=data,
+                                                   config=config,
+                                                   known_cols=known,
+                                                   observed_cols=observed,
+                                                   static_cols=static,
+                                                   test_start=index_day[0])
+        X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
+        X_test, y_test = prepared_data['X_train'], prepared_data['y_train']
+        X_test, y_test = X_test[:horizon], y_test[:horizon]
+        y_true_new, y_pred_new = tools.get_y(X_test=X_test,
+                                             y_test=y_test,
+                                             output_dim=output_dim,
+                                             model=model,
+                                             scaler_y=scaler_y)
+        y_pers_raw = persistence(y=df[target_col],
+                                 horizon=horizon,
+                                 from_date=str(index_test[0].date()))
+        y_pers_new = preprocessing.make_windows(y_pers_raw[index_day], 1)
+        if y_pred is None:
+            y_true, y_pred, y_pers, index = y_true_new, y_pred_new, y_pers_new, index_day
+        else:
+            y_true = np.concatenate((y_true, y_true_new))
+            y_pred = np.concatenate((y_pred, y_pred_new))
+            y_pers = np.concatenate((y_pers, y_pers_new))
+            index = np.concatenate((index, index_day))
+        model.fit(
+            x = X_train,
+            y = y_train,
+            batch_size = hyperparameters['batch_size'],
+            epochs = 2,#hyperparameters['epochs'],
+            verbose = config['model']['verbose'],
+            shuffle = config['model']['shuffle']
+        )
+    df_pred = tools.y_to_df(y_pred, output_dim, horizon, index, t_0)
+    df_pers = tools.y_to_df(y_pers, output_dim, horizon, index, t_0)
+    df_true = tools.y_to_df(y_true, output_dim, horizon, index, t_0)
+    pers = {}
+    pers['Persistence'] = df_pers
+    evaluation = evaluate_models(pred=df_pred,
+                                 true=df_true,
+                                 persistence=pers,
+                                 main_model_name=config['model']['name'],
+                                 drop_except_main=True)
+    return evaluation

@@ -11,9 +11,11 @@ def pipeline(data: pd.DataFrame,
              known_cols: List[str] = None,
              observed_cols: List[str] = None,
              static_cols: List[str] = None,
-             df_static: pd.DataFrame = pd.DataFrame()) -> Tuple[Dict, pd.DataFrame]:
+             df_static: pd.DataFrame = pd.DataFrame(),
+             test_start: pd.Timestamp = None) -> Tuple[Dict, pd.DataFrame]:
     df = data.copy()
     df = impute_index(data=df)
+    t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
     if config['model']['name'] == 'tft':
         df = lag_features(data=df,
                           lookback=config['model']['lookback'],
@@ -37,7 +39,9 @@ def pipeline(data: pd.DataFrame,
         prepared_data = prepare_data(data=df,
                                      output_dim=config['model']['output_dim'],
                                      train_frac=config['data']['train_frac'],
-                                     scale_y=config['data']['scale_y'])
+                                     scale_y=config['data']['scale_y'],
+                                     t_0=t_0,
+                                     test_start=test_start)
     return prepared_data, df
 
 
@@ -139,15 +143,20 @@ def prepare_data(data: pd.DataFrame,
                  scale_x: bool = True,
                  scale_y: bool = False,
                  target_col: str = 'power',
+                 t_0: int = 0,
+                 test_start: pd.Timestamp = None,
                  seq2seq: bool = False):
     df = data.copy()
     df.dropna(inplace=True)
     target = df[[target_col]]
     df.drop(target_col, axis=1, inplace=True)
     # Split data into train and test sets with a 75/25 ratio, ensuring full days
-    train_periods = int(len(df) * train_frac)
-    train_end = df.index[train_periods - 1].normalize()
-    test_start = train_end + pd.Timedelta(days=1)
+    if test_start:
+        train_end = test_start - pd.Timedelta(hours=0.25)
+    else:
+        train_periods = int(len(df) * train_frac)
+        train_end = df.index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
+        test_start = train_end + pd.Timedelta(hours=0.25)
     scalers = {}
     scalers['x'] = None
     scalers['y'] = None

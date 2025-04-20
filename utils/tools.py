@@ -22,9 +22,6 @@ def get_y(X_test: Any, # can be dict for tft or numpy array
           output_dim: int,
           model: keras.Model,
           scaler_y: StandardScaler = None) -> Tuple[np.ndarray, np.ndarray]:
-    if (type(X_test) == dict):
-        if ('static_input' in X_test.keys()):
-            if (len(X_test['static_input']) == 0): del X_test['static_input']
     y_pred = model.predict(X_test).reshape(-1, y_test.shape[-1])
     if scaler_y:
         y_pred = scaler_y.inverse_transform(y_pred)

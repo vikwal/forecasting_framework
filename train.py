@@ -4,17 +4,11 @@ import os
 import pickle
 import argparse
 import pandas as pd
-from tensorflow import keras
 from tqdm import tqdm
 import logging
 
-from utils import tools
-import optuna
+from utils import tools, eval, preprocessing
 
-from utils import eval, preprocessing
-
-
-optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -39,6 +33,7 @@ def main() -> None:
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
+    config['model']['name'] = args.model
     config['model']['shuffle'] = False
     study_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     # get observed, known and static features
@@ -52,7 +47,7 @@ def main() -> None:
     evaluation = pd.DataFrame()
     for key, df in tqdm(dfs.items()):
         logging.info(f'Preprocessing pipeline for {key} started.')
-        prepared_data, df = preprocessing.pipeline(data=df,
+        prepared_data, _ = preprocessing.pipeline(data=df,
                                                config=config,
                                                known_cols=known,
                                                observed_cols=observed,
@@ -79,19 +74,30 @@ def main() -> None:
                                                  config=config)
         # save history and model
         results[key]['history'] = history
-        results[key]['model'] = model
+        #results[key]['model'] = model
         logging.info(f'Evaluation pipeline for {key} started.')
-        new_evaluation = eval.evaluation_pipeline(data=df,
-                                               model=model,
-                                               model_name=args.model,
-                                               X_test=X_test,
-                                               y_test=y_test,
-                                               scaler_y=scaler_y,
-                                               output_dim=output_dim,
-                                               horizon=horizon,
-                                               index_test=index_test,
-                                               t_0=config['eval']['t_0'],
-                                               evaluate_on_all_test_data=config['eval']['eval_on_all_test_data'])
+        if config['eval']['retrain_interval'] != 0:
+            new_evaluation = eval.evaluate_retrain(config=config,
+                                                   data=df,
+                                                   cols = (known, observed, static),
+                                                   index_test=index_test,
+                                                   scaler_y=scaler_y,
+                                                   hyperparameters=hyperparameters,
+                                                   model=model)
+            new_evaluation['retrain_interval'] = config['eval']['retrain_interval']
+        else:
+            new_evaluation = eval.evaluation_pipeline(data=df,
+                                                model=model,
+                                                model_name=args.model,
+                                                X_test=X_test,
+                                                y_test=y_test,
+                                                scaler_y=scaler_y,
+                                                output_dim=output_dim,
+                                                horizon=horizon,
+                                                index_test=index_test,
+                                                t_0=config['eval']['t_0'],
+                                                evaluate_on_all_test_data=config['eval']['eval_on_all_test_data'])
+            new_evaluation['retrain_interval'] = None
         new_evaluation['output_dim'] = output_dim
         new_evaluation['freq'] = freq
         new_evaluation['key'] = key
@@ -111,7 +117,6 @@ def main() -> None:
     # save results
     with open(f'results/{args.data}/d-{args.data}_{conf_name}.pkl', 'wb') as f:
         pickle.dump(results, f)
-
 
 if __name__ == '__main__':
     main()
