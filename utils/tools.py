@@ -19,13 +19,12 @@ def load_config(path: str):
 
 def get_y(X_test: Any, # can be dict for tft or numpy array
           y_test: np.ndarray,
-          output_dim: int,
           model: keras.Model,
           scaler_y: StandardScaler = None) -> Tuple[np.ndarray, np.ndarray]:
     y_pred = model.predict(X_test).reshape(-1, y_test.shape[-1])
     if scaler_y:
         y_pred = scaler_y.inverse_transform(y_pred)
-        y_true = scaler_y.inverse_transform(y_test.reshape(-1, output_dim))
+        y_true = scaler_y.inverse_transform(y_test)
     else:
         y_true = y_test#.reshape(-1, output_dim)
     if len(y_pred.shape) == 3: # if seq2seq output
@@ -41,6 +40,7 @@ def y_to_df(y: np.ndarray,
     col_shape = y.shape[-1]
     cols = [f't+{i+1}' for i in range(col_shape)]
     df = pd.DataFrame(data=y, columns=cols, index=index_test)
+    # should be solved simpler in future e.g. via prior making windows if neccesary
     if output_dim == 1:
         new_columns_dict = {}
         base_col_series = df.iloc[:, 0]
@@ -132,6 +132,7 @@ def get_hyperparameters(config: dict,
                         trial=None,
                         study=None) -> dict:
     hyperparameters = {}
+    hyperparameters['shuffle'] = config['model']['shuffle']
     model_name = config['model']['name']
     batch_size = config['hpo']['batch_size']
     epochs = config['hpo']['epochs']
@@ -148,6 +149,7 @@ def get_hyperparameters(config: dict,
     dropout = config['hpo']['tft']['dropout']
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
+    n_rounds = config['hpo']['n_rounds']
     is_cnn_type = 'cnn' in model_name or 'tcn' in model_name
     is_rnn_type = 'lstm' in model_name or 'gru' in model_name
     is_fnn_type = model_name == 'fnn'
@@ -155,6 +157,7 @@ def get_hyperparameters(config: dict,
     if hpo:
         hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
         hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
+        hyperparameters['n_rounds'] = trial.suggest_int('n_rounds', n_rounds[0], n_rounds[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
         if is_cnn_type:
             hyperparameters['filters'] = trial.suggest_int('filters', filters[0], filters[1])
@@ -178,6 +181,7 @@ def get_hyperparameters(config: dict,
         else:
             hyperparameters['batch_size'] = config['model']['batch_size']
             hyperparameters['epochs'] = config['model']['epochs']
+            hyperparameters['n_rounds'] = config['fl']['n_rounds']
             hyperparameters['lr'] = config['model']['lr']
             if is_cnn_type:
                 hyperparameters['filters'] = config['model']['cnn']['filters']
@@ -190,8 +194,8 @@ def get_hyperparameters(config: dict,
                 hyperparameters['n_layers'] = config['model']['fnn']['n_layers']
                 hyperparameters['units'] = config['model']['fnn']['units']
             if is_tft_type:
-                hyperparameters['horizon'] = config['model']['tft']['horizon']
-                hyperparameters['lookback'] = config['model']['tft']['lookback']
+                hyperparameters['horizon'] = horizon
+                hyperparameters['lookback'] = lookback
                 hyperparameters['n_heads'] = config['model']['tft']['n_heads']
                 hyperparameters['hidden_dim'] = config['model']['tft']['hidden_dim']
                 hyperparameters['dropout'] = config['model']['tft']['dropout']
@@ -216,6 +220,7 @@ def get_feature_dim(X: Any):
         feature_dim['known_dim'] = X['known_input'].shape[-1]
         feature_dim['static_dim'] = X['static_input'].shape[-1] if 'static_input' in X else 0
     return feature_dim
+
 
 def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                       hyperparameters: dict,
@@ -265,14 +270,10 @@ def concatenate_data(old, new):
     if type(old) == np.ndarray:
         return np.concatenate((old, new))
     elif type(old) == dict:
-        obs_new = np.concatenate((old['observed_input'], new['observed_input']))
-        known_new = np.concatenate((old['known_input'], new['known_input']))
-        static_new = np.concatenate((old['static_input'], new['static_input']))
-        new = {
-            'observed_input': obs_new,
-            'known_input': known_new,
-            'static_input': static_new}
-        return new
+        result = {}
+        for key, value in old.items():
+            result[key] = np.concatenate((value, new[key]))
+        return result
 
 def initialize_gpu(use_gpu: int = 0):
     gpus = tf.config.list_physical_devices('GPU')

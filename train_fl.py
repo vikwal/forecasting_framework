@@ -17,6 +17,7 @@ from utils import eval, preprocessing, federated
 optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
+os.environ['RAY_DEDUP_LOGS'] = '0'
 
 
 def main() -> None:
@@ -33,7 +34,7 @@ def main() -> None:
     # read config
     config = tools.load_config('config.yaml')
     freq = config['data']['freq']
-    config['model']['output_dim'] = 1 # delete when
+    config['model']['output_dim'] = 48 # delete when
     config = tools.handle_freq(config=config)
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
@@ -58,8 +59,9 @@ def main() -> None:
                                             observed_cols=observed,
                                             static_cols=static)
         X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
-        X_train, y_train, X_val, y_val = tools.split_val(X=X_train, y=y_train, val_split=config['data']['val_frac'])
-        partitions.append((X_train, y_train, X_val, y_val))
+        X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
+        #X_train, y_train, X_val, y_val = tools.split_val(X=X_train, y=y_train, val_split=config['data']['val_frac'])
+        partitions.append((X_train, y_train, X_test, y_test))
         test_data[key] = prepared_data['X_test'], prepared_data['y_test'], prepared_data['index_test'], prepared_data['scalers']['y']
     feature_dim = tools.get_feature_dim(X_train)
     config['model']['feature_dim'] = feature_dim
@@ -81,7 +83,7 @@ def main() -> None:
                                                   hyperparameters=hyperparameters,
                                                   config=config)
         # save progress
-        results['model'] = model
+        #results['model'] = model
         results['history'] = history
         with open(path_to_pkl, 'wb') as f:
             pickle.dump(results, f)

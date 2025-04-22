@@ -1,8 +1,9 @@
 data:
-  path: '../../Data'
+  path: 'data'
   freq: '1h'
-  train_frac: 0.5
-  val_frac: 0.25 # from train_frac
+  train_frac: 0.75
+  val_frac: 0.25 # abs from train_frac
+  test_start: '2019-03-01'
   scale_y: False
   lag_in_col: False
 
@@ -11,7 +12,7 @@ model:
   lookback: 48
   horizon: 48
   batch_size: 16
-  epochs: 20
+  epochs: 10
   lr: 0.0004
   optimizer: 'adam'
   loss: 'mse'
@@ -28,7 +29,7 @@ model:
     units: 64
     dropout: 0.1
   tft:
-    n_heads: 2
+    n_heads: 1
     hidden_dim: 60
     dropout: 0.1
   callbacks: False
@@ -44,6 +45,7 @@ hpo:
   val_split: 0.75
   batch_size: [16, 256]
   epochs: [1, 2]
+  n_rounds: [1, 2]
   n_layers: [1, 4]
   n_cnn_layers: [1, 4]
   n_rnn_layers: [1, 4]
@@ -64,12 +66,12 @@ hpo:
 eval:
   results_path: 'results'
   eval_on_all_test_data: True
-  retrain_interval: 24 # in hours - 0 if no retraining is wanted
+  retrain_interval: 0 # in hours - 0 if no retraining is wanted
   t_0: 12
 
 fl:
   parts: []
-  n_rounds: 2
-  n_clients: 9
+  n_rounds: 6
+  n_clients: 7
   verbose: True
   save_history: True

@@ -27,7 +27,9 @@ def pipeline(data: pd.DataFrame,
                                              future_horizon=config['model']['horizon'], # e.g., 24 (for 24 hours forecast)
                                              known_future_cols=known_cols,
                                              observed_past_cols=observed_cols,
-                                             train_frac=config['data']['train_frac'])
+                                             train_frac=config['data']['train_frac'],
+                                             test_start=pd.Timestamp(config['data']['test_start']),
+                                             t_0=t_0)
     else:
         for col in observed_cols:
             df = lag_features(data=df,
@@ -200,6 +202,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          observed_past_cols: list,
                          train_frac: float = 0.75,
                          target_col: str = 'power',
+                         test_start: pd.Timestamp = None,
+                         t_0: int = 0,
                          scale_target: bool = False): # New flag to control lag feature
     """
     Prepares data for a Temporal Fusion Transformer, creating a lagged target input.
@@ -227,9 +231,12 @@ def prepare_data_for_tft(data: pd.DataFrame,
         observed_past_cols.append(target_col)
     df = data.copy()
     # --- Data Splitting ---
-    train_periods = int(len(df) * train_frac)
-    train_end = df.index[train_periods - 1].normalize()
-    test_start = train_end + pd.Timedelta(days=1)
+    if test_start:
+        train_end = test_start - pd.Timedelta(hours=0.25)
+    else:
+        train_periods = int(len(df) * train_frac)
+        train_end = df.index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
+        test_start = train_end + pd.Timedelta(hours=0.25)
 
     train_df = df[:train_end]
     test_df = df[test_start:]
@@ -404,26 +411,6 @@ def preprocess_1b_trina(path: str,
         return df[rel_features]
     return df
 
-def germansolarfarm(path: str,
-                    timestamp_col: str,
-                    rel_features=None) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df.set_index(timestamp_col, inplace=True)
-    if rel_features:
-        return df[rel_features]
-    return df
-
-def europewindfarm(path: str,
-                   timestamp_col: str,
-                   rel_features=None) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df.drop('ForecastingTime', axis=1, inplace=True)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df.set_index(timestamp_col, inplace=True)
-    if rel_features:
-        return df[rel_features]
-    return df
 
 def get_features(data: str) -> Tuple[List, List]:
     known, observed, static = None, None, None
@@ -446,3 +433,24 @@ def get_features(data: str) -> Tuple[List, List]:
                 'Station_ID'
                 'Array_Tilt']
     return known, observed, static
+
+def germansolarfarm(path: str,
+                    timestamp_col: str,
+                    rel_features=None) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+    df.set_index(timestamp_col, inplace=True)
+    if rel_features:
+        return df[rel_features]
+    return df
+
+def europewindfarm(path: str,
+                   timestamp_col: str,
+                   rel_features=None) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df.drop('ForecastingTime', axis=1, inplace=True)
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+    df.set_index(timestamp_col, inplace=True)
+    if rel_features:
+        return df[rel_features]
+    return df

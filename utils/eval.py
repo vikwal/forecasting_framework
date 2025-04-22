@@ -130,7 +130,6 @@ def evaluation_pipeline(data: pd.DataFrame,
                         evaluate_on_all_test_data=True) -> pd.DataFrame:
     y_true, y_pred = tools.get_y(X_test=X_test,
                            y_test=y_test,
-                           output_dim=output_dim,
                            scaler_y=scaler_y,
                            model=model)
     df_pred = tools.y_to_df(y=y_pred,
@@ -182,7 +181,14 @@ def evaluate_retrain(config,
     y_true, y_pred, y_pers, index = None, None, None, None
     for day in range(full_days):
         from_index = day * retrain_interval
-        to_index = day * retrain_interval + horizon
+        if output_dim == 1:
+            # here horizon is determined via the index
+            adj_horizon = horizon
+            to_index = day * retrain_interval + horizon
+        else:
+            # here horizon is already fixed by the output_dim
+            adj_horizon = retrain_interval
+            to_index = retrain_interval * (1 + day)
         index_day = index_test[from_index:to_index]
         prepared_data, df = preprocessing.pipeline(data=data,
                                                    config=config,
@@ -191,17 +197,17 @@ def evaluate_retrain(config,
                                                    static_cols=static,
                                                    test_start=index_day[0])
         X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
-        X_test, y_test = prepared_data['X_train'], prepared_data['y_train']
-        X_test, y_test = X_test[:horizon], y_test[:horizon]
+        X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
+        X_test, y_test = X_test[:adj_horizon], y_test[:adj_horizon]
         y_true_new, y_pred_new = tools.get_y(X_test=X_test,
                                              y_test=y_test,
-                                             output_dim=output_dim,
                                              model=model,
                                              scaler_y=scaler_y)
         y_pers_raw = persistence(y=df[target_col],
                                  horizon=horizon,
                                  from_date=str(index_test[0].date()))
-        y_pers_new = preprocessing.make_windows(y_pers_raw[index_day], 1)
+        y_pers_new = preprocessing.make_windows(y_pers_raw, y_pred_new.shape[-1])
+        y_pers_new = y_pers_new[from_index:to_index]
         if y_pred is None:
             y_true, y_pred, y_pers, index = y_true_new, y_pred_new, y_pers_new, index_day
         else:

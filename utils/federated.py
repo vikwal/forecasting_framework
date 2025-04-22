@@ -4,8 +4,9 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Any
+from sklearn.model_selection import TimeSeriesSplit
 
-from . import tools, models
+from . import models
 
 @ray.remote # Dekoriert die Klasse als Ray Actor
 class ClientActor:
@@ -20,8 +21,6 @@ class ClientActor:
         self.client_id = client_id
         self.X_train, self.y_train = X_train, y_train
         self.X_val, self.y_val = X_val, y_val
-        self.n_samples_train = tools.get_feature_dim(self.X_train)
-        self.n_samples_val = tools.get_feature_dim(self.X_val)
         self.config = config
         self.hyperparameters = hyperparameters
         # Wichtig: Das Modell muss innerhalb des Actors erstellt werden
@@ -50,7 +49,7 @@ class ClientActor:
             validation_data=validation_data,
             #callbacks = callbacks if config['model']['callbacks'] else None,
             shuffle=self.config['model']['shuffle'],
-            verbose=self.config['model']['verbose'],
+            verbose=0#self.config['model']['verbose'],
         )
         if verbose:
             logging.info(f"[ClientActor {self.client_id}] Terminated fitting.")
@@ -59,7 +58,7 @@ class ClientActor:
             metrics[key] = value[-1] # get metric in last round
         results = {'client_id': self.client_id,
                    'weights': self.model.get_weights(),
-                   'n_samples': self.n_samples_train,
+                   'n_samples': len(self.y_train),
                    'metrics': metrics,
                    'history': history}
         return results
@@ -73,7 +72,7 @@ class ClientActor:
                 x=self.X_val,
                 y=self.y_val,
                 batch_size=self.hyperparameters['batch_size'],
-                verbose=self.config['model']['verbose'],
+                verbose=0,#self.config['model']['verbose'],
                 return_dict=True
             )
         else:
@@ -81,7 +80,7 @@ class ClientActor:
             metrics = None
         logging.info(f"[ClientActor {self.client_id}] Terminated local evaluation.")
         results = {'client_id': self.client_id,
-                   'n_samples': self.n_samples_val,
+                   'n_samples': len(self.y_val),
                    'metrics': metrics}
         return results
 
@@ -127,6 +126,65 @@ def get_train_history(client_results: List[Dict[str, Any]]):
         histories[client_id] = history
     return histories
 
+def get_kfolds_partitions(n_splits, partitions):
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    raw_partitions = [] # Speichert Folds pro ursprünglicher Partition: [[fold1_p1, fold2_p1,...], [fold1_p2, ...]]
+    for i, part in enumerate(partitions):
+        X_train_orig = part[0] # Kann np.ndarray oder dict sein
+        y_train = part[1]      # Sollte immer np.ndarray sein
+        folds = [] # Speichert die Folds für DIESE eine Partition part
+        data_for_splitting = y_train
+        for fold_idx, (train_index, val_index) in enumerate(tscv.split(data_for_splitting)):
+            # 1. Teile y_train (ist immer ein Array)
+            y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
+            if isinstance(X_train_orig, np.ndarray):
+                X_train_fold = X_train_orig[train_index]
+                X_val_fold = X_train_orig[val_index]
+            elif isinstance(X_train_orig, dict):
+                # Case for TFT
+                X_train_fold = {}
+                X_val_fold = {}
+                for key, value_array in X_train_orig.items():
+                    # Prüfe, ob der Key 'static_input' ist
+                    if key == 'static_input':
+                        # Statische Features werden nicht gesplittet, sondern übernommen
+                        X_train_fold[key] = value_array
+                        X_val_fold[key] = value_array
+                        logging.debug(f"Fold {fold_idx}, Partition {i}: Passing through static_input.")
+                    else:
+                        X_train_fold[key] = value_array[train_index]
+                        X_val_fold[key] = value_array[val_index]
+            folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
+        raw_partitions.append(folds)
+
+    kfolds_partitions = []
+    for split_idx in range(n_splits): # Iteriere über die Fold-Indizes (0 bis K-1)
+        partition_for_this_fold = []
+        for client_folds in raw_partitions: # Iteriere über die Ergebnisse jeder ursprünglichen Partition
+            # Stelle sicher, dass diese Partition Folds hat und auch diesen spezifischen Fold
+            partition_for_this_fold.append(client_folds[split_idx])
+        kfolds_partitions.append(partition_for_this_fold)
+    return kfolds_partitions
+
+# def get_kfolds_partitions(n_splits, partitions):
+#     tscv = TimeSeriesSplit(n_splits=n_splits)
+#     raw_partitions = []
+#     for part in partitions:
+#         folds = []
+#         X_train, y_train = part[0], part[1]
+#         for train_index, val_index in tscv.split(X_train):
+#             X_train_fold, X_val_fold = X_train[train_index], X_train[val_index]
+#             y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
+#             folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
+#         raw_partitions.append(folds)
+
+#     kfolds_partitions = []
+#     for split in range(n_splits):
+#         partition = []
+#         for kfold in raw_partitions:
+#             partition.append((kfold[split]))
+#         kfolds_partitions.append(partition)
+#     return kfolds_partitions
 
 def run_simulation(partitions: List,
                    config: Dict[str, Any],
@@ -135,7 +193,7 @@ def run_simulation(partitions: List,
 
     # initialize variables
     n_clients = config['fl']['n_clients']
-    n_rounds = config['fl']['n_rounds']
+    n_rounds = hyperparameters['n_rounds']
     save_history = config['fl']['save_history']
 
     # Ray initialisieren (wenn kein Cluster läuft, startet es einen lokalen)

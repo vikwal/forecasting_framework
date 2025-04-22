@@ -46,7 +46,7 @@ def main() -> None:
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data='pvod')
 
-    study_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
+    study_name = f'cl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     config['model']['name'] = args.model
     path_to_pkl = os.path.join('results', args.data, f'{study_name}.pkl')
     # load and prepare training and test data

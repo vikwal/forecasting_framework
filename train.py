@@ -28,7 +28,7 @@ def main() -> None:
     # read config and initialize variables
     config = tools.load_config('config.yaml')
     freq = config['data']['freq']
-    config['model']['output_dim'] = 1
+    config['model']['output_dim'] = 48
     config = tools.handle_freq(config=config)
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
@@ -45,9 +45,9 @@ def main() -> None:
     results = {}
     # create lag features
     evaluation = pd.DataFrame()
-    for key, df in tqdm(dfs.items()):
+    for key, data in tqdm(dfs.items()):
         logging.info(f'Preprocessing pipeline for {key} started.')
-        prepared_data, _ = preprocessing.pipeline(data=df,
+        prepared_data, df = preprocessing.pipeline(data=data,
                                                config=config,
                                                known_cols=known,
                                                observed_cols=observed,
@@ -78,7 +78,7 @@ def main() -> None:
         logging.info(f'Evaluation pipeline for {key} started.')
         if config['eval']['retrain_interval'] != 0:
             new_evaluation = eval.evaluate_retrain(config=config,
-                                                   data=df,
+                                                   data=data,
                                                    cols = (known, observed, static),
                                                    index_test=index_test,
                                                    scaler_y=scaler_y,

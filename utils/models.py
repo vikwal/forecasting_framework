@@ -416,7 +416,7 @@ def build_tft(feature_dims: Dict[str, int],
         static_context_state_c = _grn(static_input, hidden_dim, dropout_rate=dropout_rate, name='static_grn_state_c')
     else:
         # Optional: Log oder Warnung ausgeben
-        logging.info("Info: TFT-Modell wird ohne statische Features erstellt.")
+        logging.info("TFT-Modell wird ohne statische Features erstellt.")
         pass # Kontexte bleiben None
 
     # --- Zeitvariable Verarbeitung MIT VARIABLE SELECTION ---

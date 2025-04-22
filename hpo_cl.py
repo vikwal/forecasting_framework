@@ -41,9 +41,9 @@ def main() -> None:
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data=args.data)
 
-    conf_name = f'all_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
-    config['model_name'] = conf_name
-    study = tools.create_or_load_study('studies/', conf_name, direction='minimize')
+    study_name = f'cl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
+    config['model_name'] = args.model
+    study = tools.create_or_load_study('studies/', study_name, direction='minimize')
     # load and prepare training and test data
     dfs = preprocessing.get_data(data=args.data,
                                 data_dir=config['data']['path'],
@@ -76,7 +76,6 @@ def main() -> None:
                                                     hpo=True,
                                                     trial=trial)
         check_params = hyperparameters.copy()
-        check_params.pop('model_name')
         if check_params in combinations:
             study.tell(trial, state=optuna.trial.TrialState.PRUNED)
             continue
