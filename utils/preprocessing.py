@@ -5,6 +5,7 @@ from sklearn.preprocessing import StandardScaler
 import logging
 from typing import List, Tuple, Dict, Any
 
+from . import meteo
 
 def pipeline(data: pd.DataFrame,
              config: Dict[str, Any],
@@ -49,7 +50,8 @@ def pipeline(data: pd.DataFrame,
 
 def get_data(data: str,
              data_dir: str,
-             freq: str) -> List[pd.DataFrame]:
+             freq: str,
+             rel_features: list = None) -> List[pd.DataFrame]:
     if data == '1b_trina':
         file_name = '1B_trina.csv'
         path = os.path.join(data_dir, file_name)
@@ -65,7 +67,8 @@ def get_data(data: str,
         for file in files:
             path = os.path.join(data_dir, dir_name, file)
             df = preprocess_pvod(path=path,
-                                 freq=freq)
+                                 freq=freq,
+                                 rel_features=rel_features)
             dfs[file] = df
         return dfs
 
@@ -377,10 +380,33 @@ def preprocess_pvod(path: str,
     metadata_file = path.replace(os.path.basename(path).split('.')[0], 'metadata')
     metadata = pd.read_csv(metadata_file)
     df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+    df.set_index(timestamp_col, inplace=True)
+    df['azimuth'] = 180
+    df['tilt'] = int(metadata.loc[metadata.Station_ID == station_id]['Array_Tilt'].str[-3:-1].iloc[0])
+    df['latitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Latitude'].iloc[0])
+    df['longitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Longitude'].iloc[0])
+    df['nwp_gti'] = meteo.get_total_irradiance(ghi=df['nwp_globalirrad'],
+                                               pressure=df['nwp_pressure'],
+                                               temperature=df['nwp_temperature'],
+                                               latitude=df['latitude'],
+                                               longitude=df['longitude'],
+                                               surface_tilt=df['tilt'],
+                                               surface_azimuth=df['azimuth'],
+                                               time_index=df.index,
+                                               dni=df['nwp_directirrad'])
+    df['lmd_gti'] = meteo.get_total_irradiance(ghi=df['lmd_totalirrad'],
+                                               pressure=df['lmd_pressure'],
+                                               temperature=df['lmd_temperature'],
+                                               latitude=df['latitude'],
+                                               longitude=df['longitude'],
+                                               surface_tilt=df['tilt'],
+                                               surface_azimuth=df['azimuth'],
+                                               time_index=df.index,
+                                               dhi=df['lmd_diffuseirrad'])
+    df['lmd_gti'] = df['lmd_gti'].fillna(0)
     # normalize time series by installed capacity
     df[target_col] = df[target_col] / (metadata.loc[metadata.Station_ID == station_id]['Capacity'].values[0] / 1000)
     df.rename(columns={target_col: 'power'}, inplace=True)
-    df.set_index(timestamp_col, inplace=True)
     if freq:
         df = df.resample(freq).mean().copy()
     if rel_features:
@@ -416,14 +442,16 @@ def get_features(data: str) -> Tuple[List, List]:
     known, observed, static = None, None, None
     if data == 'pvod':
         known = [
-                'nwp_globalirrad',
-                'nwp_directirrad',
+                #'nwp_globalirrad',
+                #'nwp_directirrad',
+                'nwp_gti',
                 'nwp_temperature',
                 'nwp_humidity',
                 'nwp_windspeed']
         observed = [
-                    'lmd_totalirrad',
-                    'lmd_diffuseirrad',
+                    #'lmd_totalirrad',
+                    #'lmd_diffuseirrad',
+                    'lmd_gti',
                     'lmd_temperature',
                     'lmd_pressure',
                     'lmd_winddirection',

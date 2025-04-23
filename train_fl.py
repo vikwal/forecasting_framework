@@ -37,7 +37,7 @@ def main() -> None:
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['shuffle'] = False
-    config['model']['type'] = 'fl'
+    config['model']['fl'] = True
     study_name = f'fl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     config['model']['name'] = args.model
     # get observed, known and static features
@@ -114,6 +114,7 @@ def main() -> None:
             evaluation = pd.concat([evaluation, new_evaluation], axis=0)
     # save evaluation
     results['evaluation'] = evaluation
+    results['config'] = config
     # save results
     with open(f'results/{args.data}/{study_name}.pkl', 'wb') as f:
         pickle.dump(results, f)

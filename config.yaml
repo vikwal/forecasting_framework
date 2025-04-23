@@ -12,7 +12,7 @@ model:
   lookback: 48
   horizon: 48
   batch_size: 16
-  epochs: 2
+  epochs: 10
   lr: 0.001
   optimizer: 'adam'
   loss: 'mse'
@@ -22,7 +22,7 @@ model:
     n_layers: 2
   cnn:
     filters: 64
-    kernel_size: 2
+    kernel_size: 3
     n_cnn_layers: 2
   rnn:
     n_rnn_layers: 2
@@ -78,7 +78,7 @@ fl:
   parts: []
   n_rounds: 1
   n_clients: 7
-  strategy: 'fedadam'
+  strategy: 'fedavg'
   fedopt:
     server_lr: 0.001
     beta_1: 0.9

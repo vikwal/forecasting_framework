@@ -130,6 +130,7 @@ def main() -> None:
             evaluation = pd.concat([evaluation, new_evaluation], axis=0)
     # save evaluation
     results['evaluation'] = evaluation
+    results['config'] = config
     # save results
     with open(f'results/{args.data}/{study_name}.pkl', 'wb') as f:
         pickle.dump(results, f)

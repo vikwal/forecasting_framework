@@ -190,19 +190,18 @@ def get_hyperparameters(config: dict,
         if study and study.best_trial:
             hyperparameters.update(study.best_trial)
         else:
-            if config['model']['type'] == 'fl':
-                hyperparameters['n_rounds'] = config['fl']['n_rounds']
-            if config['fl']['strategy'].lower() in ['fedavgm', 'fedadam', 'fedyogi']:
-                hyperparameters['server_lr'] = config['fl']['fedopt']['server_lr']
-                hyperparameters['beta_1'] = config['fl']['fedopt']['beta_1']
-            if config['fl']['strategy'].lower() in ['fedadam', 'fedyogi']:
-                hyperparameters['beta_2'] = config['fl']['fedopt']['beta_2']
-            if config['fl']['strategy'].lower() in ['fedadam']:
-                hyperparameters['tau'] = config['fl']['fedopt']['tau']
             hyperparameters['batch_size'] = config['model']['batch_size']
             hyperparameters['epochs'] = config['model']['epochs']
-            hyperparameters['n_rounds'] = config['fl']['n_rounds']
             hyperparameters['lr'] = config['model']['lr']
+            if 'fl' in config['model']:
+                hyperparameters['n_rounds'] = config['fl']['n_rounds']
+                if config['fl']['strategy'].lower() in ['fedavgm', 'fedadam', 'fedyogi']:
+                    hyperparameters['server_lr'] = config['fl']['fedopt']['server_lr']
+                    hyperparameters['beta_1'] = config['fl']['fedopt']['beta_1']
+                if config['fl']['strategy'].lower() in ['fedadam', 'fedyogi']:
+                    hyperparameters['beta_2'] = config['fl']['fedopt']['beta_2']
+                if config['fl']['strategy'].lower() in ['fedadam']:
+                    hyperparameters['tau'] = config['fl']['fedopt']['tau']
             if is_cnn_type:
                 hyperparameters['filters'] = config['model']['cnn']['filters']
                 hyperparameters['kernel_size'] = config['model']['cnn']['kernel_size']

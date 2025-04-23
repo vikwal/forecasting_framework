@@ -36,16 +36,18 @@ def main() -> None:
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['shuffle'] = False
-    config['model']['type'] = 'fl'
+    config['model']['fl'] = True
     study_name = f'fl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     study = tools.create_or_load_study('studies/', study_name, direction='minimize')
     config['model']['name'] = args.model
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data=args.data)
+    rel_features = known + observed
     # load and prepare training and test data
     dfs = preprocessing.get_data(data=args.data,
                                  data_dir=config['data']['path'],
-                                 freq=freq)
+                                 freq=freq,
+                                 rel_features=rel_features)
     partitions = []
     for key, df in dfs.items():
         logging.info(f'Preprocessing pipeline for {key} started.')

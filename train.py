@@ -114,7 +114,7 @@ def main() -> None:
     results['hyperparameters'] = hyperparameters
     results['evaluation'] = evaluation
     conf_name = f'm-{args.model}_out-{output_dim}_freq-{freq}'
-    results['conf_name'] = conf_name
+    results['config'] = config
     # save results
     with open(f'results/{args.data}/d-{args.data}_{conf_name}.pkl', 'wb') as f:
         pickle.dump(results, f)
