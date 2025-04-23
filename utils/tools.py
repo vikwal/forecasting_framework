@@ -149,7 +149,11 @@ def get_hyperparameters(config: dict,
     dropout = config['hpo']['tft']['dropout']
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
-    n_rounds = config['hpo']['n_rounds']
+    n_rounds = config['hpo']['fl']['n_rounds']
+    server_lr = config['hpo']['fl']['server_lr']
+    beta_1 = config['hpo']['fl']['beta_1']
+    beta_2 = config['hpo']['fl']['beta_2']
+    tau = config['hpo']['fl']['tau']
     is_cnn_type = 'cnn' in model_name or 'tcn' in model_name
     is_rnn_type = 'lstm' in model_name or 'gru' in model_name
     is_fnn_type = model_name == 'fnn'
@@ -157,8 +161,15 @@ def get_hyperparameters(config: dict,
     if hpo:
         hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
         hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
-        hyperparameters['n_rounds'] = trial.suggest_int('n_rounds', n_rounds[0], n_rounds[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
+        if config['model']['type'] == 'fl':
+            hyperparameters['n_rounds'] = trial.suggest_int('n_rounds', n_rounds[0], n_rounds[1])
+            if config['fl']['strategy'].lower() in 'fedavgmfedadamfedyogi':
+                hyperparameters['server_lr'] = trial.suggest_float('server_lr', server_lr[0], server_lr[1], log=True)
+                hyperparameters['beta_1'] = trial.suggest_float('beta_1', beta_1[0], beta_1[1])
+            if config['fl']['strategy'].lower() == 'fedadam':
+                hyperparameters['beta_2'] = trial.suggest_float('beta_2', beta_2[0], beta_2[1])
+                hyperparameters['tau'] = trial.suggest_float('tau', tau[0], tau[1], log=True)
         if is_cnn_type:
             hyperparameters['filters'] = trial.suggest_int('filters', filters[0], filters[1])
             hyperparameters['kernel_size'] = trial.suggest_int('kernel_size', kernel_size[0], kernel_size[1])
@@ -179,6 +190,15 @@ def get_hyperparameters(config: dict,
         if study and study.best_trial:
             hyperparameters.update(study.best_trial)
         else:
+            if config['model']['type'] == 'fl':
+                hyperparameters['n_rounds'] = config['fl']['n_rounds']
+            if config['fl']['strategy'].lower() in ['fedavgm', 'fedadam', 'fedyogi']:
+                hyperparameters['server_lr'] = config['fl']['fedopt']['server_lr']
+                hyperparameters['beta_1'] = config['fl']['fedopt']['beta_1']
+            if config['fl']['strategy'].lower() in ['fedadam', 'fedyogi']:
+                hyperparameters['beta_2'] = config['fl']['fedopt']['beta_2']
+            if config['fl']['strategy'].lower() in ['fedadam']:
+                hyperparameters['tau'] = config['fl']['fedopt']['tau']
             hyperparameters['batch_size'] = config['model']['batch_size']
             hyperparameters['epochs'] = config['model']['epochs']
             hyperparameters['n_rounds'] = config['fl']['n_rounds']
@@ -275,12 +295,12 @@ def concatenate_data(old, new):
             result[key] = np.concatenate((value, new[key]))
         return result
 
-def initialize_gpu(use_gpu: int = 0):
+def initialize_gpu(use_gpu=None):
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        tf.config.experimental.set_visible_devices(gpus[use_gpu], 'GPU')
+        if use_gpu: tf.config.experimental.set_visible_devices(gpus[use_gpu], 'GPU')
     else:
         print("No Physical GPUs found.")
 

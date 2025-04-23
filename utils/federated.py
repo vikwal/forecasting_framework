@@ -3,10 +3,107 @@ import time
 import logging
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 
-from . import models
+from . import tools, models
+
+class ServerOptimizer:
+    """
+    Verwaltet den Zustand und die Update-Logik für serverseitige Optimierer
+    wie FedAvgM und FedAdam.
+    """
+    def __init__(self,
+                 strategy: str,
+                 hyperparameters: Dict[str, Any],
+                 initial_weights: List[np.ndarray]):
+        self.strategy = strategy.lower()
+        self.hyperparameters = hyperparameters
+        self.step_count = 0
+
+        # Hyperparameter für Server-Optimierer holen (mit Standardwerten)
+        self.server_lr = hyperparameters.get('server_lr', 1.0)      # Server Lernrate (eta_s)
+        self.beta_1 = hyperparameters.get('beta_1', 0.9)            # Momentum für FedAvgM, Beta1 für FedAdam
+        self.beta_2 = hyperparameters.get('beta_2', 0.999)          # Beta2 für FedAdam
+        self.tau = hyperparameters.get('tau', 1e-8)                 # Epsilon/Tau für FedAdam (numerische Stabilität)
+
+        # Initialisiere Zustandsvariablen (als Liste von Numpy-Arrays, wie die Gewichte)
+        self.server_state_v = [np.zeros_like(w) for w in initial_weights] # Momentum für FedAvgM / v für FedAdam
+        if self.strategy in ['fedadam', 'fedyogi']: # FedAdam/Yogi brauchen einen zweiten Moment-Schätzer
+            self.server_state_m = [np.zeros_like(w) for w in initial_weights] # m für FedAdam/Yogi
+
+        logging.info(f"[ServerOptimizer] Initialized for strategy '{self.strategy}' with server_lr={self.server_lr}, "
+                     f"beta_1={self.beta_1}, beta_2={self.beta_2}, tau={self.tau}")
+
+    def step(self,
+             old_global_weights: List[np.ndarray],
+             aggregated_weights: List[np.ndarray]) -> List[np.ndarray]:
+        """
+        Führt einen Optimierungsschritt auf dem Server aus.
+
+        Args:
+            old_global_weights (w_t): Die globalen Gewichte VOR dem Update.
+            aggregated_weights (w_{t+1}^{avg}): Die durch FedAvg aggregierten Gewichte.
+
+        Returns:
+            List[np.ndarray]: Die finalen globalen Gewichte (w_{t+1}) nach dem Server-Optimierungsschritt.
+        """
+        self.step_count += 1
+        # Berechne das durchschnittliche Update-Delta (w_{t+1}^{avg} - w_t)
+        delta_t = [agg - old for agg, old in zip(aggregated_weights, old_global_weights)]
+
+        if self.strategy == 'fedavgm':
+            # FedAvgM Update Rule:
+            # v_{t+1} = beta_1 * v_t + delta_t
+            # w_{t+1} = w_t + server_lr * v_{t+1}
+            # Update server momentum (v) -> In-place Update der Liste
+            self.server_state_v[:] = [self.beta_1 * v + dt for v, dt in zip(self.server_state_v, delta_t)]
+            # Calculate new global weights
+            final_weights = [old + self.server_lr * v for old, v in zip(old_global_weights, self.server_state_v)]
+            logging.debug(f"[ServerOptimizer FedAvgM] Applied momentum update. Step: {self.step_count}")
+
+        elif self.strategy == 'fedadam':
+            # FedAdam Update Rule:
+            # m_{t+1} = beta_1 * m_t + (1 - beta_1) * delta_t
+            # v_{t+1} = beta_2 * v_t + (1 - beta_2) * delta_t^2
+            # Optional: Bias correction (hier implementiert)
+            # m_hat = m_{t+1} / (1 - beta_1^t)
+            # v_hat = v_{t+1} / (1 - beta_2^t)
+            # w_{t+1} = w_t + server_lr * m_hat / (sqrt(v_hat) + tau)
+            # Update first moment estimate (m) -> In-place
+            self.server_state_m[:] = [self.beta_1 * m + (1 - self.beta_1) * dt
+                                      for m, dt in zip(self.server_state_m, delta_t)]
+            # Update second moment estimate (v) -> In-place
+            self.server_state_v[:] = [self.beta_2 * v + (1 - self.beta_2) * np.square(dt)
+                                      for v, dt in zip(self.server_state_v, delta_t)]
+            beta_1_power = self.beta_1 ** self.step_count
+            beta_2_power = self.beta_2 ** self.step_count
+            m_hat = [m / (1 - beta_1_power) for m in self.server_state_m]
+            v_hat = [v / (1 - beta_2_power) for v in self.server_state_v]
+
+            final_weights = [old + self.server_lr * m_h / (np.sqrt(v_h) + self.tau)
+                             for old, m_h, v_h in zip(old_global_weights, m_hat, v_hat)]
+            logging.debug(f"[ServerOptimizer FedAdam] Applied Adam update. Step: {self.step_count}")
+
+        elif self.strategy == 'fedyogi':
+             # FedYogi ist ähnlich zu FedAdam, aber mit anderem Update für v
+             # v_{t+1} = v_t - (1 - beta_2) * delta_t^2 * sign(v_t - delta_t^2)
+             # (Implementierung hier ausgelassen, da nicht primär gefordert)
+             logging.warning(f"FedYogi strategy not fully implemented yet.")
+             final_weights = aggregated_weights # Fallback zu FedAvg
+
+        elif self.strategy == 'fedadagrad':
+             # FedAdagrad braucht auch einen state (Summe der quadrierten Deltas)
+             # v_{t+1} = v_t + delta_t^2
+             # w_{t+1} = w_t + server_lr * delta_t / (sqrt(v_{t+1}) + tau)
+             # (Implementierung hier ausgelassen)
+             logging.warning(f"FedAdagrad strategy not fully implemented yet.")
+             final_weights = aggregated_weights # Fallback zu FedAvg
+        else:
+             logging.error(f"Unknown server optimization strategy: {self.strategy}")
+             final_weights = aggregated_weights
+        return [np.array(w) for w in final_weights]
 
 @ray.remote # Dekoriert die Klasse als Ray Actor
 class ClientActor:
@@ -24,6 +121,7 @@ class ClientActor:
         self.config = config
         self.hyperparameters = hyperparameters
         # Wichtig: Das Modell muss innerhalb des Actors erstellt werden
+        tools.initialize_gpu()
         self.model = models.get_model(config=self.config,
                                       hyperparameters=self.hyperparameters)
         self.logger = logging.getLogger(f"ClientActor_{self.client_id}")
@@ -166,25 +264,6 @@ def get_kfolds_partitions(n_splits, partitions):
         kfolds_partitions.append(partition_for_this_fold)
     return kfolds_partitions
 
-# def get_kfolds_partitions(n_splits, partitions):
-#     tscv = TimeSeriesSplit(n_splits=n_splits)
-#     raw_partitions = []
-#     for part in partitions:
-#         folds = []
-#         X_train, y_train = part[0], part[1]
-#         for train_index, val_index in tscv.split(X_train):
-#             X_train_fold, X_val_fold = X_train[train_index], X_train[val_index]
-#             y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
-#             folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
-#         raw_partitions.append(folds)
-
-#     kfolds_partitions = []
-#     for split in range(n_splits):
-#         partition = []
-#         for kfold in raw_partitions:
-#             partition.append((kfold[split]))
-#         kfolds_partitions.append(partition)
-#     return kfolds_partitions
 
 def run_simulation(partitions: List,
                    config: Dict[str, Any],
@@ -195,10 +274,14 @@ def run_simulation(partitions: List,
     n_clients = config['fl']['n_clients']
     n_rounds = hyperparameters['n_rounds']
     save_history = config['fl']['save_history']
+    strategy = config['fl']['strategy'].lower()
+    total_num_gpus = len(tf.config.list_physical_devices('GPU'))
+    gpu_per_actor = min(1, total_num_gpus/n_clients)
 
     # Ray initialisieren (wenn kein Cluster läuft, startet es einen lokalen)
     # include_dashboard=False unterdrückt das Starten des Web-Dashboards
-    ray.init(ignore_reinit_error=True,
+    ray.init(num_gpus=total_num_gpus,
+             ignore_reinit_error=True,
              include_dashboard=False,
              logging_level=logging.WARNING,  # Setzt den Level für Ray-Komponenten und oft auch für Worker
              log_to_driver=True         # Leitet Worker-Logs an den Driver (deine Konsole)
@@ -207,7 +290,7 @@ def run_simulation(partitions: List,
     client_actors = []
     for i in range(n_clients):
         X_train, y_train, X_val, y_val = partitions[i]
-        actor = ClientActor.remote(
+        actor = ClientActor.options(num_gpus=gpu_per_actor).remote(
             client_id=i,
             X_train=X_train,
             y_train=y_train,
@@ -225,6 +308,10 @@ def run_simulation(partitions: List,
     global_model = models.get_model(config=config,
                                     hyperparameters=hyperparameters)
     global_weights = global_model.get_weights()
+
+    server_optimizer = None
+    if strategy != 'fedavg':
+        server_optimizer = ServerOptimizer(strategy, hyperparameters, global_weights)
 
     history = {}
     all_rounds_metrics_data = []
@@ -246,8 +333,15 @@ def run_simulation(partitions: List,
         logging.info(f"[Server] All clients trained. Start aggregation.")
 
         # Aggregate metrics and weights
-        new_global_weights = aggregate_weights(client_results)
+        aggregated_weights = aggregate_weights(client_results)
         train_metrics_agg = aggregate_metrics(client_results)
+
+        # --- Server-seitigen Optimierungsschritt anwenden (falls nicht FedAvg) ---
+        if server_optimizer:
+            new_global_weights = server_optimizer.step(global_weights, aggregated_weights)
+        else:
+            # Bei FedAvg sind die aggregierten Gewichte die finalen Gewichte
+            new_global_weights = aggregated_weights
 
         # (optional:) save clients histories
         if save_history:

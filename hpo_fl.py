@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO,
 
 def main() -> None:
     logger = logging.getLogger(__name__)
+    tools.initialize_gpu()
     # argument parser
     parser = argparse.ArgumentParser(description="Federated Learning Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
@@ -35,6 +36,7 @@ def main() -> None:
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['shuffle'] = False
+    config['model']['type'] = 'fl'
     study_name = f'fl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     study = tools.create_or_load_study('studies/', study_name, direction='minimize')
     config['model']['name'] = args.model

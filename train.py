@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO,
 
 def main() -> None:
     logger = logging.getLogger(__name__)
+    tools.initialize_gpu()
     # argument parser
     parser = argparse.ArgumentParser(description="Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
@@ -74,7 +75,7 @@ def main() -> None:
                                                  config=config)
         # save history and model
         results[key]['history'] = history
-        #results[key]['model'] = model
+        #results[key]['model'] = model.get_weights()
         logging.info(f'Evaluation pipeline for {key} started.')
         if config['eval']['retrain_interval'] != 0:
             new_evaluation = eval.evaluate_retrain(config=config,

@@ -12,8 +12,8 @@ model:
   lookback: 48
   horizon: 48
   batch_size: 16
-  epochs: 10
-  lr: 0.0004
+  epochs: 2
+  lr: 0.001
   optimizer: 'adam'
   loss: 'mse'
   metrics: ['mae', 'rmse']
@@ -30,7 +30,7 @@ model:
     dropout: 0.1
   tft:
     n_heads: 1
-    hidden_dim: 60
+    hidden_dim: 45
     dropout: 0.1
   callbacks: False
   save_model: True
@@ -45,7 +45,6 @@ hpo:
   val_split: 0.75
   batch_size: [16, 256]
   epochs: [1, 2]
-  n_rounds: [1, 2]
   n_layers: [1, 4]
   n_cnn_layers: [1, 4]
   n_rnn_layers: [1, 4]
@@ -62,6 +61,12 @@ hpo:
     n_heads: [1, 6]
     hidden_dim: [8, 128]
     dropout: [0.0, 0.5]
+  fl:
+    n_rounds: [1,30]
+    server_lr: [0.0001, 0.1]
+    beta_1: [0,1]
+    beta_2: [0,1]
+    tau: [0.0001, 0.1]
 
 eval:
   results_path: 'results'
@@ -71,7 +76,15 @@ eval:
 
 fl:
   parts: []
-  n_rounds: 6
+  n_rounds: 1
   n_clients: 7
+  strategy: 'fedadam'
+  fedopt:
+    server_lr: 0.001
+    beta_1: 0.9
+    beta_2: 0.99
+    tau: 0.001
   verbose: True
   save_history: True
+  num_gpus: 1
+  num_cpus: 11
