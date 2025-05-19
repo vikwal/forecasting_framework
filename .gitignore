@@ -8,7 +8,7 @@ __pycache__/
 # C extensions
 *.so
 
-# python envs and other directories
+# python envs and other irrelevant directories
 frcst/
 data/
 studies/
@@ -16,6 +16,7 @@ results/
 models/
 Archiv/
 federated/
+logs/
 
 # Distribution / packaging
 .Python

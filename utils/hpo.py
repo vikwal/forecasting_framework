@@ -1,5 +1,8 @@
+### WORK IN PROGRESS
+
 import ray
 import time
+import optuna
 import logging
 import numpy as np
 import pandas as pd
@@ -8,6 +11,260 @@ from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 
 from . import tools, models
+
+
+def create_or_load_study(path, study_name, direction):
+    storage = f'sqlite:///{path}'
+    study = optuna.create_study(
+        storage=storage,
+        study_name=study_name,
+        direction=direction,
+        load_if_exists=True
+    )
+    return study
+
+def load_study(studies_path: str,
+               study_name: str):
+    storage = f'sqlite:///{studies_path}'
+    try:
+        study = optuna.load_study(
+            study_name=study_name,
+            storage=storage
+        )
+    except:
+        #os.remove(f'{path}.db')
+        study = None
+    return study
+
+def split_val(X: Any,
+              y: np.ndarray,
+              val_split):
+    if val_split == 0:
+        return X, y, None, None
+    val_index = int(len(y)*(1-val_split))
+    # case for tft
+    if type(X) == dict:
+        X_train, X_val = {}, {}
+        for key, value in X.items():
+            if len(value) == 0:
+                continue
+            X_train[key] = value[:val_index]
+            X_val[key] = value[val_index:]
+    else:
+        X_train = X[:val_index]
+        X_val = X[val_index:]
+    y_train = y[:val_index]
+    y_val = y[val_index:]
+    return X_train, y_train, X_val, y_val
+
+
+def kfolds(X: Any,
+           y: np.ndarray,
+           n_splits: int,
+           val_split: float = None) -> List:
+    kfolds = []
+    if n_splits == 1: # if not kfolds
+        X_train, y_train, X_val, y_val = split_val(X=X, y=y, val_split=val_split)
+        kfolds.append(((X_train, y_train), (X_val, y_val)))
+        return kfolds
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    for train_index, val_index in tscv.split(y):
+        if type(X) == dict:
+            X_train, X_val = {}, {}
+            for key, value in X.items():
+                if len(value) == 0:
+                    continue
+                X_train[key] = value[train_index]
+                X_val[key] = value[val_index]
+        else:
+            X_train, X_val = X[train_index], X[val_index]
+        y_train, y_val = y[train_index], y[val_index]
+        kfolds.append(((X_train, y_train), (X_val, y_val)))
+    return kfolds
+
+def concatenate_processed_data(data_parts: List) -> Any:
+    """Konkateniert eine Liste von verarbeiteten Daten (numpy arrays oder dicts)."""
+    # Filtere None-Werte heraus, die durch Fehler/leere Splits entstanden sein könnten
+    valid_parts = [p for p in data_parts if p is not None]
+    if not valid_parts:
+        return None
+
+    first_item = valid_parts[0]
+
+    if isinstance(first_item, np.ndarray):
+        # Prüfe auf leere Arrays, bevor konkateniert wird
+        valid_parts = [p for p in valid_parts if p.shape[0] > 0]
+        return np.concatenate(valid_parts, axis=0)
+
+    elif isinstance(first_item, dict):
+         # Stelle sicher, dass alle Teile Dictionaries sind
+         if not all(isinstance(p, dict) for p in valid_parts):
+             raise TypeError("Mische Typen beim Konkatenieren von Dictionaries")
+
+         combined_dict = {}
+         # Nehme an, alle dicts haben dieselben Keys wie das erste
+         keys = first_item.keys()
+         for key in keys:
+             arrays_to_concat = []
+             for d in valid_parts:
+                arrays_to_concat.append(d[key])
+
+             if arrays_to_concat: # Nur konkatenieren, wenn es etwas gibt
+                 # Sicherstellen, dass alle Teile für diesen Key numpy arrays sind
+                 if not all(isinstance(arr, np.ndarray) for arr in arrays_to_concat):
+                     raise TypeError(f"Nicht-Numpy-Array gefunden für Key '{key}' beim Konkatenieren innerhalb des Dictionaries.")
+                 combined_dict[key] = np.concatenate(arrays_to_concat, axis=0)
+             else:
+                 # Fallback: Leeres Array oder None, je nach Anforderung
+                 # Hier verwenden wir None, um anzuzeigen, dass keine Daten für diesen Key vorhanden waren
+                 combined_dict[key] = None
+         return combined_dict
+
+def combine_kfolds(n_splits: int,
+                   kfolds_per_series: list):
+    combined_kfolds = []
+    for i in range(n_splits): # Iteriere über die Split-Indizes (0 bis k-1)
+        xtr_parts = []
+        ytr_parts = []
+        xval_parts = []
+        yval_parts = []
+
+        # Sammle die Daten des i-ten Splits von JEDER Serie
+        for series_folds in kfolds_per_series:
+            (xtr, ytr), (xval, yval) = series_folds[i]
+
+            xtr_parts.append(xtr)
+            ytr_parts.append(ytr)
+            xval_parts.append(xval)
+            yval_parts.append(yval)
+
+        # Konkateniere die gesammelten Teile für diesen Split-Index i
+        # Konkateniere y (sollten immer numpy arrays sein)
+        y_train_combined = np.concatenate([p for p in ytr_parts if p is not None and p.shape[0]>0], axis=0)
+        y_val_combined = np.concatenate([p for p in yval_parts if p is not None and p.shape[0]>0], axis=0)
+
+        # Konkateniere X mithilfe der Helper-Funktion
+        X_train_combined = concatenate_processed_data(xtr_parts)
+        X_val_combined = concatenate_processed_data(xval_parts)
+
+        # Füge den kombinierten Split zur finalen Liste hinzu
+        combined_kfolds.append(((X_train_combined, y_train_combined), (X_val_combined, y_val_combined)))
+    return combined_kfolds
+
+
+def get_hyperparameters(config: dict,
+                        hpo=False,
+                        trial=None,
+                        study=None) -> dict:
+    hyperparameters = {}
+    # general hyperparameters
+    hyperparameters['shuffle'] = config['model']['shuffle']
+    model_name = config['model']['name']
+    batch_size = config['hpo']['batch_size']
+    epochs = config['hpo']['epochs']
+    n_layers = config['hpo']['n_layers']
+    # cnn / rnn / fnn specific hyperparameters
+    n_cnn_layers = config['hpo']['n_cnn_layers']
+    n_rnn_layers = config['hpo']['n_rnn_layers']
+    learning_rate = config['hpo']['learning_rate']
+    filters = config['hpo']['cnn']['filters']
+    kernel_size = config['hpo']['cnn']['kernel_size']
+    rnn_units = config['hpo']['rnn']['units']
+    fnn_units = config['hpo']['fnn']['units']
+    # tft specific hyperparameters
+    n_heads = config['hpo']['tft']['n_heads']
+    hidden_dim = config['hpo']['tft']['hidden_dim']
+    dropout = config['hpo']['tft']['dropout']
+    lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
+    horizon = config['model']['horizon']
+    # fl specific hyperparameters
+    n_rounds = config['hpo']['fl']['n_rounds']
+    strategy = config['hpo']['fl']['strategy']
+    server_lr = config['hpo']['fl']['server_lr']
+    beta_1 = config['hpo']['fl']['beta_1']
+    beta_2 = config['hpo']['fl']['beta_2']
+    tau = config['hpo']['fl']['tau']
+    # boolean variables
+    is_cnn_type = 'cnn' in model_name or 'tcn' in model_name
+    is_rnn_type = 'lstm' in model_name or 'gru' in model_name
+    is_fnn_type = model_name == 'fnn'
+    is_tft_type = model_name == 'tft'
+    if hpo:
+        hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
+        hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
+        hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
+        if config['model']['fl']:
+            hyperparameters['n_rounds'] = trial.suggest_int('n_rounds', n_rounds[0], n_rounds[1])
+            hyperparameters['strategy'] = strategy
+            if strategy in ['fedavgm', 'fedadam', 'fedyogi']:
+                hyperparameters['server_lr'] = trial.suggest_float('server_lr', server_lr[0], server_lr[1], log=True)
+                hyperparameters['beta_1'] = trial.suggest_float('beta_1', beta_1[0], beta_1[1])
+            if strategy == 'fedadam':
+                hyperparameters['beta_2'] = trial.suggest_float('beta_2', beta_2[0], beta_2[1])
+                hyperparameters['tau'] = trial.suggest_float('tau', tau[0], tau[1], log=True)
+        if is_cnn_type:
+            hyperparameters['filters'] = trial.suggest_int('filters', filters[0], filters[1])
+            hyperparameters['kernel_size'] = trial.suggest_int('kernel_size', kernel_size[0], kernel_size[1])
+            hyperparameters['n_cnn_layers'] = trial.suggest_int('n_cnn_layers', n_cnn_layers[0], n_cnn_layers[1])
+        if is_rnn_type:
+            hyperparameters['units'] = trial.suggest_int('units', rnn_units[0], rnn_units[1])
+            hyperparameters['n_rnn_layers'] = trial.suggest_int('n_rnn_layers', n_rnn_layers[0], n_rnn_layers[1])
+        if is_fnn_type:
+            hyperparameters['n_layers'] = trial.suggest_int('n_layers', n_layers[0], n_layers[1])
+            hyperparameters['units'] = trial.suggest_int('units', fnn_units[0], fnn_units[1])
+        if is_tft_type:
+            hyperparameters['horizon'] = horizon
+            hyperparameters['lookback'] = lookback#trial.suggest_categorical('lookback', lookback)
+            hyperparameters['n_heads'] = trial.suggest_int('n_heads', n_heads[0], n_heads[1])
+            hyperparameters['hidden_dim'] = trial.suggest_int('hidden_dim', hidden_dim[0], hidden_dim[1])
+            hyperparameters['dropout'] = trial.suggest_float('dropout', dropout[0], dropout[1])
+    else:
+        if study and study.best_trial:
+            hyperparameters.update(study.best_trial.params)
+            hyperparameters['lookback'] = lookback
+            hyperparameters['horizon'] = horizon
+        else:
+            hyperparameters['batch_size'] = config['model']['batch_size']
+            hyperparameters['epochs'] = config['model']['epochs']
+            hyperparameters['lr'] = config['model']['lr']
+            if config['model']['fl']:
+                hyperparameters['n_rounds'] = config['fl']['n_rounds']
+                hyperparameters['strategy'] = config['fl']['strategy']
+                if config['fl']['strategy'].lower() in ['fedavgm', 'fedadam', 'fedyogi']:
+                    hyperparameters['server_lr'] = config['fl']['fedopt']['server_lr']
+                    hyperparameters['beta_1'] = config['fl']['fedopt']['beta_1']
+                if config['fl']['strategy'].lower() in ['fedadam', 'fedyogi']:
+                    hyperparameters['beta_2'] = config['fl']['fedopt']['beta_2']
+                if config['fl']['strategy'].lower() in ['fedadam']:
+                    hyperparameters['tau'] = config['fl']['fedopt']['tau']
+            if is_cnn_type:
+                hyperparameters['filters'] = config['model']['cnn']['filters']
+                hyperparameters['kernel_size'] = config['model']['cnn']['kernel_size']
+                hyperparameters['n_cnn_layers'] = config['model']['cnn']['n_cnn_layers']
+            if is_rnn_type:
+                hyperparameters['units'] = config['model']['rnn']['units']
+                hyperparameters['n_rnn_layers'] = config['model']['rnn']['n_rnn_layers']
+            if is_fnn_type:
+                hyperparameters['n_layers'] = config['model']['fnn']['n_layers']
+                hyperparameters['units'] = config['model']['fnn']['units']
+            if is_tft_type:
+                hyperparameters['horizon'] = horizon
+                hyperparameters['lookback'] = lookback
+                hyperparameters['n_heads'] = config['model']['tft']['n_heads']
+                hyperparameters['hidden_dim'] = config['model']['tft']['hidden_dim']
+                hyperparameters['dropout'] = config['model']['tft']['dropout']
+    return hyperparameters
+
+def load_hyperparams(study_name: str,
+                     config: dict):
+    studies_dir = config['hpo']['studies_dir']
+    study = load_study(studies_dir=studies_dir,
+                       study_name=study_name)
+    if study:
+        return study.best_trial.params
+    return None
+
+## -------------- all below is work in propgress --------------
 
 class ServerOptimizer:
     """
@@ -132,18 +389,13 @@ class ClientActor:
               global_weights: List):
         """Performs model training for a communication round."""
         verbose = self.config['fl']['verbose']
-        personalize = self.config['fl'].get('personalize', False)
-        if personalize:
-             _, personal_weights = split_weights_by_layer_name(self.model)
-             set_weights_by_layer_name(self.model, global_weights, personal_weights)
-        else:
-            self.model.set_weights(global_weights)
         if self.X_val is not None and self.y_val is not None:
             validation_data = (self.X_val, self.y_val)
         else:
             validation_data = None
         # if config['model']['callbacks']:
         #     callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model_name"]}.keras', save_best_only=True)]
+        self.model.set_weights(global_weights)
         history = self.model.fit(
             x=self.X_train,
             y=self.y_train,
@@ -169,12 +421,7 @@ class ClientActor:
     def evaluate(self,
                  global_weights: list):
         """Performs local evaluation at the end of a communication round."""
-        personalize = self.config['fl'].get('personalize', False)
-        if personalize:
-             _, personal_weights = split_weights_by_layer_name(self.model)
-             set_weights_by_layer_name(self.model, global_weights, personal_weights)
-        else:
-            self.model.set_weights(global_weights)
+        self.model.set_weights(global_weights)
         if self.X_val is not None and self.y_val is not None:
             metrics = self.model.evaluate(
                 x=self.X_val,
@@ -191,33 +438,6 @@ class ClientActor:
                    'n_samples': len(self.y_val),
                    'metrics': metrics}
         return results
-
-
-def split_weights_by_layer_name(model):
-    shared_weights = []
-    personal_weights = []
-    for layer in model.layers:
-        name = layer.name
-        weights = layer.get_weights()
-        if name.startswith("tcn_"):
-            shared_weights.extend(weights)
-        elif name.startswith("gru_") or name == "output":
-            personal_weights.extend(weights)
-    return shared_weights, personal_weights
-
-def set_weights_by_layer_name(model, shared_weights, personal_weights):
-    shared_ptr = 0
-    personal_ptr = 0
-    for layer in model.layers:
-        name = layer.name
-        layer_weights = layer.get_weights()
-        n = len(layer_weights)
-        if name.startswith("tcn_"):
-            layer.set_weights(shared_weights[shared_ptr:shared_ptr + n])
-            shared_ptr += n
-        elif name.startswith("gru_") or name == "output":
-            layer.set_weights(personal_weights[personal_ptr:personal_ptr + n])
-            personal_ptr += n
 
 
 def aggregate_weights(client_results: List[Dict[str, Any]]):
@@ -338,17 +558,8 @@ def run_simulation(partitions: List,
         )
         client_actors.append(actor)
 
-    logging.info("Start FL simulation using Ray.")
+    logging.info("Start local HPO using Ray.")
     start_time = time.time()
-
-    logging.info('[Server] Global model is initialized.')
-    global_model = models.get_model(config=config,
-                                    hyperparameters=hyperparameters)
-    global_weights = global_model.get_weights()
-
-    server_optimizer = None
-    if strategy != 'fedavg':
-        server_optimizer = ServerOptimizer(strategy, hyperparameters, global_weights)
 
     history = {}
     all_rounds_metrics_data = []
@@ -362,36 +573,11 @@ def run_simulation(partitions: List,
         results_refs = []
         for actor in client_actors:
             # Übergebe die aktuellen globalen Gewichte an jeden Actor
-            ref = actor.train.remote(global_weights)
+            ref = actor.train.remote()
             results_refs.append(ref)
         # Warte auf die Ergebnisse aller Clients und hole sie ab
         # ray.get() blockiert, bis alle Aufgaben in der Liste abgeschlossen sind
         client_results = ray.get(results_refs)
-        logging.info(f"[Server] All clients trained. Start aggregation.")
-
-        # Aggregate metrics and weights
-        aggregated_weights = aggregate_weights(client_results)
-        train_metrics_agg = aggregate_metrics(client_results)
-
-        # --- Server-seitigen Optimierungsschritt anwenden (falls nicht FedAvg) ---
-        if server_optimizer:
-            new_global_weights = server_optimizer.step(global_weights, aggregated_weights)
-        else:
-            # Bei FedAvg sind die aggregierten Gewichte die finalen Gewichte
-            new_global_weights = aggregated_weights
-
-        # (optional:) save clients histories
-        if save_history:
-            history[round_num]['history'] = get_train_history(client_results)
-
-        logging.info('[Server] Training metrics aggregated.')
-
-        # Update global model
-        if new_global_weights:
-            global_model.set_weights(new_global_weights)
-            global_weights = new_global_weights # Gewichte für die nächste Runde speichern
-        else:
-            logging.warning("[Server] There's nothing to aggregate.")
 
         logging.info(f'[Server] Start local evaluation.')
         # Local evaluation

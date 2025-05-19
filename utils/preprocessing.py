@@ -386,23 +386,23 @@ def preprocess_pvod(path: str,
     df['latitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Latitude'].iloc[0])
     df['longitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Longitude'].iloc[0])
     df['nwp_gti'] = meteo.get_total_irradiance(ghi=df['nwp_globalirrad'],
-                                               pressure=df['nwp_pressure'],
-                                               temperature=df['nwp_temperature'],
-                                               latitude=df['latitude'],
-                                               longitude=df['longitude'],
-                                               surface_tilt=df['tilt'],
-                                               surface_azimuth=df['azimuth'],
-                                               time_index=df.index,
-                                               dni=df['nwp_directirrad'])
+                                            pressure=df['nwp_pressure'],
+                                            temperature=df['nwp_temperature'],
+                                            latitude=df['latitude'],
+                                            longitude=df['longitude'],
+                                            surface_tilt=df['tilt'],
+                                            surface_azimuth=df['azimuth'],
+                                            time_index=df.index,
+                                            dni=df['nwp_directirrad'])
     df['lmd_gti'] = meteo.get_total_irradiance(ghi=df['lmd_totalirrad'],
-                                               pressure=df['lmd_pressure'],
-                                               temperature=df['lmd_temperature'],
-                                               latitude=df['latitude'],
-                                               longitude=df['longitude'],
-                                               surface_tilt=df['tilt'],
-                                               surface_azimuth=df['azimuth'],
-                                               time_index=df.index,
-                                               dhi=df['lmd_diffuseirrad'])
+                                            pressure=df['lmd_pressure'],
+                                            temperature=df['lmd_temperature'],
+                                            latitude=df['latitude'],
+                                            longitude=df['longitude'],
+                                            surface_tilt=df['tilt'],
+                                            surface_azimuth=df['azimuth'],
+                                            time_index=df.index,
+                                            dhi=df['lmd_diffuseirrad'])
     df['lmd_gti'] = df['lmd_gti'].fillna(0)
     # normalize time series by installed capacity
     df[target_col] = df[target_col] / (metadata.loc[metadata.Station_ID == station_id]['Capacity'].values[0] / 1000)
@@ -438,28 +438,50 @@ def preprocess_1b_trina(path: str,
     return df
 
 
-def get_features(data: str) -> Tuple[List, List]:
+def get_features(data: str, gti=False) -> Tuple[List, List]:
     known, observed, static = None, None, None
-    if data == 'pvod':
-        known = [
-                #'nwp_globalirrad',
-                #'nwp_directirrad',
-                'nwp_gti',
-                'nwp_temperature',
-                'nwp_humidity',
-                'nwp_windspeed']
-        observed = [
-                    #'lmd_totalirrad',
-                    #'lmd_diffuseirrad',
-                    'lmd_gti',
-                    'lmd_temperature',
-                    'lmd_pressure',
-                    'lmd_winddirection',
-                    'lmd_windspeed',
-                    'power']
-        static = [
-                'Station_ID'
-                'Array_Tilt']
+    if gti:
+        if data == 'pvod':
+            known = [
+                    #'nwp_globalirrad',
+                    #'nwp_directirrad',
+                    'nwp_gti',
+                    'nwp_temperature',
+                    'nwp_humidity',
+                    'nwp_windspeed']
+            observed = [
+                        #'lmd_totalirrad',
+                        #'lmd_diffuseirrad',
+                        'lmd_gti',
+                        'lmd_temperature',
+                        #'lmd_pressure',
+                        #'lmd_winddirection',
+                        'lmd_windspeed',
+                        'power']
+            static = [
+                    'Station_ID'
+                    'Array_Tilt']
+    else:
+        if data == 'pvod':
+            known = [
+                    'nwp_globalirrad',
+                    'nwp_directirrad',
+                    #'nwp_gti',
+                    'nwp_temperature',
+                    'nwp_humidity',
+                    'nwp_windspeed']
+            observed = [
+                        'lmd_totalirrad',
+                        'lmd_diffuseirrad',
+                        #'lmd_gti',
+                        'lmd_temperature',
+                        #'lmd_pressure',
+                        #'lmd_winddirection',
+                        'lmd_windspeed',
+                        'power']
+            static = [
+                    'Station_ID'
+                    'Array_Tilt']
     return known, observed, static
 
 def germansolarfarm(path: str,

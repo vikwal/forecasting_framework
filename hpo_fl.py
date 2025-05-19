@@ -7,7 +7,7 @@ import logging
 import argparse
 from tqdm import tqdm
 
-from utils import tools, preprocessing, federated
+from utils import tools, preprocessing, federated, hpo
 
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
@@ -24,26 +24,30 @@ def main() -> None:
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
     args = parser.parse_args()
     # create directories
-    os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
     os.makedirs('studies', exist_ok=True)
     # read config
     config = tools.load_config('config.yaml')
     freq = config['data']['freq']
-    config['model']['output_dim'] = 1 # delete when
+    config['model']['output_dim'] = 48 # delete when
     config = tools.handle_freq(config=config)
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['shuffle'] = False
     config['model']['fl'] = True
-    study_name = f'fl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
-    study = tools.create_or_load_study('studies/', study_name, direction='minimize')
     config['model']['name'] = args.model
     # get observed, known and static features
-    known, observed, static = preprocessing.get_features(data=args.data)
-    rel_features = known + observed
+    gti = True
+    suffix = ''
+    if gti: suffix+='_gti'
+    if config['hpo']['fl']['personalize']: suffix+='_pers'
+    study_name = f'fl_a-{config["hpo"]["fl"]["strategy"]}_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
+    study_name+=suffix
+    study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name, direction='minimize')
     # load and prepare training and test data
+    known, observed, static = preprocessing.get_features(data=args.data, gti=gti)
+    rel_features = known + observed
     dfs = preprocessing.get_data(data=args.data,
                                  data_dir=config['data']['path'],
                                  freq=freq,
@@ -60,7 +64,7 @@ def main() -> None:
         X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
         #X_train, y_train, X_val, y_val = tools.split_val(X=X_train, y=y_train, val_split=config['data']['val_frac'])
         partitions.append((X_train, y_train, X_test, y_test))
-    kfolds_partitions = federated.get_kfolds_partitions(n_splits=config['hpo']['kfolds'], partitions=partitions)
+    k_partitions = federated.get_kfolds_partitions(n_splits=config['hpo']['kfolds'], partitions=partitions)
     # get feature_dim from the data
     feature_dim = tools.get_feature_dim(X_train)
     config['model']['feature_dim'] = feature_dim
@@ -70,16 +74,20 @@ def main() -> None:
     for i in tqdm(range(len_trials, config['hpo']['trials'])):
         combinations = [trial.params for trial in study.trials]
         trial = study.ask()
-        hyperparameters = tools.get_hyperparameters(config=config,
+        hyperparameters = hpo.get_hyperparameters(config=config,
                                                     hpo=True,
                                                     trial=trial)
+        hyperparameters['personlization'] = config['hpo']['fl']['personalize']
+        hyperparameters['gti'] = gti
+        config['fl']['personalize'] = config['hpo']['fl']['personalize']
+        config['fl']['strategy'] = config['hpo']['fl']['strategy']
         check_params = hyperparameters.copy()
         if check_params in combinations:
             study.tell(trial, state=optuna.trial.TrialState.PRUNED)
             continue
         logger.info(json.dumps(hyperparameters))
         accuracies = []
-        for partitions in kfolds_partitions:
+        for partitions in k_partitions:
             history, _ = federated.run_simulation(partitions=partitions,
                                                   config=config,
                                                   hyperparameters=hyperparameters)

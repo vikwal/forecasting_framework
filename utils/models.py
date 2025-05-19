@@ -22,7 +22,7 @@ def _build_rnn_stack(input_tensor: tf.Tensor,
         if bidirectional:
             # Name für Bidirectional Layer explizit setzen, um Konflikte zu vermeiden
             # (obwohl Keras dies oft automatisch gut handhabt)
-            bidir_name = f'bidirectional_{layer_name_prefix}_{i+1}'
+            bidir_name = f'bi{layer_name_prefix}_{i+1}'
             x = layers.Bidirectional(rnn_layer, name=bidir_name)(x)
         else:
             x = rnn_layer(x)
@@ -70,7 +70,7 @@ def _build_conv_stack(input_tensor: tf.Tensor,
                                    activation=activation,
                                    padding=padding,
                                    dilation_rate=dilation_rate,
-                                   name=f'{layer_name_prefix}_{conv_type}_{i+1}')
+                                   name=f'{layer_name_prefix}_{i+1}')
         x = conv_layer(x)
     return x
 
@@ -342,7 +342,9 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
 
 # Special model builders
 
-def build_convlstm1d(n_features: int, output_dim: int, hp: Dict[str, Any]) -> Model:
+def build_convlstm1d(n_features: int,
+                     output_dim: int,
+                     hp: Dict[str, Any]) -> Model:
     """
     Baut ein ConvLSTM1D Netzwerk unter Verwendung von _build_convlstm1d_stack.
     Der ConvLSTM1D-Stack kann als Standard ('convlstm') oder TCN-ähnlich ('tcn')
@@ -434,7 +436,6 @@ def build_tft(feature_dims: Dict[str, int],
     known_decoder_selected, known_dec_weights = _variable_selection_network(
         known_decoder_input, known_dim, hidden_dim, static_context_vsn, dropout_rate, 'known_decoder_vsn'
     )
-
     # --- LSTM Encoder ---
     encoder_input_combined = layers.Concatenate(axis=-1)([observed_selected, known_encoder_selected])
     lstm_encoder = layers.LSTM(hidden_dim,

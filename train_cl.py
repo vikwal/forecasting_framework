@@ -10,12 +10,10 @@ import tensorflow as tf
 from tensorflow import keras
 from tqdm import tqdm
 import logging
-
-from utils import tools
+import pickle
 import optuna
 
-from utils import eval, preprocessing
-import pickle
+from utils import tools, eval, preprocessing, hpo
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.INFO,
@@ -42,6 +40,7 @@ def main() -> None:
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
+    config['model']['name'] = args.model
     config['model']['shuffle'] = True
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data='pvod')
@@ -81,8 +80,8 @@ def main() -> None:
             results = pickle.load(f)
         model = results['model']
     else:
-        study = tools.load_study('studies/', study_name)
-        hyperparameters = tools.get_hyperparameters(config=config,
+        study = hpo.load_study(config['hpo']['studies_path'], study_name)
+        hyperparameters = hpo.get_hyperparameters(config=config,
                                                     study=study)
         # save hyperparameters in results
         results['hyperparameters'] = hyperparameters
