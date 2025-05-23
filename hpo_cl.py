@@ -42,7 +42,7 @@ def main() -> None:
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data=args.data)
 
-    study_name = f'cl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
+    study_name = f'cl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'#_incrfltrs-{config["hpo"]["cnn"]["increase_filters"]}'
     config['model_name'] = args.model
     study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name, direction='minimize')
     # load and prepare training and test data

@@ -38,7 +38,7 @@ def main() -> None:
     config['model']['fl'] = True
     config['model']['name'] = args.model
     # get observed, known and static features
-    gti = True
+    gti = False
     suffix = ''
     if gti: suffix+='_gti'
     if config['hpo']['fl']['personalize']: suffix+='_pers'

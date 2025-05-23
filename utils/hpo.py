@@ -171,6 +171,7 @@ def get_hyperparameters(config: dict,
     kernel_size = config['hpo']['cnn']['kernel_size']
     rnn_units = config['hpo']['rnn']['units']
     fnn_units = config['hpo']['fnn']['units']
+    increase_filters = config['hpo']['cnn']['increase_filters']
     # tft specific hyperparameters
     n_heads = config['hpo']['tft']['n_heads']
     hidden_dim = config['hpo']['tft']['hidden_dim']
@@ -206,6 +207,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['filters'] = trial.suggest_int('filters', filters[0], filters[1])
             hyperparameters['kernel_size'] = trial.suggest_int('kernel_size', kernel_size[0], kernel_size[1])
             hyperparameters['n_cnn_layers'] = trial.suggest_int('n_cnn_layers', n_cnn_layers[0], n_cnn_layers[1])
+            hyperparameters['increase_filters'] = increase_filters
         if is_rnn_type:
             hyperparameters['units'] = trial.suggest_int('units', rnn_units[0], rnn_units[1])
             hyperparameters['n_rnn_layers'] = trial.suggest_int('n_rnn_layers', n_rnn_layers[0], n_rnn_layers[1])
@@ -241,6 +243,7 @@ def get_hyperparameters(config: dict,
                 hyperparameters['filters'] = config['model']['cnn']['filters']
                 hyperparameters['kernel_size'] = config['model']['cnn']['kernel_size']
                 hyperparameters['n_cnn_layers'] = config['model']['cnn']['n_cnn_layers']
+                hyperparameters['increase_filters'] = config['model']['cnn']['increase_filters']
             if is_rnn_type:
                 hyperparameters['units'] = config['model']['rnn']['units']
                 hyperparameters['n_rnn_layers'] = config['model']['rnn']['n_rnn_layers']

@@ -24,6 +24,7 @@ model:
     filters: 64
     kernel_size: 3
     n_cnn_layers: 2
+    increase_filters: False
   rnn:
     n_rnn_layers: 2
     units: 64
@@ -35,10 +36,11 @@ model:
   callbacks: False
   save_model: True
   shuffle: False
-  verbose: 0
+  force_retrain: True
+  verbose: 1
 
 hpo:
-  studies_path: 'studies/optuna_studies.db'
+  studies_path: '/mnt/nasl1/optuna_studies.db'
   metric: 'rmse'
   trials: 1000
   kfolds: 5
@@ -46,16 +48,17 @@ hpo:
   batch_size: [16, 256]
   epochs: [10, 50]
   n_layers: [1, 4]
-  n_cnn_layers: [1, 7]
-  n_rnn_layers: [1, 7]
+  n_cnn_layers: [1, 8]
+  n_rnn_layers: [1, 8]
   learning_rate: [0.0001, 0.1]
   fnn:
     units: [32, 256]
   cnn:
     filters: [16, 128]
-    kernel_size: [2, 5]
+    kernel_size: [2, 7]
+    increase_filters: True
   rnn:
-    units: [16, 256]
+    units: [16, 300]
   tft:
     lookback: [24, 48, 72, 96]
     n_heads: [1, 6]
@@ -63,8 +66,8 @@ hpo:
     dropout: [0.0, 0.5]
   fl:
     strategy: 'fedadam'
-    personalize: False
-    n_rounds: [1,50]
+    personalize: True
+    n_rounds: [1,100]
     server_lr: [0.0001, 0.1]
     beta_1: [0,1]
     beta_2: [0,1]
@@ -79,7 +82,7 @@ eval:
 fl:
   parts: []
   n_clients: 7
-  strategy: 'fedavg'
+  strategy: 'fedadam'
   n_rounds: 1
   personalize: False
   fedopt:

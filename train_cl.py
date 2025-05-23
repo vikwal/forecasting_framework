@@ -27,7 +27,9 @@ def main() -> None:
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('--kfolds', '-k', action='store_true', help='Boolean for Kfolds (default: False)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
+    parser.add_argument('-g', '--gpu', type=int, help='Select gpu')
     args = parser.parse_args()
+    tools.initialize_gpu(use_gpu=args.gpu)
     # create directories
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
@@ -75,7 +77,7 @@ def main() -> None:
             y_train = np.concatenate((y_train, prepared_data['y_train']))
             y_test = np.concatenate((y_test, prepared_data['y_test']))
         test_data[key] = prepared_data['X_test'], prepared_data['y_test'], prepared_data['index_test'], prepared_data['scalers']['y']
-    if os.path.exists(path_to_pkl):
+    if os.path.exists(path_to_pkl) and not config['model']['force_retrain']:
         with open(path_to_pkl, 'rb') as f:
             results = pickle.load(f)
         model = results['model']
@@ -83,12 +85,14 @@ def main() -> None:
         study = hpo.load_study(config['hpo']['studies_path'], study_name)
         hyperparameters = hpo.get_hyperparameters(config=config,
                                                     study=study)
+        logger.info(json.dumps(hyperparameters))
         # save hyperparameters in results
         results['hyperparameters'] = hyperparameters
 
         train = X_train, y_train
         test = X_test, y_test #X_val, y_val
-        config['model_name'] = f'all_m-{args.model}_out-{output_dim}_freq-{freq}'
+        # config model name relevant for callbacks
+        config['model_name'] = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}'
         logging.info(f'Training pipeline started.')
         history, model = tools.training_pipeline(train=train,
                                                  val=test,
@@ -96,7 +100,7 @@ def main() -> None:
                                                  config=config)
         # save progress
         results['history'] = history
-        results['model'] = model
+        #results['model'] = model
         with open(path_to_pkl, 'wb') as f:
             pickle.dump(results, f)
 

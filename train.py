@@ -38,7 +38,7 @@ def main() -> None:
     horizon = config['model']['horizon']
     config['model']['name'] = args.model
     config['model']['shuffle'] = False
-    study_name = f'fl_a-{config["fl"]["strategy"]}_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
+    study_name = f'd-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data=args.data)
     # load and prepare training and test data

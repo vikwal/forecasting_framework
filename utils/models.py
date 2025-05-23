@@ -34,7 +34,7 @@ def _build_conv_stack(input_tensor: tf.Tensor,
                         n_layers: int,
                         activation: str = 'relu',
                         conv_type: str = 'cnn', # 'cnn' oder 'tcn'
-                        increase_filters: bool = True, # Filter pro Layer erhöhen?
+                        increase_filters: bool = False, # Filter pro Layer erhöhen?
                         layer_name_prefix: str = 'conv1d') -> tf.Tensor:
     """
     Baut einen Stapel von Conv1D-Layern, unterstützt 'cnn' oder 'tcn'-Verhalten.
@@ -257,7 +257,7 @@ def build_conv1d(n_features: int, output_dim: int, hp: Dict[str, Any], conv_type
     # Unterschiedliche Standardwerte für n_layers je nach Typ beibehalten?
     default_n_layers = 1 if conv_type == 'cnn' else 2
     n_layers = hp.get('n_cnn_layers', default_n_layers)
-    increase_filters = hp.get('increase_filters', True)
+    increase_filters = hp.get('increase_filters', False)
     activation = hp.get('activation', 'relu') # Wird an Stack-Builder übergeben
 
     # Baue das Modell
@@ -313,7 +313,7 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
     filters = hp.get('filters', 16)
     kernel_size = hp.get('kernel_size', 2)
     units = hp.get('units', 16)
-    increase_filters = hp.get('increase_filters', True)
+    increase_filters = hp.get('increase_filters', False)
     conv_activation = hp.get('conv_activation', 'relu') # Aktivierung für Conv1D Stack
 
     # Baue das Modell
@@ -355,7 +355,7 @@ def build_convlstm1d(n_features: int,
     kernel_size = hp.get('kernel_size', 3)
     n_layers = hp.get('n_cnn_layers', 1)
     activation = hp.get('activation', 'tanh')
-    increase_filters = hp.get('increase_filters', True) # Standardmäßig keine Erhöhung
+    increase_filters = hp.get('increase_filters', False) # Standardmäßig keine Erhöhung
 
     # Input Layer
     input_layer = layers.Input(shape=(output_dim, n_features), name='input')

@@ -128,7 +128,10 @@ def initialize_gpu(use_gpu=None):
     if gpus:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        if use_gpu: tf.config.experimental.set_visible_devices(gpus[use_gpu], 'GPU')
+        if use_gpu:
+            tf.config.experimental.set_visible_devices(gpus[use_gpu], 'GPU')
+        #else:
+        #    strategy = tf.distribute.MirroredStrategy()
     else:
         print("No Physical GPUs found.")
 
