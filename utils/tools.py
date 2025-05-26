@@ -1,14 +1,14 @@
-import os
 import yaml
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Any
+from typing import Dict, Tuple, Any
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import r2_score
+import os
+import logging
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import tensorflow as tf
 from tensorflow import keras
-import optuna
 
 from . import models
 
@@ -77,13 +77,30 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     X_train, y_train = train
     if val: X_val, y_val = val
     config['model']['feature_dim'] = get_feature_dim(X=X_train)
-    model = models.get_model(config=config,
-                             hyperparameters=hyperparameters)
+    parallelize = config['model'].get('parallelize', False)
+    if parallelize:
+        n_gpus = len(config['model'].get('gpus'))
+        batch_size = hyperparameters.get('batch_size')
+        if n_gpus > 1:
+            adjusted_batch_size = batch_size
+            while adjusted_batch_size % n_gpus != 0:
+                adjusted_batch_size -= 1
+            if adjusted_batch_size != batch_size:
+                logging.warning(f'Batch size had to be reduced from {batch_size} to {adjusted_batch_size} for parallel GPU use.')
+            hyperparameters['batch_size'] = adjusted_batch_size
+        strategy = tf.distribute.MirroredStrategy()
+        logging.info(f"Using MirroredStrategy with {n_gpus} GPUs.")
+    else:
+        strategy = tf.distribute.get_strategy()  # DefaultStrategy (no distribution)
+        logging.info("Using default strategy (single device).")
+    with strategy.scope():
+        model = models.get_model(config=config, hyperparameters=hyperparameters)
     if config['model']['callbacks']:
         callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model"]["name"]}.keras', save_best_only=True)]
+    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_dataset = train_dataset.batch(hyperparameters['batch_size']).prefetch(tf.data.AUTOTUNE)
     history = model.fit(
-        x = X_train,
-        y = y_train,
+        x=train_dataset,
         batch_size = hyperparameters['batch_size'],
         epochs = hyperparameters['epochs'],
         verbose = config['model']['verbose'],
@@ -129,9 +146,8 @@ def initialize_gpu(use_gpu=None):
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
         if use_gpu:
-            tf.config.experimental.set_visible_devices(gpus[use_gpu], 'GPU')
-        #else:
-        #    strategy = tf.distribute.MirroredStrategy()
+            selected_gpus = [gpus[i] for i in use_gpu] if isinstance(use_gpu, list) else [gpus[use_gpu]]
+            tf.config.experimental.set_visible_devices(selected_gpus, 'GPU')
     else:
         print("No Physical GPUs found.")
 

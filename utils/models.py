@@ -583,7 +583,5 @@ def get_model(config: Dict[str, Any],
     # Sicherstellen, dass Metriken eine Liste ist, falls nur ein String übergeben wird
     if isinstance(metrics, str):
         metrics = [metrics]
-    model.compile(optimizer=optimizer,
-                  loss=loss,
-                  metrics=metrics)
+    model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
     return model

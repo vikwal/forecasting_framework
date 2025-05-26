@@ -229,7 +229,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['batch_size'] = config['model']['batch_size']
             hyperparameters['epochs'] = config['model']['epochs']
             hyperparameters['lr'] = config['model']['lr']
-            if config['model']['fl']:
+            if config['model'].get('fl', False):
                 hyperparameters['n_rounds'] = config['fl']['n_rounds']
                 hyperparameters['strategy'] = config['fl']['strategy']
                 if config['fl']['strategy'].lower() in ['fedavgm', 'fedadam', 'fedyogi']:
