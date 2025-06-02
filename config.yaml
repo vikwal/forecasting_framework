@@ -37,10 +37,11 @@ model:
   save_model: True
   shuffle: False
   force_retrain: True
+  parallelize: True
   verbose: 1
 
 hpo:
-  studies_path: '/mnt/nasl1/optuna_studies.db'
+  studies_path: '/mnt/nasl2/optuna_studies.db'
   metric: 'rmse'
   trials: 1000
   kfolds: 5

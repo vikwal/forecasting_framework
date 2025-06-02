@@ -1,14 +1,10 @@
 # Train model on all parks data at once
 
 import os
-import yaml
 import json
 import argparse
 import pandas as pd
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-from tqdm import tqdm
 import logging
 import pickle
 import optuna
@@ -27,7 +23,7 @@ def main() -> None:
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('--kfolds', '-k', action='store_true', help='Boolean for Kfolds (default: False)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
-    parser.add_argument('-g', '--gpu', type=int, default=0, help='Select GPU. Default is 0.')
+    parser.add_argument('-g', '--gpu', type=int, nargs='+', help='Select GPU(s) by index, e.g., --gpu 0 1')
     args = parser.parse_args()
     tools.initialize_gpu(use_gpu=args.gpu)
     # create directories
@@ -44,6 +40,7 @@ def main() -> None:
     horizon = config['model']['horizon']
     config['model']['name'] = args.model
     config['model']['shuffle'] = True
+    config['model']['gpus'] = args.gpu
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data='pvod')
 
@@ -85,10 +82,9 @@ def main() -> None:
         study = hpo.load_study(config['hpo']['studies_path'], study_name)
         hyperparameters = hpo.get_hyperparameters(config=config,
                                                     study=study)
-        logger.info(json.dumps(hyperparameters))
         # save hyperparameters in results
         results['hyperparameters'] = hyperparameters
-
+        logging.info(json.dumps(hyperparameters))
         train = X_train, y_train
         test = X_test, y_test #X_val, y_val
         # config model name relevant for callbacks
