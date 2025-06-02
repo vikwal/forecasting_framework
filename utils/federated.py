@@ -189,7 +189,8 @@ class ClientActor:
         logging.info(f"[ClientActor {self.client_id}] Terminated local evaluation.")
         results = {'client_id': self.client_id,
                    'n_samples': len(self.y_val),
-                   'metrics': metrics}
+                   'metrics': metrics,
+                   'weights': self.model.get_weights()}
         return results
 
 
@@ -261,6 +262,14 @@ def get_train_history(client_results: List[Dict[str, Any]]):
         histories[client_id] = history
     return histories
 
+def get_clients_weights(client_results: List[Dict[str, Any]]):
+    """Extracts the weights of each client from the results."""
+    clients_weights = {}
+    for client in client_results:
+        client_id = client['client_id']
+        clients_weights[client_id] = client['weights']
+    return clients_weights
+
 def get_kfolds_partitions(n_splits, partitions):
     tscv = TimeSeriesSplit(n_splits=n_splits)
     raw_partitions = [] # Speichert Folds pro ursprünglicher Partition: [[fold1_p1, fold2_p1,...], [fold1_p2, ...]]
@@ -302,9 +311,10 @@ def get_kfolds_partitions(n_splits, partitions):
     return kfolds_partitions
 
 
-def run_simulation(partitions: List,
+def run_simulation(partitions: Any,
                    config: Dict[str, Any],
-                   hyperparameters: Dict[str, Any]):
+                   hyperparameters: Dict[str, Any],
+                   client_ids = None):
     """Performs FL simulation."""
 
     # initialize variables
@@ -324,11 +334,19 @@ def run_simulation(partitions: List,
              log_to_driver=True         # Leitet Worker-Logs an den Driver (deine Konsole)
             )
 
+    if isinstance(partitions, list):
+        if client_ids:
+            if len(partitions) != len(client_ids):
+                raise ValueError("Length of partitions and client_ids must match.")
+            partitions = {client_id: part for client_id, part in zip(client_ids, partitions)}
+        else:
+            partitions = {i: part for i, part in enumerate(partitions)}
+
     client_actors = []
-    for i in range(n_clients):
-        X_train, y_train, X_val, y_val = partitions[i]
+    for key, value in partitions.items():
+        X_train, y_train, X_val, y_val = value
         actor = ClientActor.options(num_gpus=gpu_per_actor).remote(
-            client_id=i,
+            client_id=key,
             X_train=X_train,
             y_train=y_train,
             X_val=X_val,
@@ -431,4 +449,5 @@ def run_simulation(partitions: List,
     history['metrics_aggregated'] = metrics_df
     logging.info("Aggregated Metrics DataFrame ---")
     logging.info(f"\n{metrics_df}")
-    return history, global_model
+    clients_weights = get_clients_weights(client_results)
+    return history, clients_weights

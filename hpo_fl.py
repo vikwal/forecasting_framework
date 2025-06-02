@@ -38,7 +38,7 @@ def main() -> None:
     config['model']['fl'] = True
     config['model']['name'] = args.model
     # get observed, known and static features
-    gti = False
+    gti = True
     suffix = ''
     if gti: suffix+='_gti'
     if config['hpo']['fl']['personalize']: suffix+='_pers'
@@ -90,7 +90,8 @@ def main() -> None:
         for partitions in k_partitions:
             history, _ = federated.run_simulation(partitions=partitions,
                                                   config=config,
-                                                  hyperparameters=hyperparameters)
+                                                  hyperparameters=hyperparameters,
+                                                  client_ids=dfs.keys())
             accuracies.append(history['metrics_aggregated'][metric].iloc[-1])
             logging.info(f'Processed {len(accuracies)} folds.')
         average_accuracy = sum(accuracies) / len(accuracies)

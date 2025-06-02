@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('--kfolds', '-k', action='store_true', help='Boolean for Kfolds (default: False)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
-    parser.add_argument('-g', '--gpu', type=int, help='Select gpu')
+    parser.add_argument('-g', '--gpu', type=int, default=0, help='Select GPU. Default is 0.')
     args = parser.parse_args()
     tools.initialize_gpu(use_gpu=args.gpu)
     # create directories

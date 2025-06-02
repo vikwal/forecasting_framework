@@ -7,7 +7,7 @@ import argparse
 import pandas as pd
 import logging
 
-from utils import tools, eval, preprocessing, federated, hpo
+from utils import tools, eval, preprocessing, federated, hpo, models
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,6 +21,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Federated Learning Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
+    parser.add_argument('-g', '--gpu', type=int, default=0, help='Select GPU for local evaluation.')
     args = parser.parse_args()
     # create directories
     os.makedirs('results', exist_ok=True)
@@ -42,7 +43,7 @@ def main() -> None:
     suffix = ''
     if gti: suffix+='_gti'
     if config['fl']['personalize']: suffix+='_pers'
-    results_name = study_name+suffix
+    study_name+=suffix
     logging.info(f'Start Federated Simulation for Study: {study_name}')
     config['model']['name'] = args.model
     # load and prepare training and test data
@@ -51,7 +52,7 @@ def main() -> None:
                                  data_dir=config['data']['path'],
                                  freq=freq)
     results = {}
-    partitions = []
+    partitions = {}
     test_data = {}
     for key, df in dfs.items():
         logging.info(f'Preprocessing pipeline for {key} started.')
@@ -63,7 +64,8 @@ def main() -> None:
         X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
         X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
         #X_train, y_train, X_val, y_val = tools.split_val(X=X_train, y=y_train, val_split=config['data']['val_frac'])
-        partitions.append((X_train, y_train, X_test, y_test))
+        #partitions.append((X_train, y_train, X_test, y_test))
+        partitions[key] = (X_train, y_train, X_test, y_test)
         test_data[key] = prepared_data['X_test'], prepared_data['y_test'], prepared_data['index_test'], prepared_data['scalers']['y']
     feature_dim = tools.get_feature_dim(X_train)
     config['model']['feature_dim'] = feature_dim
@@ -85,7 +87,7 @@ def main() -> None:
     else:
         #logger.info(json.dumps(hyperparameters))
         logging.info(f'Start Federated Forecasts Simulation.')
-        history, model = federated.run_simulation(partitions=partitions,
+        history, clients_weights = federated.run_simulation(partitions=partitions,
                                                   hyperparameters=hyperparameters,
                                                   config=config)
         # save progress
@@ -95,8 +97,11 @@ def main() -> None:
             pickle.dump(results, f)
     logging.info(f'\nEvaluation pipeline started.')
     evaluation = pd.DataFrame()
+    #tools.initialize_gpu(use_gpu=args.gpu)
     for key, df in dfs.items():
         X_test, y_test, index_test, scaler_y = test_data[key]
+        model = models.get_model(config=config, hyperparameters=hyperparameters)
+        model.set_weights(clients_weights[key])
         new_evaluation = eval.evaluation_pipeline(data=df,
                                                 model=model,
                                                 model_name=args.model,
@@ -126,7 +131,7 @@ def main() -> None:
     results['evaluation'] = evaluation
     results['config'] = config
     # save results
-    with open(f'results/{args.data}/{results_name}.pkl', 'wb') as f:
+    with open(f'results/{args.data}/{study_name}.pkl', 'wb') as f:
         pickle.dump(results, f)
 
 
