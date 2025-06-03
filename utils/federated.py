@@ -163,7 +163,7 @@ class ClientActor:
                    'weights': self.model.get_weights(),
                    'n_samples': len(self.y_train),
                    'metrics': metrics,
-                   'history': history}
+                   'history': history.history}
         return results
 
     def evaluate(self,
@@ -433,7 +433,7 @@ def run_simulation(partitions: Any,
                 round_data[f'train_{key}'] = value
         if val_metrics_agg:
             for key, value in val_metrics_agg.items():
-                round_data[f'eval_{key}'] = value
+                round_data[f'val_{key}'] = value
         all_rounds_metrics_data.append(round_data)
 
         round_end_time = time.time()

@@ -95,7 +95,7 @@ def main() -> None:
                                                  hyperparameters=hyperparameters,
                                                  config=config)
         # save progress
-        results['history'] = history
+        results['history'] = history.history
         #results['model'] = model
         with open(path_to_pkl, 'wb') as f:
             pickle.dump(results, f)

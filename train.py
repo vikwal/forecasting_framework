@@ -76,7 +76,7 @@ def main() -> None:
                                                  hyperparameters=hyperparameters,
                                                  config=config)
         # save history and model
-        results[key]['history'] = history
+        results[key]['history'] = history.history
         #results[key]['model'] = model.get_weights()
         logging.info(f'Evaluation pipeline for {key} started.')
         if config['eval']['retrain_interval'] != 0:
