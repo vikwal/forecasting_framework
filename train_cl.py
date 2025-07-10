@@ -21,11 +21,8 @@ def main() -> None:
     # argument parser
     parser = argparse.ArgumentParser(description="Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
-    parser.add_argument('--kfolds', '-k', action='store_true', help='Boolean for Kfolds (default: False)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
-    parser.add_argument('-g', '--gpu', type=int, nargs='+', help='Select GPU(s) by index, e.g., --gpu 0 1')
     args = parser.parse_args()
-    tools.initialize_gpu(use_gpu=args.gpu)
     # create directories
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
@@ -42,13 +39,18 @@ def main() -> None:
     config['model']['shuffle'] = True
     config['model']['gpus'] = args.gpu
     # get observed, known and static features
-    known, observed, static = preprocessing.get_features(data='pvod')
-
-    study_name = f'cl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
+    known, observed, static = preprocessing.get_features(dataset_name=args.data)
+    # get the right dataset name
+    dataset_name = args.data
+    if '/' in args.data:
+        dataset_name = dataset_name.replace('/', '_')
+    target_dir = os.path.join('results', dataset_name)
+    os.makedirs(target_dir, exist_ok=True)
+    study_name = f'cl_d-{dataset_name}_m-{args.model}_out-{output_dim}_freq-{freq}'
     config['model']['name'] = args.model
-    path_to_pkl = os.path.join('results', args.data, f'{study_name}.pkl')
+    path_to_pkl = os.path.join('results', dataset_name, f'{study_name}.pkl')
     # load and prepare training and test data
-    dfs = preprocessing.get_data(data=args.data,
+    dfs = preprocessing.get_data(dataset_name=args.data,
                                 data_dir=config['data']['path'],
                                 freq=freq)
     results = {}
@@ -61,7 +63,6 @@ def main() -> None:
                                             known_cols=known,
                                             observed_cols=observed,
                                             static_cols=static)
-        X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
         index_test = prepared_data['index_test']
         scalers = prepared_data['scalers']
         scaler_y = scalers['y']
@@ -131,7 +132,7 @@ def main() -> None:
     results['evaluation'] = evaluation
     results['config'] = config
     # save results
-    with open(f'results/{args.data}/{study_name}.pkl', 'wb') as f:
+    with open(path_to_pkl, 'wb') as f:
         pickle.dump(results, f)
 
 if __name__ == '__main__':

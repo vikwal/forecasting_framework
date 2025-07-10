@@ -6,13 +6,14 @@ data:
   test_start: '2019-03-01'
   scale_y: False
   lag_in_col: False
+  n_neighbors: 5
 
 model:
-  output_dim: 1
+  output_dim: 48
   lookback: 48
   horizon: 48
-  batch_size: 16
-  epochs: 50
+  batch_size: 512
+  epochs: 10
   lr: 0.001
   optimizer: 'adam'
   loss: 'mse'
@@ -23,10 +24,10 @@ model:
   cnn:
     filters: 64
     kernel_size: 3
-    n_cnn_layers: 2
+    n_cnn_layers: 3
     increase_filters: False
   rnn:
-    n_rnn_layers: 2
+    n_rnn_layers: 1
     units: 64
     dropout: 0.1
   tft:
@@ -37,38 +38,38 @@ model:
   save_model: True
   shuffle: False
   force_retrain: True
-  parallelize: True
+  parallelize: False
   verbose: 1
 
 hpo:
-  studies_path: '/mnt/nasl1/optuna_studies.db'
+  studies_path: '/mnt/nas/optuna_studies.db'
   metric: 'rmse'
   trials: 1000
   kfolds: 5
   val_split: 0.75
-  batch_size: [16, 256]
-  epochs: [10, 50]
+  batch_size: [64, 512]
+  epochs: [1, 20]
   n_layers: [1, 4]
-  n_cnn_layers: [1, 15]
-  n_rnn_layers: [1, 8]
+  n_cnn_layers: [1, 4]
+  n_rnn_layers: [1, 2]
   learning_rate: [0.0001, 0.1]
   fnn:
     units: [32, 256]
   cnn:
-    filters: [16, 128]
-    kernel_size: [2, 7]
+    filters: [16, 64]
+    kernel_size: [2, 5]
     increase_filters: False
   rnn:
-    units: [16, 300]
+    units: [16, 100]
   tft:
     lookback: [24, 48, 72, 96]
     n_heads: [1, 6]
     hidden_dim: [8, 128]
     dropout: [0.0, 0.5]
   fl:
-    strategy: 'fedadam'
-    personalize: True
-    n_rounds: [1,100]
+    strategy: 'fedavg'
+    personalize: False
+    n_rounds: [1,20]
     server_lr: [0.0001, 0.1]
     beta_1: [0,1]
     beta_2: [0,1]
@@ -82,10 +83,9 @@ eval:
 
 fl:
   parts: []
-  n_clients: 7
-  strategy: 'fedadam'
-  n_rounds: 1
-  personalize: True
+  strategy: 'fedavg'
+  n_rounds: 3
+  personalize: False
   fedopt:
     server_lr: 0.001
     beta_1: 0.9

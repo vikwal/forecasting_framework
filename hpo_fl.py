@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO,
 
 def main() -> None:
     logger = logging.getLogger(__name__)
-    tools.initialize_gpu()
     # argument parser
     parser = argparse.ArgumentParser(description="Federated Learning Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
@@ -38,17 +37,15 @@ def main() -> None:
     config['model']['fl'] = True
     config['model']['name'] = args.model
     # get observed, known and static features
-    gti = True
     suffix = ''
-    if gti: suffix+='_gti'
     if config['hpo']['fl']['personalize']: suffix+='_pers'
     study_name = f'fl_a-{config["hpo"]["fl"]["strategy"]}_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     study_name+=suffix
     study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name, direction='minimize')
     # load and prepare training and test data
-    known, observed, static = preprocessing.get_features(data=args.data, gti=gti)
+    known, observed, static = preprocessing.get_features(dataset_name=args.data)
     rel_features = known + observed
-    dfs = preprocessing.get_data(data=args.data,
+    dfs = preprocessing.get_data(dataset_name=args.data,
                                  data_dir=config['data']['path'],
                                  freq=freq,
                                  rel_features=rel_features)
@@ -70,7 +67,7 @@ def main() -> None:
     config['model']['feature_dim'] = feature_dim
     # get hyperparameters, load from study if exists
     len_trials = len(study.trials)
-    metric = f'eval_{config["hpo"]["metric"]}'
+    metric = f'val_{config["hpo"]["metric"]}'
     for i in tqdm(range(len_trials, config['hpo']['trials'])):
         combinations = [trial.params for trial in study.trials]
         trial = study.ask()
@@ -78,7 +75,6 @@ def main() -> None:
                                                     hpo=True,
                                                     trial=trial)
         hyperparameters['personlization'] = config['hpo']['fl']['personalize']
-        hyperparameters['gti'] = gti
         config['fl']['personalize'] = config['hpo']['fl']['personalize']
         config['fl']['strategy'] = config['hpo']['fl']['strategy']
         check_params = hyperparameters.copy()

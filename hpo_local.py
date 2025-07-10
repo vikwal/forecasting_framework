@@ -22,9 +22,7 @@ def main() -> None:
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('--kfolds', '-k', action='store_true', help='Boolean for Kfolds (default: False)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
-    parser.add_argument('-g', '--gpu', type=int, help='Select gpu')
     args = parser.parse_args()
-    tools.initialize_gpu(use_gpu=args.gpu)
     # create directories
     os.makedirs('results', exist_ok=True)
     os.makedirs(os.path.join('results', args.data), exist_ok=True)
@@ -43,9 +41,9 @@ def main() -> None:
     study_name = f'd-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'
     study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name, direction='minimize')
     # get observed, known and static features
-    known, observed, static = preprocessing.get_features(data=args.data)
+    known, observed, static = preprocessing.get_features(dataset_name=args.data)
     # load and prepare training and test data
-    dfs = preprocessing.get_data(data=args.data,
+    dfs = preprocessing.get_data(dataset_name=args.data,
                                  data_dir=config['data']['path'],
                                  freq=freq)
     len_trials = len(study.trials)

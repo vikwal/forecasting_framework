@@ -42,7 +42,7 @@ def main() -> None:
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(data=args.data)
     # load and prepare training and test data
-    dfs = preprocessing.get_data(data=args.data,
+    dfs = preprocessing.get_data(dataset_name=args.data,
                                  data_dir=config['data']['path'],
                                  freq=freq)
     results = {}

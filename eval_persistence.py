@@ -9,7 +9,7 @@ from utils import eval, preprocessing
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Flower Simulation with Tensorflow/Keras")
+    parser = argparse.ArgumentParser(description="Evaluate Persistence Model")
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
     args = parser.parse_args()
     # create directories
@@ -19,23 +19,27 @@ def main() -> None:
     # read config
     config = tools.load_config('config.yaml')
     freq = config['data']['freq']
-    output_dim, lag_dim, horizon = tools.handle_freq(freq=freq,
-                                                     output_dim=config['model']['output_dim'],
-                                                     lag_dim=config['data']['lag_dim'],
-                                                     horizon=config['data']['horizon'])
-    config['model']['output_dim'] = output_dim
-    config['data']['horizon'] = horizon
-    config['data']['lag_dim'] = lag_dim
+    config = tools.handle_freq(config=config)
+    output_dim = config['model']['output_dim']
+    lookback = config['model']['lookback']
+    horizon = config['model']['horizon']
+    # get the right dataset name
+    dataset_name = args.data
+    if '/' in args.data:
+        dataset_name = dataset_name.replace('/', '_')
+    target_dir = os.path.join('results', dataset_name)
+    os.makedirs(target_dir, exist_ok=True)
     # load and prepare training and test data
-    dfs = preprocessing.get_data(data=args.data,
+    dfs = preprocessing.get_data(dataset_name=args.data,
                                  data_dir=config['data']['path'],
                                  freq=freq)
     # create lag features
     evaluation = pd.DataFrame()
     for key, df in tqdm(dfs.items()):
-        df = tools.impute_index(data=df)
-        df = preprocessing.lag_features(df=df,
-                                lag_dim=lag_dim,
+        df = preprocessing.knn_imputer(data=df,
+                              n_neighbors=config['data']['n_neighbors'],)
+        df = preprocessing.lag_features(data=df,
+                                lookback=lookback,
                                 horizon=horizon,
                                 lag_in_col=config['data']['lag_in_col'])
         windows = preprocessing.prepare_data(data=df,
@@ -71,7 +75,7 @@ def main() -> None:
             evaluation = new_evaluation
         else:
             evaluation = pd.concat([evaluation, new_evaluation], axis=0)
-    write_path = f'results/{args.data}/{args.data}_persistence.csv'
+    write_path = f'{target_dir}/{dataset_name}_persistence.csv'
     if os.path.exists(write_path):
         evaluation.to_csv(write_path, mode='a', index=False, header=False)
     else:

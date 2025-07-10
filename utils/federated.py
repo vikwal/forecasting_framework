@@ -317,8 +317,17 @@ def run_simulation(partitions: Any,
                    client_ids = None):
     """Performs FL simulation."""
 
+    if isinstance(partitions, list):
+        if client_ids:
+            if len(partitions) != len(client_ids):
+                raise ValueError("Length of partitions and client_ids must match.")
+            partitions = {client_id: part for client_id, part in zip(client_ids, partitions)}
+        else:
+            partitions = {i: part for i, part in enumerate(partitions)}
+    n_clients = len(partitions)
+
     # initialize variables
-    n_clients = config['fl']['n_clients']
+    #n_clients = config['fl']['n_clients']
     n_rounds = hyperparameters['n_rounds']
     save_history = config['fl']['save_history']
     strategy = config['fl']['strategy'].lower()
@@ -333,14 +342,6 @@ def run_simulation(partitions: Any,
              logging_level=logging.WARNING,  # Setzt den Level für Ray-Komponenten und oft auch für Worker
              log_to_driver=True         # Leitet Worker-Logs an den Driver (deine Konsole)
             )
-
-    if isinstance(partitions, list):
-        if client_ids:
-            if len(partitions) != len(client_ids):
-                raise ValueError("Length of partitions and client_ids must match.")
-            partitions = {client_id: part for client_id, part in zip(client_ids, partitions)}
-        else:
-            partitions = {i: part for i, part in enumerate(partitions)}
 
     client_actors = []
     for key, value in partitions.items():

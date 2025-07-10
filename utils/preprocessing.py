@@ -1,7 +1,9 @@
 import os
 import pandas as pd
 import numpy as np
+from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler
+from collections import defaultdict
 import logging
 from typing import List, Tuple, Dict, Any
 
@@ -15,7 +17,7 @@ def pipeline(data: pd.DataFrame,
              df_static: pd.DataFrame = pd.DataFrame(),
              test_start: pd.Timestamp = None) -> Tuple[Dict, pd.DataFrame]:
     df = data.copy()
-    df = impute_index(data=df)
+    df = knn_imputer(data=df, n_neighbors=config['data']['n_neighbors'])
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
     if config['model']['name'] == 'tft':
         df = lag_features(data=df,
@@ -48,44 +50,71 @@ def pipeline(data: pd.DataFrame,
     return prepared_data, df
 
 
-def get_data(data: str,
-             data_dir: str,
+def get_data(data_dir: str,
+             dataset_name: str,
              freq: str,
-             rel_features: list = None) -> List[pd.DataFrame]:
-    if data == '1b_trina':
+             rel_features: list = None) -> Dict[str, pd.DataFrame]:
+    if dataset_name == '1b_trina':
         file_name = '1B_trina.csv'
         path = os.path.join(data_dir, file_name)
         df = preprocess_1b_trina(path=path,
                                  freq=freq)
         return {file_name: df}
-    elif data == 'pvod':
-        dir_name = 'PVODdatasets_v1'
-        files = os.listdir(os.path.join(data_dir, dir_name))
+    elif dataset_name == 'pvod':
+        target_dir = 'PVODdatasets_v1'
+        files = os.listdir(os.path.join(data_dir, target_dir))
         files = [f for f in files if f.endswith('.csv') and 'metadata' not in f]
         files = sorted(files)
         dfs = {}
         for file in files:
-            path = os.path.join(data_dir, dir_name, file)
+            path = os.path.join(data_dir, target_dir, file)
             df = preprocess_pvod(path=path,
                                  freq=freq,
                                  rel_features=rel_features)
             dfs[file] = df
         return dfs
+    elif 'synth_pv' in dataset_name:
+        target_dir = os.path.join(data_dir, dataset_name)
+        logging.info(f'Getting the data from: {target_dir}')
+        client_dirs = [name for name in os.listdir(target_dir) if os.path.isdir(os.path.join(target_dir, name))]
+        dfs = defaultdict(dict)
+        if not client_dirs:
+            client = dataset_name.split('/')[1]
+            client_files = os.listdir(target_dir)
+            client_files = [f for f in client_files if f.endswith('.csv') and 'pvpark' in f]
+            for file in client_files:
+                path = os.path.join(target_dir, file)
+                df = preprocess_synth_pv(path=path,
+                                         freq=freq)
+                dfs[file] = df
+        else:
+            for client in client_dirs:
+                client_files = os.listdir(os.path.join(target_dir, client))
+                client_files = [f for f in client_files if f.endswith('.csv') and 'pvpark' in f]
+                for file in client_files:
+                    path = os.path.join(target_dir, client, file)
+                    df = preprocess_synth_pv(path=path,
+                                            freq=freq)
+                    dfs[client][file] = df
+        return dfs
+    else:
+        raise ValueError(f'Unknown dataset name: {dataset_name}. Please check the dataset name or add a new preprocessing function.')
 
-def impute_index(data: pd.DataFrame) -> pd.DataFrame:
-    df = data.copy()
-    freq = df.index[1] - df.index[0]
-    start = df.index[0]
-    end = df.index[-1]
-    date_range = pd.date_range(start=start, end=end, freq=freq)
-    df = df.reindex(date_range)
-    if freq == pd.Timedelta('1h'):
-        shift = 24
-    elif freq == pd.Timedelta('15min'):
-        shift = 96
-    while df.isna().any().any():
-        df.fillna(df.shift(shift), inplace=True)
+def knn_imputer(data: pd.DataFrame,
+               n_neighbors: int = 5):
+    # To help KNNImputer estimating the temporal saisonalities we add encoded temporal features.
+    data['hour_sin'] = np.sin(2 * np.pi * data.index.hour / 24)
+    data['hour_cos'] = np.cos(2 * np.pi * data.index.hour / 24)
+    data['month_sin'] = np.sin(2 * np.pi * data.index.month / 12)
+    data['month_cos'] = np.cos(2 * np.pi * data.index.month / 12)
+    imputer = KNNImputer(n_neighbors=n_neighbors)
+    scaler = StandardScaler()
+    df_scaled = scaler.fit_transform(data)
+    df = pd.DataFrame(scaler.inverse_transform(imputer.fit_transform(df_scaled)), columns=data.columns, index=data.index)
+    df.drop(['hour_sin', 'hour_cos', 'month_sin', 'month_cos'], axis=1, inplace=True)
+    #df[df < 0.01] = 0
     return df
+
 
 def drop_days(frame: pd.DataFrame,
               target_col: str,
@@ -196,6 +225,126 @@ def prepare_data(data: pd.DataFrame,
     results['X_test'], results['y_test'] = X_test, y_test
     results['scalers'] = scalers
     return results
+
+def preprocess_synth_pv(path: str,
+                        freq: str = '1H',
+                        rel_features: list = None) -> pd.DataFrame:
+    timestamp_col = 'timestamp'
+    target_col = 'power'
+    park_id = path.split('_')[-1].split('.')[0]
+    parameter_file = path.replace(os.path.basename(path), 'pv_parameter.csv')
+    metadata = pd.read_csv(parameter_file, sep=';')
+    installed_capacity = metadata.loc[metadata.park_id == int(park_id)]['installed_capacity'].values[0]
+    df = pd.read_csv(path, sep=';')
+    df.drop('park_id', axis=1, inplace=True) # remove if not needed
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
+    df.set_index(timestamp_col, inplace=True)
+    df[target_col] = df[target_col] / installed_capacity # in Watts
+    df = df.resample(freq, closed='left', label='left', origin='start').mean()
+    if rel_features:
+        return df[rel_features]
+    return df
+
+def preprocess_pvod(path: str,
+                    freq=None,
+                    rel_features=None) -> pd.DataFrame:
+    timestamp_col = 'date_time'
+    target_col = 'power'
+    station_id = path.split('/')[-1].split('.')[0]
+    df = pd.read_csv(path, delimiter=',')
+    metadata_file = path.replace(os.path.basename(path).split('.')[0], 'metadata')
+    metadata = pd.read_csv(metadata_file)
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+    df.set_index(timestamp_col, inplace=True)
+    df['azimuth'] = 180
+    df['tilt'] = int(metadata.loc[metadata.Station_ID == station_id]['Array_Tilt'].str[-3:-1].iloc[0])
+    df['latitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Latitude'].iloc[0])
+    df['longitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Longitude'].iloc[0])
+    df['nwp_gti'] = meteo.get_total_irradiance(ghi=df['nwp_globalirrad'],
+                                            pressure=df['nwp_pressure'],
+                                            temperature=df['nwp_temperature'],
+                                            latitude=df['latitude'],
+                                            longitude=df['longitude'],
+                                            surface_tilt=df['tilt'],
+                                            surface_azimuth=df['azimuth'],
+                                            time_index=df.index,
+                                            dni=df['nwp_directirrad'])
+    df['lmd_gti'] = meteo.get_total_irradiance(ghi=df['lmd_totalirrad'],
+                                            pressure=df['lmd_pressure'],
+                                            temperature=df['lmd_temperature'],
+                                            latitude=df['latitude'],
+                                            longitude=df['longitude'],
+                                            surface_tilt=df['tilt'],
+                                            surface_azimuth=df['azimuth'],
+                                            time_index=df.index,
+                                            dhi=df['lmd_diffuseirrad'])
+    df['lmd_gti'] = df['lmd_gti'].fillna(0)
+    # normalize time series by installed capacity
+    df[target_col] = df[target_col] / (metadata.loc[metadata.Station_ID == station_id]['Capacity'].values[0] / 1000)
+    df.rename(columns={target_col: 'power'}, inplace=True)
+    if freq:
+        df = df.resample(freq).mean().copy()
+    if rel_features:
+        return df[rel_features]
+    return df
+
+def preprocess_1b_trina(path: str,
+                        freq: str) -> pd.DataFrame:
+    rel_features = ['Global_Horizontal_Radiation',
+                    'Diffuse_Horizontal_Radiation',
+                    'Weather_Temperature_Celsius',
+                    'Weather_Relative_Humidity',
+                    'Active_Power']
+    timestamp_col = 'timestamp'
+    target_col = rel_features[-1]
+    df = pd.read_csv(path)
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+    df.set_index(timestamp_col, inplace=True)
+    df = df.resample(freq).mean().copy()
+    df.rename(columns={target_col: 'power'}, inplace=True)
+    #if len(pd.date_range(df.index[0], df.index[-1], freq=freq)) == len(df):
+    #    print('Data has no missing timesteps in index.')
+    #else:
+    #    print('Data has missing timestamps in index.')
+    #df = df.groupby(df.index.time).ffill()
+    df = df['2014-01-01':'2018-12-31'].copy() # 1B Trina specific
+    if rel_features:
+        return df[rel_features]
+    return df
+
+
+def get_features(dataset_name: str) -> Tuple[List, List]:
+    known, observed, static = None, None, None
+    if 'synth_pv' in dataset_name:
+        known = ['global_horizontal_irradiance',
+                 'diffuse_horizontal_irradiance',
+                 #'air_temperature',
+                 #'wind_speed',
+                 'direct_normal_irradiance']
+        observed = ['power']
+        static = []
+    elif dataset_name == 'pvod':
+        known = [
+                #'nwp_globalirrad',
+                #'nwp_directirrad',
+                'nwp_gti',
+                'nwp_temperature',
+                'nwp_humidity',
+                'nwp_windspeed']
+        observed = [
+                    #'lmd_totalirrad',
+                    #'lmd_diffuseirrad',
+                    'lmd_gti',
+                    'lmd_temperature',
+                    #'lmd_pressure',
+                    #'lmd_winddirection',
+                    'lmd_windspeed',
+                    'power']
+        static = [
+                'Station_ID'
+                'Array_Tilt']
+    return known, observed, static
+
 
 def prepare_data_for_tft(data: pd.DataFrame,
                          static_data: pd.DataFrame,
@@ -368,139 +517,3 @@ def create_tft_sequences(known_data, observed_data, target_data,
                 np.array(X_observed_list),
                 np.array(y_list),
                 np.array(index_list))
-
-
-def preprocess_pvod(path: str,
-                    freq=None,
-                    rel_features=None) -> pd.DataFrame:
-    timestamp_col = 'date_time'
-    target_col = 'power'
-    station_id = path.split('/')[-1].split('.')[0]
-    df = pd.read_csv(path, delimiter=',')
-    metadata_file = path.replace(os.path.basename(path).split('.')[0], 'metadata')
-    metadata = pd.read_csv(metadata_file)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df.set_index(timestamp_col, inplace=True)
-    df['azimuth'] = 180
-    df['tilt'] = int(metadata.loc[metadata.Station_ID == station_id]['Array_Tilt'].str[-3:-1].iloc[0])
-    df['latitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Latitude'].iloc[0])
-    df['longitude'] = float(metadata.loc[metadata.Station_ID == station_id]['Longitude'].iloc[0])
-    df['nwp_gti'] = meteo.get_total_irradiance(ghi=df['nwp_globalirrad'],
-                                            pressure=df['nwp_pressure'],
-                                            temperature=df['nwp_temperature'],
-                                            latitude=df['latitude'],
-                                            longitude=df['longitude'],
-                                            surface_tilt=df['tilt'],
-                                            surface_azimuth=df['azimuth'],
-                                            time_index=df.index,
-                                            dni=df['nwp_directirrad'])
-    df['lmd_gti'] = meteo.get_total_irradiance(ghi=df['lmd_totalirrad'],
-                                            pressure=df['lmd_pressure'],
-                                            temperature=df['lmd_temperature'],
-                                            latitude=df['latitude'],
-                                            longitude=df['longitude'],
-                                            surface_tilt=df['tilt'],
-                                            surface_azimuth=df['azimuth'],
-                                            time_index=df.index,
-                                            dhi=df['lmd_diffuseirrad'])
-    df['lmd_gti'] = df['lmd_gti'].fillna(0)
-    # normalize time series by installed capacity
-    df[target_col] = df[target_col] / (metadata.loc[metadata.Station_ID == station_id]['Capacity'].values[0] / 1000)
-    df.rename(columns={target_col: 'power'}, inplace=True)
-    if freq:
-        df = df.resample(freq).mean().copy()
-    if rel_features:
-        return df[rel_features]
-    return df
-
-def preprocess_1b_trina(path: str,
-                        freq: str) -> pd.DataFrame:
-    rel_features = ['Global_Horizontal_Radiation',
-                    'Diffuse_Horizontal_Radiation',
-                    'Weather_Temperature_Celsius',
-                    'Weather_Relative_Humidity',
-                    'Active_Power']
-    timestamp_col = 'timestamp'
-    target_col = rel_features[-1]
-    df = pd.read_csv(path)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df.set_index(timestamp_col, inplace=True)
-    df = df.resample(freq).mean().copy()
-    df.rename(columns={target_col: 'power'}, inplace=True)
-    #if len(pd.date_range(df.index[0], df.index[-1], freq=freq)) == len(df):
-    #    print('Data has no missing timesteps in index.')
-    #else:
-    #    print('Data has missing timestamps in index.')
-    #df = df.groupby(df.index.time).ffill()
-    df = df['2014-01-01':'2018-12-31'].copy() # 1B Trina specific
-    if rel_features:
-        return df[rel_features]
-    return df
-
-
-def get_features(data: str, gti=False) -> Tuple[List, List]:
-    known, observed, static = None, None, None
-    if gti:
-        if data == 'pvod':
-            known = [
-                    #'nwp_globalirrad',
-                    #'nwp_directirrad',
-                    'nwp_gti',
-                    'nwp_temperature',
-                    'nwp_humidity',
-                    'nwp_windspeed']
-            observed = [
-                        #'lmd_totalirrad',
-                        #'lmd_diffuseirrad',
-                        'lmd_gti',
-                        'lmd_temperature',
-                        #'lmd_pressure',
-                        #'lmd_winddirection',
-                        'lmd_windspeed',
-                        'power']
-            static = [
-                    'Station_ID'
-                    'Array_Tilt']
-    else:
-        if data == 'pvod':
-            known = [
-                    'nwp_globalirrad',
-                    'nwp_directirrad',
-                    #'nwp_gti',
-                    'nwp_temperature',
-                    'nwp_humidity',
-                    'nwp_windspeed']
-            observed = [
-                        'lmd_totalirrad',
-                        'lmd_diffuseirrad',
-                        #'lmd_gti',
-                        'lmd_temperature',
-                        #'lmd_pressure',
-                        #'lmd_winddirection',
-                        'lmd_windspeed',
-                        'power']
-            static = [
-                    'Station_ID'
-                    'Array_Tilt']
-    return known, observed, static
-
-def germansolarfarm(path: str,
-                    timestamp_col: str,
-                    rel_features=None) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df.set_index(timestamp_col, inplace=True)
-    if rel_features:
-        return df[rel_features]
-    return df
-
-def europewindfarm(path: str,
-                   timestamp_col: str,
-                   rel_features=None) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df.drop('ForecastingTime', axis=1, inplace=True)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df.set_index(timestamp_col, inplace=True)
-    if rel_features:
-        return df[rel_features]
-    return df

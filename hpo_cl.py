@@ -23,9 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
-    parser.add_argument('-g', '--gpu', type=int, help='Select gpu')
     args = parser.parse_args()
-    tools.initialize_gpu(use_gpu=args.gpu)
     # create directories
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
@@ -40,13 +38,13 @@ def main() -> None:
     config['model']['shuffle'] = True
     config['model']['fl'] = False
     # get observed, known and static features
-    known, observed, static = preprocessing.get_features(data=args.data)
+    known, observed, static = preprocessing.get_features(dataset_name=args.data)
 
     study_name = f'cl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'#_incrfltrs-{config["hpo"]["cnn"]["increase_filters"]}'
     config['model_name'] = args.model
     study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name, direction='minimize')
     # load and prepare training and test data
-    dfs = preprocessing.get_data(data=args.data,
+    dfs = preprocessing.get_data(dataset_name=args.data,
                                 data_dir=config['data']['path'],
                                 freq=freq)
     kfolds = []
