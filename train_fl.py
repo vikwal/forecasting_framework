@@ -3,10 +3,11 @@
 import os
 import json
 import pickle
+import logging
 import argparse
 import numpy as np
 import pandas as pd
-import logging
+from collections import defaultdict
 
 from utils import tools, eval, preprocessing, federated, hpo, models
 
@@ -52,9 +53,18 @@ def main() -> None:
     config['model']['name'] = args.model
     # load and prepare training and test data
     known, observed, static = preprocessing.get_features(dataset_name=args.data)
-    data = preprocessing.get_data(dataset_name=args.data,
+    raw_data_dict = preprocessing.get_data(dataset_name=args.data,
                                  data_dir=config['data']['path'],
                                  freq=freq)
+    # restructure the dictionary of raw dataframes when nested folders
+    if '/' in args.data:
+        data = defaultdict(dict)
+        for key, df in raw_data_dict.items():
+            client, filename = key.split('_', 1)  # 'hka', 'pvpark_1.csv'
+            park_id = filename.replace('.csv', '')  # 'pvpark_1'
+            data[client][filename] = df
+    else:
+        data = raw_data_dict
     dict_depth = lambda d: 1 + max(map(dict_depth, d.values())) if isinstance(d, dict) and d else 0
     data_depth = dict_depth(data)
     results = {}

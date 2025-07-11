@@ -86,7 +86,8 @@ def get_data(data_dir: str,
                 path = os.path.join(target_dir, file)
                 df = preprocess_synth_pv(path=path,
                                          freq=freq)
-                dfs[file] = df
+                key = file
+                dfs[key] = df
         else:
             for client in client_dirs:
                 client_files = os.listdir(os.path.join(target_dir, client))
@@ -95,7 +96,8 @@ def get_data(data_dir: str,
                     path = os.path.join(target_dir, client, file)
                     df = preprocess_synth_pv(path=path,
                                             freq=freq)
-                    dfs[client][file] = df
+                    key = f'{client}_{file}'
+                    dfs[key] = df
         return dfs
     else:
         raise ValueError(f'Unknown dataset name: {dataset_name}. Please check the dataset name or add a new preprocessing function.')

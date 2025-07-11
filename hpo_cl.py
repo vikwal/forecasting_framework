@@ -15,7 +15,6 @@ optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 def main() -> None:
     #utils.initialize_gpu(2)
     logger = logging.getLogger(__name__)
@@ -39,8 +38,13 @@ def main() -> None:
     config['model']['fl'] = False
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(dataset_name=args.data)
-
-    study_name = f'cl_d-{args.data}_m-{args.model}_out-{output_dim}_freq-{freq}'#_incrfltrs-{config["hpo"]["cnn"]["increase_filters"]}'
+    # get the right dataset name
+    dataset_name = args.data
+    if '/' in args.data:
+        dataset_name = dataset_name.replace('/', '_')
+    target_dir = os.path.join('results', dataset_name)
+    os.makedirs(target_dir, exist_ok=True)
+    study_name = f'cl_d-{dataset_name}_m-{args.model}_out-{output_dim}_freq-{freq}'#_incrfltrs-{config["hpo"]["cnn"]["increase_filters"]}'
     config['model_name'] = args.model
     study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name, direction='minimize')
     # load and prepare training and test data

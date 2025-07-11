@@ -37,7 +37,6 @@ def main() -> None:
     horizon = config['model']['horizon']
     config['model']['name'] = args.model
     config['model']['shuffle'] = True
-    config['model']['gpus'] = args.gpu
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(dataset_name=args.data)
     # get the right dataset name

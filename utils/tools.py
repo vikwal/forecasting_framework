@@ -79,7 +79,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     config['model']['feature_dim'] = get_feature_dim(X=X_train)
     parallelize = config['model'].get('parallelize', False)
     if parallelize:
-        n_gpus = len(config['model'].get('gpus'))
+        n_gpus = len(tf.config.list_physical_devices('GPU'))
         batch_size = hyperparameters.get('batch_size')
         if n_gpus > 1:
             adjusted_batch_size = batch_size
