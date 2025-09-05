@@ -15,7 +15,8 @@ def pipeline(data: pd.DataFrame,
              observed_cols: List[str] = None,
              static_cols: List[str] = None,
              df_static: pd.DataFrame = pd.DataFrame(),
-             test_start: pd.Timestamp = None) -> Tuple[Dict, pd.DataFrame]:
+             test_start: pd.Timestamp = None,
+             target_col: str = 'power') -> Tuple[Dict, pd.DataFrame]:
     df = data.copy()
     df = knn_imputer(data=df, n_neighbors=config['data']['n_neighbors'])
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
@@ -34,25 +35,28 @@ def pipeline(data: pd.DataFrame,
                                              test_start=pd.Timestamp(config['data']['test_start']),
                                              t_0=t_0)
     else:
-        for col in observed_cols:
-            df = lag_features(data=df,
-                            lookback=config['model']['lookback'],
-                            horizon=config['model']['horizon'],
-                            lag_in_col=config['data']['lag_in_col'],
-                            target_col=col)
-            if col != 'power': df.drop(col, axis=1, inplace=True)
+        if config['model']['create_lag']:
+            for col in observed_cols:
+                df = lag_features(data=df,
+                                lookback=config['model']['lookback'],
+                                horizon=config['model']['horizon'],
+                                lag_in_col=config['data']['lag_in_col'],
+                                target_col=col)
+                if col != target_col: df.drop(col, axis=1, inplace=True)
         prepared_data = prepare_data(data=df,
                                      output_dim=config['model']['output_dim'],
                                      train_frac=config['data']['train_frac'],
                                      scale_y=config['data']['scale_y'],
                                      t_0=t_0,
-                                     test_start=test_start)
+                                     test_start=test_start,
+                                     target_col=target_col)
     return prepared_data, df
 
 
 def get_data(data_dir: str,
              dataset_name: str,
              freq: str,
+             config: dict,
              rel_features: list = None) -> Dict[str, pd.DataFrame]:
     if dataset_name == '1b_trina':
         file_name = '1B_trina.csv'
@@ -72,6 +76,47 @@ def get_data(data_dir: str,
                                  freq=freq,
                                  rel_features=rel_features)
             dfs[file] = df
+        return dfs
+    elif 'reninja_n_dwd' in dataset_name:
+        files = os.listdir(os.path.join(data_dir, dataset_name))
+        files = [f for f in files if f.endswith('.csv') and 'metadata' not in f]
+        files = sorted(files)
+        dfs = {}
+        for file in files:
+            path = os.path.join(data_dir, dataset_name, file)
+            df = preprocess_reninja_n_dwd(path=path,
+                                          rel_features=rel_features)
+            dfs[file] = df
+        return dfs
+    elif 'synth_wind' in dataset_name:
+        target_dir = os.path.join(data_dir, dataset_name)
+        logging.info(f'Getting the data from: {target_dir}')
+        client_dirs = [name for name in os.listdir(target_dir) if os.path.isdir(os.path.join(target_dir, name))]
+        dfs = defaultdict(dict)
+        if not client_dirs:
+            client = dataset_name.split('/')[1]
+            client_files = os.listdir(target_dir)
+            client_files = [f for f in client_files if f.endswith('.csv') and 'synth' in f]
+            for file in client_files:
+                path = os.path.join(target_dir, file)
+                df = preprocess_synth_wind(path=path,
+                                           config=config,
+                                           freq=freq,
+                                           rel_features=rel_features)
+                key = file
+                dfs[key] = df
+        else:
+            for client in client_dirs:
+                client_files = os.listdir(os.path.join(target_dir, client))
+                client_files = [f for f in client_files if f.endswith('.csv') and 'synth' in f]
+                for file in client_files:
+                    path = os.path.join(target_dir, client, file)
+                    df = preprocess_synth_wind(path=path,
+                                               config=config,
+                                               freq=freq,
+                                               rel_features=rel_features)
+                    key = f'{client}_{file}'
+                    dfs[key] = df
         return dfs
     elif 'synth_pv' in dataset_name:
         target_dir = os.path.join(data_dir, dataset_name)
@@ -190,7 +235,7 @@ def prepare_data(data: pd.DataFrame,
     if test_start:
         train_end = test_start - pd.Timedelta(hours=0.25)
     else:
-        train_periods = int(len(df) * train_frac)
+        train_periods = int(len(df) * train_frac)-1
         train_end = df.index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
         test_start = train_end + pd.Timedelta(hours=0.25)
     scalers = {}
@@ -243,6 +288,155 @@ def preprocess_synth_pv(path: str,
     df.set_index(timestamp_col, inplace=True)
     df[target_col] = df[target_col] / installed_capacity # in Watts
     df = df.resample(freq, closed='left', label='left', origin='start').mean()
+    if rel_features:
+        return df[rel_features]
+    return df
+
+def preprocess_synth_wind(path: str,
+                          config: dict,
+                          freq: str = '1H',
+                          rel_features: list = None) -> pd.DataFrame:
+    def get_circle_segment(r: float, seg_height: float):
+        theta = 2 * np.arccos(seg_height / r)
+        seg_ground = 2 * np.sqrt(r**2 + seg_height**2)
+        A_tri = 0.5 * seg_height * seg_ground
+        A_sec = np.pi * r**2 * (theta / (2 * np.pi))
+        A_seg = A_sec - A_tri
+        return A_seg
+
+    timestamp_col = 'timestamp'
+    park_id = path.split('_')[-1].split('.')[0]
+    wind_parameter_path = path.replace(os.path.basename(path), 'wind_parameter.csv')
+    turbine_parameter_path = path.replace(os.path.basename(path), 'turbine_parameter.csv')
+    power_curves_path = os.path.join(config['data']['power_curves_path'], 'turbine_power.csv')
+    nwp_path = os.path.join(config['data']['nwp_path'], f'ML_Station_{park_id}.csv')
+    if 'turbines' in config['params']['turbines']:
+        turbines_list = config['params']['turbines']
+    else:
+        turbines_list = None
+    wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
+    turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
+    power_curves = pd.read_csv(power_curves_path, sep=';')
+    df = pd.read_csv(path, sep=';')
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
+    df.set_index(timestamp_col, inplace=True)
+    heights = []
+    if turbines_list:
+        power_curves = power_curves[turbines_list]
+        installed_capacity = power_curves.sum(axis=1).max() * 1000 # in Watts
+        turbines = turbine_parameter.loc[turbine_parameter.turbine_name.isin(turbines_list)]
+        turbine_indices = turbines['turbine']
+        heights = turbines['hub_height'].values
+        power_cols = [f'power_{i}' for i in turbine_indices]
+        df['power'] = df[power_cols].sum(axis=1)
+    else:
+        df['power'] = 0
+        for col in df.columns:
+            if 'power' in col: df['power'] += df[col]
+        installed_capacity = df['power'].max()
+        heights = turbine_parameter['hub_height'].values
+        turbines = turbine_parameter
+    df['power'] = df['power'] / installed_capacity # in Watts
+    df = df.resample(freq, closed='left', label='left', origin='start').mean()
+    # get nwp data
+    nwp = pd.read_csv(nwp_path, sep=',')
+    nwp['starttime'] = pd.to_datetime(nwp['starttime'], utc=True)
+    nwp['timestamp'] = nwp['starttime'] + pd.to_timedelta(nwp['forecasttime'], unit='h')
+    # rename nwp data
+    for col in nwp.columns:
+        if col not in ['timestamp', 'starttime', 'forecasttime', 'toplevel', 'bottomlevel']:
+            nwp.rename(columns={col: f'{col}_nwp'}, inplace=True)
+    nwp['wind_speed_nwp'] = np.sqrt(nwp['u_wind_nwp']**2 + nwp['v_wind_nwp']**2)
+    nwp.set_index('timestamp', inplace=True)
+    # aggregate multilevels
+    if config['params']['weighted_nwp_layers']:
+        A_total = 0
+        A_all_turbines = []
+        for turbine in turbines.itertuples():
+            A = []
+            height = turbine.hub_height
+            diameter = turbine.diameter
+            rotor_top = height + diameter / 2
+            rotor_bottom = height - diameter / 2
+            A_total += np.pi * (diameter / 2)**2
+            for top, down in nwp.groupby(['toplevel', 'bottomlevel']).size().index:
+                if rotor_top <= top and rotor_bottom >= down:
+                    A.append(np.pi * (diameter / 2)**2)
+                elif down <= rotor_bottom <= top:
+                    seg_height = abs(height - top)
+                    A.append(get_circle_segment(diameter/2, seg_height))
+                elif down <= rotor_top <= top:
+                    seg_height = abs(height - down)
+                    A.append(get_circle_segment(diameter/2, seg_height))
+                elif rotor_top >= top and rotor_bottom <= down:
+                    p1_x = np.sqrt((diameter/2)**2 - (height-top)**2)
+                    p2_x = np.sqrt((diameter/2)**2 - (height-down)**2)
+                    diff = p1_x - p2_x
+                    sec = np.sqrt(diff**2 + (top-down)**2)
+                    c = np.sqrt((diameter/2)**2 - (0.5*sec)**2)
+                    seg_height = diameter/2 - c
+                    A_seg = get_circle_segment(diameter/2, seg_height)
+                    A.append(A_seg*2 + diff*(top-down) + (diameter - 2*diff)*(top-down))
+                else:
+                    A.append(0)
+            A_all_turbines.append(A)
+
+        A_all_turbines = np.array(A_all_turbines)
+        weights = A_all_turbines.sum(axis=0) / A_total
+
+        layers_idx = nwp.groupby(['toplevel','bottomlevel']).size().index
+        layers = pd.DataFrame({
+            'toplevel': [t for (t, b) in layers_idx],
+            'bottomlevel': [b for (t, b) in layers_idx],
+            'weight': weights
+        })
+        nwp = nwp.reset_index()  # timestamp zurück als Spalte
+        nwp = nwp.merge(layers, on=['toplevel','bottomlevel'], how='left', validate='m:1')
+
+        nwp['temperature_nwp_w'] = nwp['temperature_nwp'] * nwp['weight']
+        nwp['pressure_nwp_w']    = nwp['pressure_nwp']    * nwp['weight']
+        nwp['relhum_nwp_w']      = nwp['relhum_nwp']      * nwp['weight']
+        nwp['wind_speed_nwp_w']  = nwp['weight'] * (nwp['wind_speed_nwp']**3)
+        agg = (
+            nwp.groupby(['timestamp','forecasttime'], sort=False)[
+                ['temperature_nwp_w','pressure_nwp_w','relhum_nwp_w','weight','wind_speed_nwp_w']
+            ].sum()
+            .reset_index()
+        )
+        wsum = agg['weight']
+        agg[['temperature_nwp_w','pressure_nwp_w','relhum_nwp_w']] = (
+            agg[['temperature_nwp_w','pressure_nwp_w','relhum_nwp_w']].div(wsum, axis=0)
+        )
+        agg['wind_speed_nwp_w'] = (agg['wind_speed_nwp_w']/wsum)**(1/3)
+        nwp = (
+            agg.drop(columns='weight')
+            .rename(columns=lambda c: c.replace('_w',''))
+            .set_index('timestamp')
+        )
+    else:
+        for top, down in nwp.groupby(['toplevel', 'bottomlevel']).size().index:
+            if down <= np.mean(heights) <= top:
+                nwp = nwp[(nwp['toplevel'] == top) & (nwp['bottomlevel'] == down)]
+                break
+        nwp.drop(['toplevel', 'bottomlevel'], axis=1, inplace=True)
+    # merge nwp data and wind park data
+    df = nwp.merge(df, left_index=True, right_index=True, how='left')
+    rel_features += ['forecasttime']
+    if rel_features:
+        return df[rel_features]
+    return df
+
+def preprocess_reninja_n_dwd(path: str,
+                             rel_features: list = None) -> pd.DataFrame:
+    timestamp_col = 'timestamp'
+    target_col = 'wind_speed'
+    df = pd.read_csv(path, sep=';', decimal='.')
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
+    df.set_index(timestamp_col, inplace=True)
+    #df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
+    #df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
+    #df['month_sin'] = np.sin(2 * np.pi * df.index.month / 12)
+    #df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
     if rel_features:
         return df[rel_features]
     return df
@@ -317,7 +511,11 @@ def preprocess_1b_trina(path: str,
 
 def get_features(dataset_name: str) -> Tuple[List, List]:
     known, observed, static = None, None, None
-    if 'synth_pv' in dataset_name:
+    if 'synth_wind' in dataset_name:
+        known = ['wind_speed_nwp', 'temperature_nwp', 'pressure_nwp', 'relhum_nwp']
+        observed = ['power']
+        static = []
+    elif 'synth_pv' in dataset_name:
         known = ['global_horizontal_irradiance',
                  'diffuse_horizontal_irradiance',
                  #'air_temperature',
@@ -325,6 +523,18 @@ def get_features(dataset_name: str) -> Tuple[List, List]:
                  'direct_normal_irradiance']
         observed = ['power']
         static = []
+    elif dataset_name == 'reninja_n_dwd':
+        known = ['wind_speed_nwp',
+                 'temperature_2m',
+                 'density',
+                 'relative_humidity',
+                 'std_v_wind',
+                 'pressure',
+                 'wind_direction',
+                 'w_vert',
+                 'saturated_vapor_pressure'
+                 ]
+        observed = ['wind_speed']
     elif dataset_name == 'pvod':
         known = [
                 #'nwp_globalirrad',

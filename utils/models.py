@@ -11,6 +11,7 @@ def _build_rnn_stack(input_tensor: tf.Tensor,
                      layer_type: Callable, # z.B. layers.LSTM oder layers.GRU
                      units: int,
                      n_layers: int,
+                     dropout: float,
                      bidirectional: bool = False,
                      layer_name_prefix: str = 'rnn') -> tf.Tensor:
     """Baut einen Stapel von RNN-Layern (LSTM oder GRU)."""
@@ -18,7 +19,7 @@ def _build_rnn_stack(input_tensor: tf.Tensor,
     for i in range(n_layers):
         is_last_layer = (i == n_layers - 1)
         return_sequences = not is_last_layer
-        rnn_layer = layer_type(units, return_sequences=return_sequences, name=f'{layer_name_prefix}_{i+1}')
+        rnn_layer = layer_type(units, dropout=dropout, return_sequences=return_sequences, name=f'{layer_name_prefix}_{i+1}')
         if bidirectional:
             # Name für Bidirectional Layer explizit setzen, um Konflikte zu vermeiden
             # (obwohl Keras dies oft automatisch gut handhabt)
@@ -78,6 +79,7 @@ def _build_convlstm1d_stack(input_tensor: tf.Tensor,
                             filters: int,
                             kernel_size: int,
                             n_layers: int,
+                            dropout: float,
                             activation: str = 'tanh',
                             increase_filters: bool = False, # Filter pro Layer erhöhen?
                             layer_name_prefix: str = 'convlstm1d') -> tf.Tensor:
@@ -103,6 +105,7 @@ def _build_convlstm1d_stack(input_tensor: tf.Tensor,
             activation=activation,
             padding='same',
             return_sequences=return_sequences_flag,
+            recurrent_dropout=dropout,
             name=f'{layer_name_prefix}_{i+1}' # Name angepasst
         )
         x = convlstm_layer(x)
@@ -291,8 +294,9 @@ def build_rnn(n_features: int,
     """Baut ein Long Short-Term Memory (LSTM) Netzwerk."""
     units = hp.get('units', 16)
     n_layers = hp.get('n_rnn_layers', 1)
+    dropout = hp.get('dropout', 0)
     input_layer = layers.Input(shape=(output_dim, n_features), name='input')
-    x = _build_rnn_stack(input_layer, layer_type, units, n_layers, bidirectional=bidirectional, layer_name_prefix=name)
+    x = _build_rnn_stack(input_layer, layer_type, units, n_layers, dropout, bidirectional=bidirectional, layer_name_prefix=name)
     output_layer = layers.Dense(output_dim, name='output')(x)
     return Model(inputs=input_layer, outputs=output_layer, name=name)
 
@@ -313,6 +317,7 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
     filters = hp.get('filters', 16)
     kernel_size = hp.get('kernel_size', 2)
     units = hp.get('units', 16)
+    dropout = hp.get('dropout', 0.1)
     increase_filters = hp.get('increase_filters', False)
     conv_activation = hp.get('conv_activation', 'relu') # Aktivierung für Conv1D Stack
 
@@ -334,6 +339,7 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
         layer_type=rnn_layer_type,
         units=units,
         n_layers=n_rnn_layers,
+        dropout=dropout,
         bidirectional=rnn_bidirectional,
         layer_name_prefix=model_name.split('-')[-1] # z.B. 'lstm', 'gru', 'bilstm'
     )
@@ -353,7 +359,8 @@ def build_convlstm1d(n_features: int,
     # Hyperparameter extrahieren mit Defaults
     filters = hp.get('filters', 64)
     kernel_size = hp.get('kernel_size', 3)
-    n_layers = hp.get('n_cnn_layers', 1)
+    n_layers = hp.get('n_rnn_layers', 1)
+    dropout = hp.get('dropout', 0.1)
     activation = hp.get('activation', 'tanh')
     increase_filters = hp.get('increase_filters', False) # Standardmäßig keine Erhöhung
 
@@ -367,6 +374,7 @@ def build_convlstm1d(n_features: int,
         filters=filters,
         kernel_size=kernel_size,
         n_layers=n_layers,
+        dropout=dropout,
         activation=activation,
         increase_filters=increase_filters,
         layer_name_prefix='convlstm1d'

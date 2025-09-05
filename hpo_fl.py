@@ -71,7 +71,8 @@ def main() -> None:
                                                 config=config,
                                                 known_cols=known,
                                                 observed_cols=observed,
-                                                static_cols=static)
+                                                static_cols=static,
+                                                target_col=config['data']['target_col'])
             X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
             X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
             #X_train, y_train, X_val, y_val = tools.split_val(X=X_train, y=y_train, val_split=config['data']['val_frac'])
@@ -86,7 +87,8 @@ def main() -> None:
                                                         config=config,
                                                         known_cols=known,
                                                         observed_cols=observed,
-                                                        static_cols=static)
+                                                        static_cols=static,
+                                                        target_col=config['data']['target_col'])
                 folds = hpo.kfolds(X=prepared_data['X_train'],
                                     y=prepared_data['y_train'],
                                     n_splits=config['hpo']['kfolds'],

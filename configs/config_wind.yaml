@@ -1,18 +1,30 @@
 data:
   path: 'data'
+  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
+  nwp_path: '/mnt/nas/synthetic/multilevelfields'
   freq: '1h'
-  train_frac: 0.75
+  train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2019-03-01'
+  test_start: '2025-01-01'
+  target_col: 'power'
   scale_y: False
   lag_in_col: False
   n_neighbors: 5
 
+params:
+  turbines: ['Enercon E-70 E4 2.300']
+             #'Enercon E-82 E2 2.000',
+             #'Enercon E-115 2.500',
+             #'Vestas V90',
+             #'Vestas V112-3.45',
+             #'Vestas V80-1.8']
+  weighted_nwp_layers: True
+
 model:
-  output_dim: 48
-  lookback: 48
-  horizon: 48
-  batch_size: 512
+  output_dim: 1
+  lookback: 24
+  horizon: 24
+  batch_size: 64
   epochs: 10
   lr: 0.001
   optimizer: 'adam'
@@ -37,35 +49,37 @@ model:
   callbacks: False
   save_model: True
   shuffle: False
+  create_lag: False # wether to consider observed features as lag features or not
   force_retrain: True
   parallelize: False
-  verbose: 1
+  verbose: 0
 
 hpo:
   studies_path: '/mnt/nas/optuna_studies.db'
   metric: 'rmse'
   trials: 1000
-  kfolds: 5
-  val_split: 0.75
-  batch_size: [64, 512]
-  epochs: [1, 20]
+  kfolds: 3
+  val_split: 1
+  batch_size: [32, 512]
+  epochs: [1, 50]
   n_layers: [1, 4]
-  n_cnn_layers: [1, 4]
-  n_rnn_layers: [1, 2]
+  n_cnn_layers: [1, 10]
+  n_rnn_layers: [1, 5]
   learning_rate: [0.0001, 0.1]
   fnn:
     units: [32, 256]
   cnn:
-    filters: [16, 64]
+    filters: [16, 128]
     kernel_size: [2, 5]
     increase_filters: False
   rnn:
     units: [16, 100]
+    dropout: [0.0, 0.8]
   tft:
     lookback: [24, 48, 72, 96]
     n_heads: [1, 6]
     hidden_dim: [8, 128]
-    dropout: [0.0, 0.5]
+    dropout: [0.0, 0.8]
   fl:
     strategy: 'fedavg'
     personalize: False
@@ -84,7 +98,7 @@ eval:
 fl:
   parts: []
   strategy: 'fedavg'
-  n_rounds: 3
+  n_rounds: 5
   personalize: False
   fedopt:
     server_lr: 0.001

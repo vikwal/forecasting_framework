@@ -30,24 +30,24 @@ def main() -> None:
     # read config
     config = tools.load_config('config.yaml')
     freq = config['data']['freq']
-    config['model']['output_dim'] = 48
+    #config['model']['output_dim'] = 1
     config = tools.handle_freq(config=config)
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['name'] = args.model
-    config['model']['shuffle'] = True
+    #config['model']['shuffle'] = True
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(dataset_name=args.data)
     # get the right dataset name
     dataset_name = args.data
     if '/' in args.data:
+        dataset_dir_name, sub_dir_name = dataset_name.split('/')
         dataset_name = dataset_name.replace('/', '_')
     target_dir = os.path.join('results', dataset_name)
     os.makedirs(target_dir, exist_ok=True)
     study_name = f'cl_d-{dataset_name}_m-{args.model}_out-{output_dim}_freq-{freq}'
     config['model']['name'] = args.model
-    path_to_pkl = os.path.join('results', dataset_name, f'{study_name}.pkl')
     # load and prepare training and test data
     dfs = preprocessing.get_data(dataset_name=args.data,
                                 data_dir=config['data']['path'],
@@ -55,13 +55,17 @@ def main() -> None:
     results = {}
     test_data = {}
     X_train = None
+    path_to_pkl = os.path.join('results', dataset_name, f'{study_name}.pkl')
+    if len(dfs) == 1:
+        path_to_pkl = os.path.join('results', dataset_dir_name, f'{study_name}.pkl')
     for key, df in dfs.items():
         logging.info(f'Preprocessing {key}.')
         prepared_data, dfs[key] = preprocessing.pipeline(data=df,
                                             config=config,
                                             known_cols=known,
                                             observed_cols=observed,
-                                            static_cols=static)
+                                            static_cols=static,
+                                            target_col=config['data']['target_col'])
         index_test = prepared_data['index_test']
         scalers = prepared_data['scalers']
         scaler_y = scalers['y']
@@ -114,6 +118,7 @@ def main() -> None:
                                                 output_dim=output_dim,
                                                 horizon=horizon,
                                                 index_test=index_test,
+                                                target_col=config['data']['target_col'],
                                                 t_0=config['eval']['t_0'],
                                                 evaluate_on_all_test_data=config['eval']['eval_on_all_test_data'])
         new_evaluation['output_dim'] = output_dim

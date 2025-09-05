@@ -175,7 +175,7 @@ def get_hyperparameters(config: dict,
     # tft specific hyperparameters
     n_heads = config['hpo']['tft']['n_heads']
     hidden_dim = config['hpo']['tft']['hidden_dim']
-    dropout = config['hpo']['tft']['dropout']
+    dropout = config['hpo']['rnn']['dropout']
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
     # fl specific hyperparameters
@@ -209,6 +209,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['n_cnn_layers'] = trial.suggest_int('n_cnn_layers', n_cnn_layers[0], n_cnn_layers[1])
             hyperparameters['increase_filters'] = increase_filters
         if is_rnn_type:
+            hyperparameters['dropout'] = trial.suggest_float('dropout', dropout[0], dropout[1])
             hyperparameters['units'] = trial.suggest_int('units', rnn_units[0], rnn_units[1])
             hyperparameters['n_rnn_layers'] = trial.suggest_int('n_rnn_layers', n_rnn_layers[0], n_rnn_layers[1])
         if is_fnn_type:
@@ -245,6 +246,7 @@ def get_hyperparameters(config: dict,
                 hyperparameters['n_cnn_layers'] = config['model']['cnn']['n_cnn_layers']
                 hyperparameters['increase_filters'] = config['model']['cnn']['increase_filters']
             if is_rnn_type:
+                hyperparameters['dropout'] = config['model']['rnn']['dropout']
                 hyperparameters['units'] = config['model']['rnn']['units']
                 hyperparameters['n_rnn_layers'] = config['model']['rnn']['n_rnn_layers']
             if is_fnn_type:

@@ -12,8 +12,6 @@ import optuna
 from utils import preprocessing, tools, hpo
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 def main() -> None:
     #utils.initialize_gpu(2)
@@ -30,11 +28,11 @@ def main() -> None:
     # read config
     config = tools.load_config('config.yaml')
     freq = config['data']['freq']
-    config['model']['output_dim'] = 48
+    #config['model']['output_dim'] = 1
     config = tools.handle_freq(config=config)
     output_dim = config['model']['output_dim']
     config['model']['name'] = args.model
-    config['model']['shuffle'] = True
+    #config['model']['shuffle'] = True
     config['model']['fl'] = False
     # get observed, known and static features
     known, observed, static = preprocessing.get_features(dataset_name=args.data)
@@ -42,6 +40,15 @@ def main() -> None:
     dataset_name = args.data
     if '/' in args.data:
         dataset_name = dataset_name.replace('/', '_')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        #datefmt=datefmt,
+        handlers=[
+            logging.FileHandler(f'logs/hpo_{args.model}_{dataset_name}.log'),
+            logging.StreamHandler()
+            ]
+    )
     target_dir = os.path.join('results', dataset_name)
     os.makedirs(target_dir, exist_ok=True)
     study_name = f'cl_d-{dataset_name}_m-{args.model}_out-{output_dim}_freq-{freq}'#_incrfltrs-{config["hpo"]["cnn"]["increase_filters"]}'
@@ -57,7 +64,8 @@ def main() -> None:
                                             config=config,
                                             known_cols=known,
                                             observed_cols=observed,
-                                            static_cols=static)
+                                            static_cols=static,
+                                            target_col=config['data']['target_col'])
         scalers = prepared_data['scalers']
         scaler_y = scalers['y']
         new_kfolds = hpo.kfolds(X=prepared_data['X_train'],
@@ -90,6 +98,7 @@ def main() -> None:
                                                  config=config)
             accuracies.append(history.history[config['hpo']['metric']][-1])
             logging.info(f'Processed {len(accuracies)} folds.')
+        logging.info(f'Accuracies for the folds: {accuracies}')
         average_accuracy = sum(accuracies) / len(accuracies)
         study.tell(trial, average_accuracy)
 

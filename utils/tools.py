@@ -92,7 +92,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
         logging.info(f"Using MirroredStrategy with {n_gpus} GPUs.")
     else:
         strategy = tf.distribute.get_strategy()  # DefaultStrategy (no distribution)
-        logging.info("Using default strategy (single device).")
+        logging.debug("Using default strategy (single device).")
     with strategy.scope():
         model = models.get_model(config=config, hyperparameters=hyperparameters)
     if config['model']['callbacks']:
