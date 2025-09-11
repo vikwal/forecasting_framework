@@ -35,13 +35,19 @@ def get_y(X_test: Any, # can be dict for tft or numpy array
 def y_to_df(y: np.ndarray,
             output_dim: int,
             horizon: int,
-            index_test: np.ndarray,
+            index: np.ndarray,
             t_0=None) -> pd.DataFrame:
+    if index.shape[-1] == 3:
+        index_for_df = index[:,0]
+        if output_dim == 1:
+            y = y.reshape(-1, horizon)
+            index_for_df = np.array(list(set(index_for_df)))
+            index_for_df.sort()
     col_shape = y.shape[-1]
     cols = [f't+{i+1}' for i in range(col_shape)]
-    df = pd.DataFrame(data=y, columns=cols, index=index_test)
+    df = pd.DataFrame(data=y, columns=cols, index=index_for_df)
     # should be solved simpler in future e.g. via prior making windows if neccesary
-    if output_dim == 1:
+    if output_dim == 1 and not index.shape[-1] == 3:
         new_columns_dict = {}
         base_col_series = df.iloc[:, 0]
         for i in range(2, horizon + 1):
@@ -51,9 +57,8 @@ def y_to_df(y: np.ndarray,
             new_cols_df = pd.DataFrame(new_columns_dict, index=df.index)
             df = pd.concat([df, new_cols_df], axis=1)
         df.dropna(inplace=True)
-
     if t_0:
-        df = df.loc[(df.index.time == pd.to_datetime(f'{t_0}:00:00').time())]
+        df = df.loc[(df.index.time == pd.to_datetime(f'{t_0}:00').time())]
     return df
 
 

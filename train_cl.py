@@ -22,13 +22,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
+    parser.add_argument('-c', '--config', type=str, help='Select config')
     args = parser.parse_args()
     # create directories
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
     os.makedirs('studies', exist_ok=True)
     # read config
-    config = tools.load_config('config.yaml')
+    if '.yaml' in args.config:
+        args.config = args.config.split('.')[0]
+    config = tools.load_config(f'configs/{args.config}.yaml')
     freq = config['data']['freq']
     #config['model']['output_dim'] = 1
     config = tools.handle_freq(config=config)
@@ -36,9 +39,11 @@ def main() -> None:
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['name'] = args.model
+    test_start = pd.Timestamp(config.get('data').get('test_start', 0))
     #config['model']['shuffle'] = True
     # get observed, known and static features
-    known, observed, static = preprocessing.get_features(dataset_name=args.data)
+    known, observed, static = preprocessing.get_features(dataset_name=args.data, config=config)
+    rel_features = known + observed
     # get the right dataset name
     dataset_name = args.data
     if '/' in args.data:
@@ -50,12 +55,16 @@ def main() -> None:
     config['model']['name'] = args.model
     # load and prepare training and test data
     dfs = preprocessing.get_data(dataset_name=args.data,
-                                data_dir=config['data']['path'],
-                                freq=freq)
+                                 config=config,
+                                 data_dir=config['data']['path'],
+                                 freq=freq,
+                                 rel_features=rel_features)
     results = {}
     test_data = {}
     X_train = None
     path_to_pkl = os.path.join('results', dataset_name, f'{study_name}.pkl')
+    if 'lag_known_features' in config['params']:
+        observed.extend(config['params']['lag_known_features'])
     if len(dfs) == 1:
         path_to_pkl = os.path.join('results', dataset_dir_name, f'{study_name}.pkl')
     for key, df in dfs.items():
@@ -65,6 +74,7 @@ def main() -> None:
                                             known_cols=known,
                                             observed_cols=observed,
                                             static_cols=static,
+                                            test_start=test_start,
                                             target_col=config['data']['target_col'])
         index_test = prepared_data['index_test']
         scalers = prepared_data['scalers']
@@ -118,6 +128,7 @@ def main() -> None:
                                                 output_dim=output_dim,
                                                 horizon=horizon,
                                                 index_test=index_test,
+                                                test_start=test_start,
                                                 target_col=config['data']['target_col'],
                                                 t_0=config['eval']['t_0'],
                                                 evaluate_on_all_test_data=config['eval']['eval_on_all_test_data'])

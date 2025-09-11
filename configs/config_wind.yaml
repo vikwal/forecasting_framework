@@ -12,31 +12,58 @@ data:
   n_neighbors: 5
 
 params:
-  turbines: ['Enercon E-70 E4 2.300']
+  turbines: [
+             'Enercon E-70 E4 2.300',
              #'Enercon E-82 E2 2.000',
              #'Enercon E-115 2.500',
              #'Vestas V90',
              #'Vestas V112-3.45',
-             #'Vestas V80-1.8']
-  weighted_nwp_layers: True
+             #'Vestas V80-1.8'
+            ]
+  known_features: [
+                   #'wind_speed_t1'
+                   'wind_speed_nwp',
+                   'temperature_nwp',
+                   'pressure_nwp',
+                   'relhum_nwp',
+                   'density_nwp'
+                   ]
+  observed_features: [
+                      #'wind_speed',
+                      'wind_speed_t1',
+                      'power'
+                      ]
+  lag_known_features: [
+
+                      ]
+  aggregate_nwp_layers: 'pivot' # options: 'not', 'pivot', 'weighted_mean', 'mean'
+  features_to_pivot: [
+                      'wind_speed_nwp',
+                      'density_nwp',
+                      #'temperature_nwp',
+                      #'pressure_nwp',
+                      #'relhum_nwp',
+                      ]
+  get_density: True
 
 model:
-  output_dim: 1
-  lookback: 24
-  horizon: 24
+  output_dim: 48
+  lookback: 192
+  horizon: 48
+  step_size: 48
   batch_size: 64
-  epochs: 10
-  lr: 0.001
+  epochs: 30
+  lr: 0.0005
   optimizer: 'adam'
   loss: 'mse'
-  metrics: ['mae', 'rmse']
+  metrics: ['mae', 'rmse', 'r^2']
   fnn:
     units: 128
     n_layers: 2
   cnn:
     filters: 64
     kernel_size: 3
-    n_cnn_layers: 3
+    n_cnn_layers: 10
     increase_filters: False
   rnn:
     n_rnn_layers: 1
@@ -49,10 +76,10 @@ model:
   callbacks: False
   save_model: True
   shuffle: False
-  create_lag: False # wether to consider observed features as lag features or not
+  create_lag: True # wether to consider observed features as lag features or not
   force_retrain: True
   parallelize: False
-  verbose: 0
+  verbose: 1
 
 hpo:
   studies_path: '/mnt/nas/optuna_studies.db'

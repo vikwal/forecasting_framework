@@ -16,6 +16,8 @@ def persistence(y: pd.Series,
     '''
     shifted = y.shift(horizon)
     y_pers = pd.Series(data=shifted, index=y.index)
+    if type(y.index) == pd.core.indexes.multi.MultiIndex:
+        y_pers = y_pers.reset_index().groupby('timestamp').mean().iloc[:,-1]
     if from_date:
         y_pers = y_pers[from_date:]
     return y_pers
@@ -60,7 +62,7 @@ def benchmark_models(data: pd.DataFrame,
     df_pers = tools.y_to_df(y=y_pers,
                       output_dim=output_dim,
                       horizon=horizon,
-                      index_test=index_test,
+                      index=index_test,
                       t_0=t_0)
     results['Persistence'] = df_pers
     # linear regression persistence
@@ -73,7 +75,7 @@ def benchmark_models(data: pd.DataFrame,
     df_pers = tools.y_to_df(y=y_pers,
                       output_dim=output_dim,
                       horizon=horizon,
-                      index_test=index_test,
+                      index=index_test,
                       t_0=t_0)
     results['LinearRegression'] = df_pers
     return results
@@ -125,33 +127,48 @@ def evaluation_pipeline(data: pd.DataFrame,
                         output_dim: int,
                         horizon: int,
                         index_test: np.ndarray,
+                        test_start: str,
                         t_0: int,
                         target_col='power',
                         evaluate_on_all_test_data=True) -> pd.DataFrame:
     y_true, y_pred = tools.get_y(X_test=X_test,
-                           y_test=y_test,
-                           scaler_y=scaler_y,
-                           model=model)
+                                 y_test=y_test,
+                                 scaler_y=scaler_y,
+                                 model=model)
     df_pred = tools.y_to_df(y=y_pred,
-                 output_dim=output_dim,
-                 horizon=horizon,
-                 index_test=index_test,
-                 t_0=None if evaluate_on_all_test_data else t_0)
+                            output_dim=output_dim,
+                            horizon=horizon,
+                            index=index_test,
+                            t_0=None if evaluate_on_all_test_data else t_0)
     df_true = tools.y_to_df(y=y_true,
-                      output_dim=output_dim,
-                      horizon=horizon,
-                      index_test=index_test,
-                      t_0=None if evaluate_on_all_test_data else t_0)
+                            output_dim=output_dim,
+                            horizon=horizon,
+                            index=index_test,
+                            t_0=None if evaluate_on_all_test_data else t_0)
     y_pers = persistence(y=data[target_col],
-                        horizon=horizon,
-                        from_date=str(index_test[0].date()))
+                         horizon=horizon,
+                         from_date=str(test_start.date()))
+
+    test_indices = None
+    if len(index_test.shape) != 1:
+        test_indices = index_test[:,0]
+        if output_dim == 1:
+            test_indices = np.array(list(set(index_test[:,2])))
+            test_indices.sort()
+            y_pers = y_pers[test_indices]
+            y_pers_raw = pd.DataFrame(index_test, columns=list(data.index.names))
+            y_pers = y_pers_raw.merge(y_pers.to_frame(), how='left', on='timestamp')['power'].values
+            test_indices = None
+
     y_pers = preprocessing.make_windows(data=y_pers,
-                                        seq_len=y_pred.shape[-1])
+                                        seq_len=y_pred.shape[-1],
+                                        step_size=1,
+                                        indices=test_indices)
     df_pers = tools.y_to_df(y=y_pers,
-                      output_dim=output_dim,
-                      horizon=horizon,
-                      index_test=index_test,
-                      t_0=None if evaluate_on_all_test_data else t_0)
+                            output_dim=output_dim,
+                            horizon=horizon,
+                            index=index_test,
+                            t_0=None if evaluate_on_all_test_data else t_0)
     pers = {}
     pers['Persistence'] = df_pers
     evaluation = evaluate_models(pred=df_pred,
@@ -206,7 +223,7 @@ def evaluate_retrain(config,
         y_pers_raw = persistence(y=df[target_col],
                                  horizon=horizon,
                                  from_date=str(index_test[0].date()))
-        y_pers_new = preprocessing.make_windows(y_pers_raw, y_pred_new.shape[-1])
+        y_pers_new = preprocessing.make_windows(y_pers_raw, y_pred_new.shape[-1], step_size=1)
         y_pers_new = y_pers_new[from_index:to_index]
         if y_pred is None:
             y_true, y_pred, y_pers, index = y_true_new, y_pred_new, y_pers_new, index_day

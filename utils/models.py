@@ -554,7 +554,7 @@ def get_metrics(config: dict) -> list:
     for m in metric_list:
         if m == 'mae': metrics.append(tf.keras.metrics.MeanAbsoluteError(name='mae'))
         elif m == 'rmse': metrics.append(tf.keras.metrics.RootMeanSquaredError(name='rmse'))
-        elif m == 'r^2': metrics.append(tf.keras.metrics.R2Score(name='r^2'))
+        elif m == 'r^2': metrics.append(tf.keras.metrics.R2Score(name='r2'))
     return metrics
 
 def get_model(config: Dict[str, Any],

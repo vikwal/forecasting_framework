@@ -42,9 +42,10 @@ def pipeline(data: pd.DataFrame,
                                 horizon=config['model']['horizon'],
                                 lag_in_col=config['data']['lag_in_col'],
                                 target_col=col)
-                if col != target_col: df.drop(col, axis=1, inplace=True)
+                if col != target_col and col not in known_cols: df.drop(col, axis=1, inplace=True, errors='ignore')
         prepared_data = prepare_data(data=df,
                                      output_dim=config['model']['output_dim'],
+                                     step_size=config['model']['step_size'],
                                      train_frac=config['data']['train_frac'],
                                      scale_y=config['data']['scale_y'],
                                      t_0=t_0,
@@ -89,6 +90,7 @@ def get_data(data_dir: str,
             dfs[file] = df
         return dfs
     elif 'synth_wind' in dataset_name:
+        rel_features_copy = rel_features.copy()
         target_dir = os.path.join(data_dir, dataset_name)
         logging.info(f'Getting the data from: {target_dir}')
         client_dirs = [name for name in os.listdir(target_dir) if os.path.isdir(os.path.join(target_dir, name))]
@@ -102,7 +104,7 @@ def get_data(data_dir: str,
                 df = preprocess_synth_wind(path=path,
                                            config=config,
                                            freq=freq,
-                                           rel_features=rel_features)
+                                           rel_features=rel_features_copy)
                 key = file
                 dfs[key] = df
         else:
@@ -114,7 +116,7 @@ def get_data(data_dir: str,
                     df = preprocess_synth_wind(path=path,
                                                config=config,
                                                freq=freq,
-                                               rel_features=rel_features)
+                                               rel_features=rel_features_copy)
                     key = f'{client}_{file}'
                     dfs[key] = df
         return dfs
@@ -150,10 +152,13 @@ def get_data(data_dir: str,
 def knn_imputer(data: pd.DataFrame,
                n_neighbors: int = 5):
     # To help KNNImputer estimating the temporal saisonalities we add encoded temporal features.
-    data['hour_sin'] = np.sin(2 * np.pi * data.index.hour / 24)
-    data['hour_cos'] = np.cos(2 * np.pi * data.index.hour / 24)
-    data['month_sin'] = np.sin(2 * np.pi * data.index.month / 12)
-    data['month_cos'] = np.cos(2 * np.pi * data.index.month / 12)
+    index = data.index
+    if type(index) == pd.core.indexes.multi.MultiIndex:
+        index = data.index.get_level_values('timestamp')
+    data['hour_sin'] = np.sin(2 * np.pi * index.hour / 24)
+    data['hour_cos'] = np.cos(2 * np.pi * index.hour / 24)
+    data['month_sin'] = np.sin(2 * np.pi * index.month / 12)
+    data['month_cos'] = np.cos(2 * np.pi * index.month / 12)
     imputer = KNNImputer(n_neighbors=n_neighbors)
     scaler = StandardScaler()
     df_scaled = scaler.fit_transform(data)
@@ -186,40 +191,69 @@ def lag_features(data: pd.DataFrame,
                  target_col='power',
                  lag_in_col=False) -> pd.DataFrame:
     df = data.copy()
+    if type(data.index) == pd.core.indexes.multi.MultiIndex:
+        target_vec = df.groupby(df.index.get_level_values('timestamp')).mean()[target_col].to_frame()
+    else:
+        target_vec = df[[target_col]].copy()
     if lag_in_col:
-        for lag in range(horizon, horizon+lookback+1):
-            df[f'{target_col}_lag_{lag}'] = df[target_col].shift(lag)
-        return df
-    lookback = max(horizon, lookback)
-    lags = [horizon]
-    lags.extend(range(horizon+24, lookback+1, 24))
+        lags = list(range(horizon, lookback + 1))
+    else:
+        lags = list(range(horizon, lookback + 1, horizon))
     for lag in lags:
-        df[f"{target_col}_lag_{lag}"] = df[target_col].shift(lag)
+        target_vec[f"{target_col}_lag_{lag}"] = target_vec[target_col].shift(lag)
+    target_vec.drop(target_col, axis=1, inplace=True)
+    if type(data.index) == pd.core.indexes.multi.MultiIndex:
+        df.reset_index(inplace=True)
+        df = df.merge(
+            target_vec,
+            how="left",
+            left_on="timestamp",
+            right_index=True
+        )
+        df.set_index(["starttime", "forecasttime", "timestamp"], inplace=True)
+    else:
+        df = df.merge(
+            target_vec,
+            how="left",
+            left_index=True,
+            right_index=True
+        )
     return df
 
 def make_windows(data: np.ndarray,
-                 seq_len: int) -> np.ndarray:
-    return np.array([data[i:i + seq_len] for i in range(data.shape[0]-seq_len+1)])
+                 seq_len: int,
+                 step_size: int = 1,
+                 indices: pd.DatetimeIndex = None) -> np.ndarray:
+    windows = np.array([data[i:i + seq_len] for i in range(0,
+                                                           data.shape[0]-seq_len+1,
+                                                           step_size)])
+    if 'index' in dir(data) and indices is not None:
+        index = data.index
+        freq = data.index[1] - data.index[0]
+        shifted_index = index - freq
+        shifted_index = shifted_index[:shifted_index.shape[0]-seq_len+1]
+        mask = np.array([True if i in indices else False for i in shifted_index])
+        windows = windows[mask]
+    return windows
 
 def apply_scaling(df_train,
                   df_test,
                   scaler_type=StandardScaler):
-    """Fits scaler on train data and transforms train and test data."""
     scaler = scaler_type()
     if len(df_train.shape) == 1:
         df_train = df_train.values.reshape(-1, 1)
     if len(df_test.shape) == 1:
         df_test = df_test.values.reshape(-1, 1)
-    # Important: Fit scaler ONLY on training data!
     scaled_train = scaler.fit_transform(df_train)
     if len(df_test) == 0:
         scaled_test = df_test
     else:
-        scaled_test = scaler.transform(df_test) # Use fitted scaler to transform test data
+        scaled_test = scaler.transform(df_test)
     return scaled_train, scaled_test, scaler
 
 def prepare_data(data: pd.DataFrame,
                  output_dim: int,
+                 step_size: int = 1,
                  train_frac: float = 0.75,
                  scale_x: bool = True,
                  scale_y: bool = False,
@@ -229,6 +263,13 @@ def prepare_data(data: pd.DataFrame,
                  seq2seq: bool = False):
     df = data.copy()
     df.dropna(inplace=True)
+    index = data.index
+    # MultiIndex handling
+    if type(data.index) == pd.core.indexes.multi.MultiIndex:
+        index = data.index.get_level_values('starttime')
+        df = df.groupby(level='starttime').filter(
+            lambda g: g.index.get_level_values('forecasttime').nunique() == 48
+        )
     target = df[[target_col]]
     df.drop(target_col, axis=1, inplace=True)
     # Split data into train and test sets with a 75/25 ratio, ensuring full days
@@ -236,33 +277,50 @@ def prepare_data(data: pd.DataFrame,
         train_end = test_start - pd.Timedelta(hours=0.25)
     else:
         train_periods = int(len(df) * train_frac)-1
-        train_end = df.index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
+        train_end = index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
+        train_end = pd.Timestamp(train_end)
         test_start = train_end + pd.Timedelta(hours=0.25)
+        test_start = pd.Timestamp(test_start)
+    # handel MultiIndex if needed
+    if type(data.index) == pd.core.indexes.multi.MultiIndex:
+        df_train = df[df.index.get_level_values('starttime') < pd.Timestamp(test_start, tz='UTC')]
+        df_test = df[df.index.get_level_values('starttime') > pd.Timestamp(train_end, tz='UTC')]
+        target_train = target[target.index.get_level_values('starttime') < pd.Timestamp(test_start, tz='UTC')]
+        target_test = target[target.index.get_level_values('starttime') > pd.Timestamp(train_end, tz='UTC')]
+    else:
+        df_train = df[:train_end]
+        df_test = df[test_start:]
+        target_train = target[:train_end]
+        target_test = target[test_start:]
     scalers = {}
     scalers['x'] = None
     scalers['y'] = None
     if scale_x:
-        X_train, X_test, scaler_x = apply_scaling(df[:train_end],
-                                                  df[test_start:],
+        X_train, X_test, scaler_x = apply_scaling(df_train,
+                                                  df_test,
                                                   StandardScaler)
         scalers['x'] = scaler_x
     else:
-        X_train = df[:train_end].values
-        X_test = df[test_start:].values
+        X_train = df_train.values
+        X_test = df_test.values
     if scale_y:
-        Y_train, Y_test, scaler_y = apply_scaling(target[:train_end],
-                                                  target[test_start:],
+        Y_train, Y_test, scaler_y = apply_scaling(target_train,
+                                                  target_test,
                                                   StandardScaler)
         scalers['y'] = scaler_y
     else:
-        Y_train = target[:train_end]
-        Y_test = target[test_start:]
-    index_train = np.array([df[:train_end].index[i] for i in range(X_train.shape[0]-output_dim+1)])
-    index_test = np.array([df[test_start:].index[i] for i in range(X_test.shape[0]-output_dim+1)])
-    X_train = make_windows(data=X_train, seq_len=output_dim)
-    X_test = make_windows(data=X_test, seq_len=output_dim)
-    y_train = make_windows(data=Y_train, seq_len=output_dim).reshape(-1, output_dim)
-    y_test = make_windows(data=Y_test, seq_len=output_dim).reshape(-1, output_dim)
+        Y_train = target_train
+        Y_test = target_test
+    index_train = np.array([df_train.index[i] for i in range(0,
+                                                             X_train.shape[0]-output_dim+1,
+                                                             step_size)])
+    index_test = np.array([df_test.index[i] for i in range(0,
+                                                           X_test.shape[0]-output_dim+1,
+                                                           step_size)])
+    X_train = make_windows(data=X_train, seq_len=output_dim, step_size=step_size)
+    X_test = make_windows(data=X_test, seq_len=output_dim, step_size=step_size)
+    y_train = make_windows(data=Y_train, seq_len=output_dim, step_size=step_size).reshape(-1, output_dim)
+    y_test = make_windows(data=Y_test, seq_len=output_dim, step_size=step_size).reshape(-1, output_dim)
     if seq2seq:
         y_train = y_train.reshape(-1, output_dim, 1)
         y_test = y_test.reshape(-1, output_dim, 1)
@@ -296,13 +354,74 @@ def preprocess_synth_wind(path: str,
                           config: dict,
                           freq: str = '1H',
                           rel_features: list = None) -> pd.DataFrame:
-    def get_circle_segment(r: float, seg_height: float):
-        theta = 2 * np.arccos(seg_height / r)
-        seg_ground = 2 * np.sqrt(r**2 + seg_height**2)
-        A_tri = 0.5 * seg_height * seg_ground
-        A_sec = np.pi * r**2 * (theta / (2 * np.pi))
-        A_seg = A_sec - A_tri
-        return A_seg
+    def circle_cap_area(r: float, y: float) -> float:
+        """Fläche oberhalb einer Horizontalen im Kreis mit Radius r.
+        Kreis ist im Ursprung (0,0) zentriert. y ist die Höhe der Linie."""
+        if y <= -r:   # Linie ganz unten → ganze Kreisfläche
+            return np.pi * r**2
+        if y >= r:    # Linie ganz oben → keine Fläche
+            return 0.0
+        return r**2 * np.arccos(y/r) - y * np.sqrt(r**2 - y**2)
+
+    def get_A_weights(turbines: pd.DataFrame, nwp: pd.DataFrame) -> np.ndarray:
+        A_total = 0
+        A_all_turbines = []
+        for turbine in turbines.itertuples():
+            r = turbine.diameter / 2
+            height = turbine.hub_height
+            rotor_top = height + r
+            rotor_bottom = height - r
+            A_total += np.pi * r**2
+            A = []
+            for top, down in nwp.groupby(['toplevel','bottomlevel']).size().index:
+                y_top = top - height
+                y_down = down - height
+                A_slice = circle_cap_area(r, y_down) - circle_cap_area(r, y_top)
+                A.append(A_slice)
+            A_all_turbines.append(A)
+        A_all_turbines = np.array(A_all_turbines)
+        return A_all_turbines.sum(axis=0) / A_total
+
+    def get_saturated_vapor_pressure(temperature: pd.Series,
+                                     model: str = 'improved_magnus') -> pd.Series:
+        temperature = temperature - 273.15
+        def huang(temp):
+            return np.where(
+                temp > 0,
+                np.exp(34.494 - (4924.99 / (temp + 237.1))) / (temp + 105) ** 1.57,
+                np.exp(43.494 - (6545.8 / (temp + 278))) / (temp + 868) ** 2
+            )
+        def improved_magnus(temp):
+            return np.where(
+                temp > 0,
+                610.94 * np.exp((17.625 * temp) / (temp + 243.04)),
+                611.21 * np.exp((22.587 * temp) / (temp + 273.86))
+            )
+        model_functions = {
+            'huang': huang,
+            'improved_magnus': improved_magnus,
+        }
+        if model not in model_functions:
+            raise ValueError(f"Unknown model: {model}")
+        return model_functions[model](temperature)
+
+    def get_density(temperature: pd.Series,
+                    pressure: pd.Series,
+                    relhum: pd.Series,
+                    sat_vap_ps: pd.Series) -> pd.Series:
+        R_dry = 287.05  # Specific gas constant dry air (J/(kg·K))
+        R_w = 461.5  # Specific gas constaint water vapor (J/(kg·K))
+        # check if relative humidity is in the range between 0 and 1
+        if relhum.max() > 1:
+            relhum = relhum / 100
+        if temperature.mean() < 100:
+            temperature = temperature + 273.15 # from celsius to kelvin
+        p_w = relhum * sat_vap_ps
+        p_g = pressure - p_w
+        rho_g = p_g / (R_dry * temperature)
+        rho_w = p_w / (R_w * temperature)
+        rho = rho_g + rho_w
+        return rho
 
     timestamp_col = 'timestamp'
     park_id = path.split('_')[-1].split('.')[0]
@@ -310,13 +429,14 @@ def preprocess_synth_wind(path: str,
     turbine_parameter_path = path.replace(os.path.basename(path), 'turbine_parameter.csv')
     power_curves_path = os.path.join(config['data']['power_curves_path'], 'turbine_power.csv')
     nwp_path = os.path.join(config['data']['nwp_path'], f'ML_Station_{park_id}.csv')
-    if 'turbines' in config['params']['turbines']:
+    rel_features = list(set(rel_features))
+    if 'turbines' in config['params']:
         turbines_list = config['params']['turbines']
     else:
         turbines_list = None
     wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
     turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
-    power_curves = pd.read_csv(power_curves_path, sep=';')
+    power_curves = pd.read_csv(power_curves_path, sep=';', decimal=',')
     df = pd.read_csv(path, sep=';')
     df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
     df.set_index(timestamp_col, inplace=True)
@@ -338,7 +458,7 @@ def preprocess_synth_wind(path: str,
         turbines = turbine_parameter
     df['power'] = df['power'] / installed_capacity # in Watts
     df = df.resample(freq, closed='left', label='left', origin='start').mean()
-    # get nwp data
+    # get nwp data if nwp is mentioned in the known features
     nwp = pd.read_csv(nwp_path, sep=',')
     nwp['starttime'] = pd.to_datetime(nwp['starttime'], utc=True)
     nwp['timestamp'] = nwp['starttime'] + pd.to_timedelta(nwp['forecasttime'], unit='h')
@@ -348,42 +468,89 @@ def preprocess_synth_wind(path: str,
             nwp.rename(columns={col: f'{col}_nwp'}, inplace=True)
     nwp['wind_speed_nwp'] = np.sqrt(nwp['u_wind_nwp']**2 + nwp['v_wind_nwp']**2)
     nwp.set_index('timestamp', inplace=True)
+    # get density if required
+    if config['params']['get_density']:
+        nwp['sat_vap_ps'] = get_saturated_vapor_pressure(temperature=nwp['temperature_nwp'],
+                                                         model='huang')
+        nwp['density_nwp'] = get_density(temperature=nwp['temperature_nwp'],
+                                         pressure=nwp['pressure_nwp'],
+                                         relhum=nwp['relhum_nwp'],
+                                         sat_vap_ps=nwp['sat_vap_ps'])
+    nwp_features = rel_features.copy()
+    for col in rel_features:
+        if 'nwp' not in col:
+            nwp_features.remove(col)
+    nwp_features += ['forecasttime', 'toplevel', 'bottomlevel']
+    nwp = nwp[nwp_features].copy()
     # aggregate multilevels
-    if config['params']['weighted_nwp_layers']:
-        A_total = 0
-        A_all_turbines = []
-        for turbine in turbines.itertuples():
-            A = []
-            height = turbine.hub_height
-            diameter = turbine.diameter
-            rotor_top = height + diameter / 2
-            rotor_bottom = height - diameter / 2
-            A_total += np.pi * (diameter / 2)**2
-            for top, down in nwp.groupby(['toplevel', 'bottomlevel']).size().index:
-                if rotor_top <= top and rotor_bottom >= down:
-                    A.append(np.pi * (diameter / 2)**2)
-                elif down <= rotor_bottom <= top:
-                    seg_height = abs(height - top)
-                    A.append(get_circle_segment(diameter/2, seg_height))
-                elif down <= rotor_top <= top:
-                    seg_height = abs(height - down)
-                    A.append(get_circle_segment(diameter/2, seg_height))
-                elif rotor_top >= top and rotor_bottom <= down:
-                    p1_x = np.sqrt((diameter/2)**2 - (height-top)**2)
-                    p2_x = np.sqrt((diameter/2)**2 - (height-down)**2)
-                    diff = p1_x - p2_x
-                    sec = np.sqrt(diff**2 + (top-down)**2)
-                    c = np.sqrt((diameter/2)**2 - (0.5*sec)**2)
-                    seg_height = diameter/2 - c
-                    A_seg = get_circle_segment(diameter/2, seg_height)
-                    A.append(A_seg*2 + diff*(top-down) + (diameter - 2*diff)*(top-down))
-                else:
-                    A.append(0)
-            A_all_turbines.append(A)
-
-        A_all_turbines = np.array(A_all_turbines)
-        weights = A_all_turbines.sum(axis=0) / A_total
-
+    if config['params']['aggregate_nwp_layers'] == 'pivot':
+        mapping = {20.0: 1,
+                   55.212: 2,
+                   100.277: 3,
+                   153.438: 4,
+                   213.746: 5,
+                   280.598: 6}
+        #features_not_to_pivot = [col in nwp.columns if '_nwp' in col]
+        features_to_pivot = config['params']['features_to_pivot']
+        for col in features_to_pivot:
+            rel_features.remove(col)
+        features_not_to_pivot = [col for col in nwp.columns if col not in features_to_pivot]
+        weights = get_A_weights(turbines=turbines, nwp=nwp)
+        # pivot features
+        nwp_pivot = nwp[features_to_pivot + ['forecasttime', 'toplevel']].copy()
+        nwp_pivot.reset_index(inplace=True)
+        nwp_pivot['toplevel'] = nwp_pivot['toplevel'].map(mapping)
+        nwp_pivot = nwp_pivot.pivot(index=['timestamp', 'forecasttime'],
+                                    columns=['toplevel'],
+                                    values=features_to_pivot)
+        nwp_pivot.reset_index(inplace=True)
+        column_names = []
+        for col in nwp_pivot.columns:
+            if 'nwp' in col[0]:
+                new_col_name = f'{col[0]}_{col[1]}'
+                column_names.append(new_col_name)
+                rel_features.append(new_col_name)
+            else:
+                column_names.append(col[0])
+        nwp_pivot.columns = column_names
+        nwp_pivot.set_index('timestamp', inplace=True)
+        # get weighted averages of features not to pivot
+        layers_idx = nwp.groupby(['toplevel','bottomlevel']).size().index
+        layers = pd.DataFrame({
+            'toplevel': [t for (t, b) in layers_idx],
+            'bottomlevel': [b for (t, b) in layers_idx],
+            'weight': weights
+        })
+        nwp = nwp.reset_index()
+        nwp = nwp.merge(layers, on=['toplevel','bottomlevel'], how='left', validate='m:1')
+        weighted_cols = []
+        for col in features_not_to_pivot:
+            if '_nwp' in col:
+                nwp[f'{col}_w'] = nwp[col] * nwp['weight']
+                weighted_cols.append(f'{col}_w')
+        cols_to_group = weighted_cols + ['weight']
+        agg = (
+            nwp.groupby(['timestamp','forecasttime'], sort=False)[
+                cols_to_group
+            ].sum()
+            .reset_index()
+        )
+        wsum = agg['weight']
+        agg[weighted_cols] = (
+            agg[weighted_cols].div(wsum, axis=0)
+        )
+        nwp = (
+            agg.drop(columns='weight')
+            .rename(columns=lambda c: c.replace('_w',''))
+            .set_index('timestamp')
+        )
+        # merge pivoted and aggregated features
+        nwp.reset_index(inplace=True)
+        nwp_pivot.reset_index(inplace=True)
+        nwp = nwp.merge(nwp_pivot, on=['timestamp', 'forecasttime'], how='left')
+        nwp.set_index('timestamp', inplace=True)
+    elif config['params']['aggregate_nwp_layers'] == 'weighted_mean':
+        weights = get_A_weights(turbines=turbines, nwp=nwp)
         layers_idx = nwp.groupby(['toplevel','bottomlevel']).size().index
         layers = pd.DataFrame({
             'toplevel': [t for (t, b) in layers_idx],
@@ -393,19 +560,22 @@ def preprocess_synth_wind(path: str,
         nwp = nwp.reset_index()  # timestamp zurück als Spalte
         nwp = nwp.merge(layers, on=['toplevel','bottomlevel'], how='left', validate='m:1')
 
-        nwp['temperature_nwp_w'] = nwp['temperature_nwp'] * nwp['weight']
-        nwp['pressure_nwp_w']    = nwp['pressure_nwp']    * nwp['weight']
-        nwp['relhum_nwp_w']      = nwp['relhum_nwp']      * nwp['weight']
+        weighted_cols = []
+        for col in nwp.columns:
+            if '_nwp' in col and col != 'wind_speed_nwp':
+                nwp[f'{col}_w'] = nwp[col] * nwp['weight']
+                weighted_cols.append(f'{col}_w')
         nwp['wind_speed_nwp_w']  = nwp['weight'] * (nwp['wind_speed_nwp']**3)
+        cols_to_group = weighted_cols + ['wind_speed_nwp_w','weight']
         agg = (
             nwp.groupby(['timestamp','forecasttime'], sort=False)[
-                ['temperature_nwp_w','pressure_nwp_w','relhum_nwp_w','weight','wind_speed_nwp_w']
+                cols_to_group
             ].sum()
             .reset_index()
         )
         wsum = agg['weight']
-        agg[['temperature_nwp_w','pressure_nwp_w','relhum_nwp_w']] = (
-            agg[['temperature_nwp_w','pressure_nwp_w','relhum_nwp_w']].div(wsum, axis=0)
+        agg[weighted_cols] = (
+            agg[weighted_cols].div(wsum, axis=0)
         )
         agg['wind_speed_nwp_w'] = (agg['wind_speed_nwp_w']/wsum)**(1/3)
         nwp = (
@@ -413,17 +583,32 @@ def preprocess_synth_wind(path: str,
             .rename(columns=lambda c: c.replace('_w',''))
             .set_index('timestamp')
         )
-    else:
+    elif config['params']['aggregate_nwp_layers'] == 'mean':
         for top, down in nwp.groupby(['toplevel', 'bottomlevel']).size().index:
             if down <= np.mean(heights) <= top:
                 nwp = nwp[(nwp['toplevel'] == top) & (nwp['bottomlevel'] == down)]
                 break
         nwp.drop(['toplevel', 'bottomlevel'], axis=1, inplace=True)
+    elif config['params']['aggregate_nwp_layers'] == 'not':
+        rel_features += ['toplevel', 'bottomlevel']
+    else:
+        raise ValueError(f"Unknown option for 'aggregate_nwp_layers': {config['params']['aggregate_nwp_layers']}. Please choose from 'to_pivot', 'weighted_mean', 'mean', or 'not'.")
     # merge nwp data and wind park data
     df = nwp.merge(df, left_index=True, right_index=True, how='left')
-    rel_features += ['forecasttime']
-    if rel_features:
-        return df[rel_features]
+    rel_features.append('forecasttime')
+    df = df[rel_features]
+    df.reset_index(inplace=True)
+    df['starttime'] = df['timestamp'] - pd.to_timedelta(df['forecasttime'], unit='h')
+    df.sort_values(['starttime', 'forecasttime'], ascending=True, inplace=True)
+    # drop all rows with forecasttime = 0
+    df.drop(df[df.forecasttime == 0].index, inplace=True)
+    df.set_index(['starttime', 'forecasttime', 'timestamp'], inplace=True)
+    #df.drop('timestamp', axis=1, inplace=True)
+    # drop forecast runs with < 48 forecasted hours
+    df.dropna(inplace=True)
+    df = df.groupby(level='starttime').filter(
+        lambda g: g.index.get_level_values('forecasttime').nunique() == 48
+    )
     return df
 
 def preprocess_reninja_n_dwd(path: str,
@@ -509,8 +694,15 @@ def preprocess_1b_trina(path: str,
     return df
 
 
-def get_features(dataset_name: str) -> Tuple[List, List]:
-    known, observed, static = None, None, None
+def get_features(dataset_name: str,
+                 config: dict = None) -> Tuple[List, List]:
+    if 'known_features' in config['params'] and 'observed_features' in config['params']:
+        known = config['params']['known_features']
+        observed = config['params']['observed_features']
+        static = config['params'].get('static_features', [])
+        return known, observed, static
+    else:
+        known, observed, static = None, None, None
     if 'synth_wind' in dataset_name:
         known = ['wind_speed_nwp', 'temperature_nwp', 'pressure_nwp', 'relhum_nwp']
         observed = ['power']
