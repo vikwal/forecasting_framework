@@ -167,6 +167,7 @@ def get_hyperparameters(config: dict,
     n_cnn_layers = config['hpo']['n_cnn_layers']
     n_rnn_layers = config['hpo']['n_rnn_layers']
     learning_rate = config['hpo']['learning_rate']
+    attention_heads = config['hpo']['attention_heads']
     filters = config['hpo']['cnn']['filters']
     kernel_size = config['hpo']['cnn']['kernel_size']
     rnn_units = config['hpo']['rnn']['units']
@@ -221,6 +222,8 @@ def get_hyperparameters(config: dict,
             hyperparameters['n_heads'] = trial.suggest_int('n_heads', n_heads[0], n_heads[1])
             hyperparameters['hidden_dim'] = trial.suggest_int('hidden_dim', hidden_dim[0], hidden_dim[1])
             hyperparameters['dropout'] = trial.suggest_float('dropout', dropout[0], dropout[1])
+        if 'attn' in model_name:
+            hyperparameters['attention_heads'] = trial.suggest_int('attention_heads', attention_heads[0], attention_heads[1])
     else:
         if study and study.best_trial:
             hyperparameters.update(study.best_trial.params)
@@ -230,6 +233,8 @@ def get_hyperparameters(config: dict,
             hyperparameters['batch_size'] = config['model']['batch_size']
             hyperparameters['epochs'] = config['model']['epochs']
             hyperparameters['lr'] = config['model']['lr']
+            if 'attn' in model_name:
+                hyperparameters['attention_heads'] = config['model']['attention_heads']
             if config['model'].get('fl', False):
                 hyperparameters['n_rounds'] = config['fl']['n_rounds']
                 hyperparameters['strategy'] = config['fl']['strategy']

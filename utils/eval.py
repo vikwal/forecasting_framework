@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pandas as pd
 from tensorflow import keras
@@ -40,6 +41,42 @@ def lin_reg(data: pd.DataFrame,
     model.fit(X_train, y_train)
     y_pers = model.predict(X_test)
     return y_pers
+
+def get_synth_wind(synth_dir: str,
+                   park_id: str,
+                   from_date: str = None,
+                   to_date: str = None,
+                   params: dict = None):
+    file_path = os.path.join(synth_dir, f'synth_{park_id}.csv')
+    df = pd.read_csv(file_path, sep=';')
+    df['date'] = pd.to_datetime(df['date'], utc=True)
+    df.set_index('date', inplace=True)
+    turbines = params['turbines']
+    turbine_params_path = os.path.join(synth_dir, 'turbine_parameter.csv')
+    turbine_params = pd.read_csv(turbine_params_path, sep=';', dtype={'park_id': str})
+    y_synth = pd.Series(data=np.zeros(len(df)), index=df.index)
+    installed_capacity = 0
+    for turbine in turbines:
+        turbine_row = turbine_params.loc[turbine_params.turbine_name == turbine]
+        installed_capacity += turbine_row['rated'].iloc[0]
+        turbine_id = turbine_row['turbine'].iloc[0]
+        y_synth += df[f'power_{turbine_id}']
+    y_synth /= (installed_capacity * 1000 * 1000) # MW -> W
+    if from_date and to_date:
+        y_synth = y_synth[from_date:to_date]
+    return y_synth
+
+def get_synth_pv(synth_dir: str,
+                   park_id: str,
+                   from_date: str = None):
+    file_path = os.path.join(synth_dir, f'synth_{park_id}.csv')
+    df = pd.read_csv(file_path, sep=';')
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    df.set_index('timestamp', inplace=True)
+    y_synth = df['power']
+    if from_date:
+        y_synth = y_synth[from_date:]
+    return y_synth
 
 def benchmark_models(data: pd.DataFrame,
                      horizon: int,
@@ -129,8 +166,12 @@ def evaluation_pipeline(data: pd.DataFrame,
                         index_test: np.ndarray,
                         test_start: str,
                         t_0: int,
-                        target_col='power',
-                        evaluate_on_all_test_data=True) -> pd.DataFrame:
+                        park_id: str = None,
+                        synth_dir: str = None,
+                        get_physical_persistence: bool = False,
+                        timestamp_col: str ='timestamp',
+                        target_col: str ='power',
+                        evaluate_on_all_test_data: bool = True) -> pd.DataFrame:
     y_true, y_pred = tools.get_y(X_test=X_test,
                                  y_test=y_test,
                                  scaler_y=scaler_y,
@@ -145,9 +186,6 @@ def evaluation_pipeline(data: pd.DataFrame,
                             horizon=horizon,
                             index=index_test,
                             t_0=None if evaluate_on_all_test_data else t_0)
-    y_pers = persistence(y=data[target_col],
-                         horizon=horizon,
-                         from_date=str(test_start.date()))
 
     test_indices = None
     if len(index_test.shape) != 1:
@@ -157,9 +195,17 @@ def evaluation_pipeline(data: pd.DataFrame,
             test_indices.sort()
             y_pers = y_pers[test_indices]
             y_pers_raw = pd.DataFrame(index_test, columns=list(data.index.names))
-            y_pers = y_pers_raw.merge(y_pers.to_frame(), how='left', on='timestamp')['power'].values
+            y_pers = y_pers_raw.merge(y_pers.to_frame(), how='left', on=timestamp_col)[target_col].values
             test_indices = None
+    else:
+        test_indices = index_test
 
+    pers = {}
+    test_start_ts = pd.Timestamp(test_start, tz=data.index.tz)
+    y_pers = persistence(y=data[target_col],
+                        horizon=horizon,
+                        from_date=test_start_ts)
+    # get persistence (most recent value)
     y_pers = preprocessing.make_windows(data=y_pers,
                                         seq_len=y_pred.shape[-1],
                                         step_size=1,
@@ -169,8 +215,29 @@ def evaluation_pipeline(data: pd.DataFrame,
                             horizon=horizon,
                             index=index_test,
                             t_0=None if evaluate_on_all_test_data else t_0)
-    pers = {}
     pers['Persistence'] = df_pers
+    # get physical persistence
+    if get_physical_persistence:
+        if 'wind' in synth_dir:
+            y_synth = get_synth_wind(synth_dir=synth_dir,
+                                    park_id=park_id,
+                                    from_date=index_test[0],
+                                    to_date=data.index[-1])
+        elif 'solar' in synth_dir:
+            y_synth = get_synth_pv(synth_dir=synth_dir,
+                                    park_id=park_id,
+                                    from_date=index_test[0],
+                                    to_date=data.index[-1])
+        y_synth = preprocessing.make_windows(data=y_synth,
+                                             seq_len=y_pred.shape[-1],
+                                             step_size=1, # has to be 1 filtering goes over t_0 in df_synth
+                                             indices=test_indices)
+        df_synth = tools.y_to_df(y=y_pers,
+                                output_dim=output_dim,
+                                horizon=horizon,
+                                index=index_test,
+                                t_0=None if evaluate_on_all_test_data else t_0)
+        pers['Synth'] = df_synth
     evaluation = evaluate_models(pred=df_pred,
                                  true=df_true,
                                  persistence=pers,

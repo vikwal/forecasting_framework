@@ -8,21 +8,19 @@ import logging
 # --- Helper-Funktionen für Layer-Stacks ---
 
 def _build_rnn_stack(input_tensor: tf.Tensor,
-                     layer_type: Callable, # z.B. layers.LSTM oder layers.GRU
+                     layer_type: Callable,
                      units: int,
                      n_layers: int,
                      dropout: float,
                      bidirectional: bool = False,
-                     layer_name_prefix: str = 'rnn') -> tf.Tensor:
-    """Baut einen Stapel von RNN-Layern (LSTM oder GRU)."""
+                     layer_name_prefix: str = 'rnn',
+                     final_return_sequences: bool = False) -> tf.Tensor:
     x = input_tensor
     for i in range(n_layers):
         is_last_layer = (i == n_layers - 1)
-        return_sequences = not is_last_layer
+        return_sequences = (not is_last_layer) or (is_last_layer and final_return_sequences)
         rnn_layer = layer_type(units, dropout=dropout, return_sequences=return_sequences, name=f'{layer_name_prefix}_{i+1}')
         if bidirectional:
-            # Name für Bidirectional Layer explizit setzen, um Konflikte zu vermeiden
-            # (obwohl Keras dies oft automatisch gut handhabt)
             bidir_name = f'bi{layer_name_prefix}_{i+1}'
             x = layers.Bidirectional(rnn_layer, name=bidir_name)(x)
         else:
@@ -303,25 +301,21 @@ def build_rnn(n_features: int,
 # --- Hybrid Modell-Builder ---
 
 def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
-                  conv_type: str, # 'cnn' oder 'tcn'
+                  conv_type: str,
                   rnn_layer_type: Callable,
                   rnn_bidirectional: bool,
                   model_name: str) -> Model:
-    """
-    Generische Builder-Funktion für Conv1D-RNN Hybride (CNN oder TCN basiert).
-    ERSETZT build_cnn_rnn und build_tcn_rnn.
-    """
-    # Hyperparameter extrahieren (Namen könnten vereinheitlicht werden, z.B. n_conv_layers statt n_cnn_layers)
-    n_conv_layers = hp.get('n_cnn_layers', 1) # Versuch beide alten Namen zu lesen
+    n_conv_layers = hp.get('n_cnn_layers', 1)
     n_rnn_layers = hp.get('n_rnn_layers', 1)
     filters = hp.get('filters', 16)
     kernel_size = hp.get('kernel_size', 2)
     units = hp.get('units', 16)
     dropout = hp.get('dropout', 0.1)
     increase_filters = hp.get('increase_filters', False)
-    conv_activation = hp.get('conv_activation', 'relu') # Aktivierung für Conv1D Stack
+    conv_activation = hp.get('conv_activation', 'relu')
+    use_attention = hp.get('use_attention', False)
+    attention_heads = hp.get('attention_heads', 16)
 
-    # Baue das Modell
     input_layer = layers.Input(shape=(output_dim, n_features), name='input')
 
     conv_output = _build_conv_stack(
@@ -330,9 +324,9 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
         kernel_size=kernel_size,
         n_layers=n_conv_layers,
         activation=conv_activation,
-        conv_type=conv_type, # Der entscheidende Parameter
+        conv_type=conv_type,
         increase_filters=increase_filters,
-        layer_name_prefix=conv_type # z.B. 'cnn' oder 'tcn' als Prefix
+        layer_name_prefix=conv_type
     )
     rnn_output = _build_rnn_stack(
         input_tensor=conv_output,
@@ -341,10 +335,27 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
         n_layers=n_rnn_layers,
         dropout=dropout,
         bidirectional=rnn_bidirectional,
-        layer_name_prefix=model_name.split('-')[-1] # z.B. 'lstm', 'gru', 'bilstm'
+        layer_name_prefix=model_name.split('-')[-1],
+        final_return_sequences=use_attention
     )
-    output_layer = layers.Dense(output_dim, name='output')(rnn_output)
-    return Model(inputs=input_layer, outputs=output_layer, name=model_name)
+    if use_attention:
+        attention_dim = units * 2 if rnn_bidirectional else units
+        if attention_dim % attention_heads != 0:
+            logging.warning(f"Number of attention heads ({attention_heads}) is not a divisor of attention Dim ({attention_dim}). Setting to 1.")
+            attention_heads = 1
+        key_dim = attention_dim // attention_heads
+        attention_layer = layers.MultiHeadAttention(
+            num_heads=attention_heads,
+            key_dim=key_dim,
+            name='multi_head_attention'
+        )
+        x = attention_layer(query=rnn_output, value=rnn_output, key=rnn_output)
+        x = layers.Flatten()(x) # layers.GlobalMaxPooling1D(name='attention_pooling')(x)
+    else:
+        x = rnn_output
+    output_layer = layers.Dense(output_dim, name='output')(x)
+    model = Model(inputs=input_layer, outputs=output_layer, name=model_name)
+    return model
 
 # Special model builders
 
@@ -403,8 +414,8 @@ def build_tft(feature_dims: Dict[str, int],
     hidden_dim = hyperparameters['hidden_dim']
     dropout_rate = hyperparameters['dropout']
     # --- Input Layer ---
-    observed_input = layers.Input(shape=(sequence_length, observed_dim), name='observed_input')
-    known_input = layers.Input(shape=(sequence_length + forecast_horizon, known_dim), name='known_input')
+    observed_input = layers.Input(shape=(sequence_length, observed_dim), name='observed')
+    known_input = layers.Input(shape=(sequence_length + forecast_horizon, known_dim), name='known')
 
     model_inputs = [observed_input, known_input] # Start mit zeitlichen Inputs
 
@@ -416,7 +427,7 @@ def build_tft(feature_dims: Dict[str, int],
     static_context_state_c = None
 
     if static_dim > 0:
-        static_input = layers.Input(shape=(static_dim,), name='static_input')
+        static_input = layers.Input(shape=(static_dim,), name='static')
         model_inputs.append(static_input) # Füge Static Input hinzu
 
         # Erzeuge Kontexte nur, wenn statische Features vorhanden sind
@@ -426,7 +437,7 @@ def build_tft(feature_dims: Dict[str, int],
         static_context_state_c = _grn(static_input, hidden_dim, dropout_rate=dropout_rate, name='static_grn_state_c')
     else:
         # Optional: Log oder Warnung ausgeben
-        logging.info("TFT-Modell wird ohne statische Features erstellt.")
+        logging.debug("TFT-Modell wird ohne statische Features erstellt.")
         pass # Kontexte bleiben None
 
     # --- Zeitvariable Verarbeitung MIT VARIABLE SELECTION ---
@@ -530,14 +541,23 @@ MODEL_BUILDERS = {
     'convlstm': build_convlstm1d,
     'tft': build_tft,
     # Hybrid models
-    'cnn-lstm': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'cnn', layers.LSTM, False, 'cnn-lstm'),
-    'cnn-gru': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'cnn', layers.GRU, False, 'cnn-gru'),
-    'cnn-bilstm': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'cnn', layers.LSTM, True, 'cnn-bilstm'),
-    'cnn-bigru': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'cnn', layers.GRU, True, 'cnn-bigru'),
-    'tcn-lstm': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'tcn', layers.LSTM, False, 'tcn-lstm'),
-    'tcn-gru': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'tcn', layers.GRU, False, 'tcn-gru'),
-    'tcn-bilstm': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'tcn', layers.LSTM, True, 'tcn-bilstm'),
-    'tcn-bigru': lambda n, o, hp: build_cnn_rnn(n, o, hp, 'tcn', layers.GRU, True, 'tcn-bigru'),
+    'cnn-lstm': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'cnn', layers.LSTM, False, 'cnn-lstm'),
+    'cnn-gru': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'cnn', layers.GRU, False, 'cnn-gru'),
+    'cnn-bilstm': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'cnn', layers.LSTM, True, 'cnn-bilstm'),
+    'cnn-bigru': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'cnn', layers.GRU, True, 'cnn-bigru'),
+    'tcn-lstm': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'tcn', layers.LSTM, False, 'tcn-lstm'),
+    'tcn-gru': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'tcn', layers.GRU, False, 'tcn-gru'),
+    'tcn-bilstm': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'tcn', layers.LSTM, True, 'tcn-bilstm'),
+    'tcn-bigru': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': False}, 'tcn', layers.GRU, True, 'tcn-bigru'),
+    # hybrid models with attention
+    'cnn-lstm-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'cnn', layers.LSTM, False, 'cnn-lstm-attn'),
+    'cnn-gru-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'cnn', layers.GRU, False, 'cnn-gru-attn'),
+    'cnn-bilstm-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'cnn', layers.LSTM, True, 'cnn-bilstm-attn'),
+    'cnn-bigru-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'cnn', layers.GRU, True, 'cnn-bigru-attn'),
+    'tcn-lstm-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'tcn', layers.LSTM, True, 'tcn-lstm-attn'),
+    'tcn-gru-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'tcn', layers.GRU, False, 'tcn-gru-attn'),
+    'tcn-bilstm-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'tcn', layers.LSTM, True, 'tcn-bilstm-attn'),
+    'tcn-bigru-attn': lambda n, o, hp: build_cnn_rnn(n, o, {**hp, 'use_attention': True}, 'tcn', layers.GRU, True, 'tcn-bigru-attn'),
 }
 
 OPTIMIZERS = {

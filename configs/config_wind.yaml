@@ -1,7 +1,12 @@
 data:
-  path: 'data'
+  path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
+  files: ['synth_00342'] #, 'synth_04928', 'synth_05158',
+          #'synth_01612', 'synth_00164', 'synth_01544',
+          #'synth_03268', 'synth_05349', 'synth_01303',
+          #'synth_07393']  # Specific client files to load (without .csv extension)
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
-  nwp_path: '/mnt/nas/synthetic/multilevelfields'
+  nwp_path: '/mnt/nas/open-meteo/wind'
+  synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
@@ -21,37 +26,46 @@ params:
              #'Vestas V80-1.8'
             ]
   known_features: [
-                   #'wind_speed_t1'
-                   'wind_speed_nwp',
-                   'temperature_nwp',
-                   'pressure_nwp',
-                   'relhum_nwp',
-                   'density_nwp'
+                   #'wind_speed_t1', #'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
+                    #'density_t1',
+                   'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
+                   #'density_10m', 'density_80m', 'density_120m', 'density_180m'
+                   #'relhum_nwp',
+                   #'density_nwp'
                    ]
   observed_features: [
+                      #'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
+                      #'wind_speed_10m',
                       #'wind_speed',
-                      'wind_speed_t1',
+                      #'wind_speed_t1',
                       'power'
-                      ]
-  lag_known_features: [
-
-                      ]
-  aggregate_nwp_layers: 'pivot' # options: 'not', 'pivot', 'weighted_mean', 'mean'
+                      ] # lag features
+  static_features: [
+    #'park_id',
+    #'hub_height',
+    #'rotor_diameter',
+    #'turbine_age',
+    #'rated',
+    #'installed_capacity'
+  ]
+  aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   features_to_pivot: [
                       'wind_speed_nwp',
-                      'density_nwp',
+                      #'density_nwp',
                       #'temperature_nwp',
                       #'pressure_nwp',
                       #'relhum_nwp',
                       ]
   get_density: True
+  openmeteo:
+    nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
 
 model:
   output_dim: 48
-  lookback: 192
+  lookback: 48
   horizon: 48
-  step_size: 48
-  batch_size: 64
+  step_size: 1
+  batch_size: 32
   epochs: 30
   lr: 0.0005
   optimizer: 'adam'
@@ -63,29 +77,30 @@ model:
   cnn:
     filters: 64
     kernel_size: 3
-    n_cnn_layers: 10
+    n_cnn_layers: 5
     increase_filters: False
   rnn:
     n_rnn_layers: 1
     units: 64
-    dropout: 0.1
+    dropout: 0.2
+  attention_heads: 32 # if attention is used in hybrid models
   tft:
-    n_heads: 1
-    hidden_dim: 45
+    n_heads: 6
+    hidden_dim: 120
     dropout: 0.1
   callbacks: False
   save_model: True
-  shuffle: False
-  create_lag: True # wether to consider observed features as lag features or not
+  shuffle: True
   force_retrain: True
   parallelize: False
-  verbose: 1
+  verbose: 0
+
 
 hpo:
   studies_path: '/mnt/nas/optuna_studies.db'
   metric: 'rmse'
   trials: 1000
-  kfolds: 3
+  kfolds: 5
   val_split: 1
   batch_size: [32, 512]
   epochs: [1, 50]
@@ -93,6 +108,7 @@ hpo:
   n_cnn_layers: [1, 10]
   n_rnn_layers: [1, 5]
   learning_rate: [0.0001, 0.1]
+  attention_heads: [1,64] # if attention is used in hybrid models
   fnn:
     units: [32, 256]
   cnn:
@@ -103,9 +119,9 @@ hpo:
     units: [16, 100]
     dropout: [0.0, 0.8]
   tft:
-    lookback: [24, 48, 72, 96]
-    n_heads: [1, 6]
-    hidden_dim: [8, 128]
+    lookback: [48, 96, 144, 192]
+    n_heads: [1, 64]
+    hidden_dim: [8, 256]
     dropout: [0.0, 0.8]
   fl:
     strategy: 'fedavg'
@@ -121,11 +137,35 @@ eval:
   eval_on_all_test_data: True
   retrain_interval: 0 # in hours - 0 if no retraining is wanted
   t_0: 12
+  synth_wind:
+    h1: 10
+    p_s_model: 'huang'
+    v2_method: 'alphaI'
+    karman: 0.4
+    temp_gradient: 0.00649
+    interpol_method: 'polynomial'
+    polynom_grad: 3
+    noise: 0.0
+    annual_degradation: 0.0063
+    apply_ageing: True
+    hourly_resolution: True
+    random_seed: 42
+    turbine_dir: "/mnt/nas/synthetic/wind/power_curves"
+    turbine_power: 'turbine_power.csv'
+    turbine_specs: "turbine_specs.csv"
+    turbine_cp: "turbine_cp.csv"
+    turbine_names: "turbine_names.csv"
+    wind_ages: '/mnt/nas/synthetic/wind/wind_ages.npy'
+  synth_pv:
+    pv_ages: 'data/pv_ages.npy'
 
 fl:
-  parts: []
+  clients:
+    clientA: ['synth_00342', 'synth_04928']
+    clientB: ['synth_05158', 'synth_01612']
+    clientC: ['synth_00164']
   strategy: 'fedavg'
-  n_rounds: 5
+  n_rounds: 2
   personalize: False
   fedopt:
     server_lr: 0.001

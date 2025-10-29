@@ -7,7 +7,37 @@ import tensorflow as tf
 from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 
-from . import tools, models
+from . import tools, models, preprocessing
+
+def load_federated_data(config, freq, features, target_col='power'):
+    """
+    Load data for federated learning based on client mapping in config.
+    """
+    if 'clients' not in config.get('fl', {}):
+        raise ValueError("No 'clients' mapping found in config['fl']. Please define client-to-files mapping.")
+
+    clients_data = {}
+    clients_mapping = config['fl']['clients']
+    base_path = config['data']['path']
+
+    for client_id, file_list in clients_mapping.items():
+        logging.info(f'Loading data for client: {client_id}')
+
+        # Create temporary config for this client
+        client_config = config.copy()
+        client_config['data'] = config['data'].copy()
+        client_config['data']['files'] = file_list
+
+        # Load data for this client using existing get_data function
+        client_files = preprocessing.get_data(data_dir=base_path,
+                                            config=client_config,
+                                            freq=freq,
+                                            features=features,
+                                            target_col=target_col)
+
+        clients_data[client_id] = client_files
+
+    return clients_data
 
 class ServerOptimizer:
     """

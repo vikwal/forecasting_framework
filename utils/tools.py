@@ -37,6 +37,7 @@ def y_to_df(y: np.ndarray,
             horizon: int,
             index: np.ndarray,
             t_0=None) -> pd.DataFrame:
+    index_for_df = index
     if index.shape[-1] == 3:
         index_for_df = index[:,0]
         if output_dim == 1:
@@ -69,9 +70,9 @@ def get_feature_dim(X: Any):
     # relevant for tft
     elif (len(X) <= 3):
         feature_dim = {}
-        feature_dim['observed_dim'] = X['observed_input'].shape[-1]
-        feature_dim['known_dim'] = X['known_input'].shape[-1]
-        feature_dim['static_dim'] = X['static_input'].shape[-1] if 'static_input' in X else 0
+        feature_dim['observed_dim'] = X['observed'].shape[-1]
+        feature_dim['known_dim'] = X['known'].shape[-1]
+        feature_dim['static_dim'] = X['static'].shape[-1] if 'static' in X else 0
     return feature_dim
 
 
@@ -103,6 +104,8 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     if config['model']['callbacks']:
         callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model"]["name"]}.keras', save_best_only=True)]
     train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    if config['model']['shuffle']:
+        train_dataset = train_dataset.shuffle(buffer_size=len(y_train), reshuffle_each_iteration=True)
     train_dataset = train_dataset.batch(hyperparameters['batch_size']).prefetch(tf.data.AUTOTUNE)
     history = model.fit(
         x=train_dataset,
