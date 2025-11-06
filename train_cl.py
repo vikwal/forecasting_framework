@@ -9,12 +9,14 @@ import logging
 import pickle
 import optuna
 from datetime import datetime
+from tqdm import tqdm
 
 from utils import tools, eval, preprocessing, hpo
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    )
 
 def main() -> None:
     logger = logging.getLogger(__name__)
@@ -39,7 +41,7 @@ def main() -> None:
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
-    logging.info(f'Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}')
+    logging.info(f'Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}, Step size: {config["model"]["step_size"]}')
     config['model']['name'] = args.model
     test_start = pd.Timestamp(config.get('data').get('test_start', 0))
     #config['model']['shuffle'] = True
@@ -62,8 +64,8 @@ def main() -> None:
     X_train = None
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
     path_to_pkl = os.path.join('results', base_dir, f'{study_name}_{timestamp}.pkl')
-    for key, df in dfs.items():
-        logging.info(f'Preprocessing {key}.')
+    for key, df in tqdm(dfs.items(), desc='Preparing data'):
+        logging.debug(f'Preprocessing {key}.')
         prepared_data, dfs[key] = preprocessing.pipeline(data=df,
                                             config=config,
                                             known_cols=features['known'],
@@ -105,7 +107,9 @@ def main() -> None:
             results = pickle.load(f)
         model = results['model']
     else:
-        study = hpo.load_study(config['hpo']['studies_path'], study_name)
+        study = None
+        if config['model']['lookup_hpo']:
+            study = hpo.load_study(config['hpo']['studies_path'], study_name)
         hyperparameters = hpo.get_hyperparameters(config=config,
                                                     study=study)
         # save hyperparameters in results
@@ -159,6 +163,8 @@ def main() -> None:
         else:
             evaluation = pd.concat([evaluation, new_evaluation], axis=0)
     # save evaluation
+    # include last row as column wise average
+    evaluation.loc['mean'] = evaluation.mean(numeric_only=True)
     print(evaluation)
     results['evaluation'] = evaluation
     results['config'] = config

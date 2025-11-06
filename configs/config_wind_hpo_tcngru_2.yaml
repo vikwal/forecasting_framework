@@ -1,9 +1,6 @@
 data:
-  path: '/mnt/nas/synthetic/wind/wind_hourly_age copy'  # Base path where client CSV files are located
-  files: ['synth_00342', 'synth_04928', 'synth_05158',
-          'synth_01612', 'synth_00164', 'synth_01544',
-          'synth_03268', 'synth_05349', 'synth_01303',
-          'synth_07393']  # Specific client files to load (without .csv extension)
+  path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
+  files: ['03362']  # Specific client files to load (without .csv extension)
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/open-meteo/wind'
   synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
@@ -18,12 +15,12 @@ data:
 
 params:
   turbines: [
-             'Enercon E-70 E4 2.300',
-             'Enercon E-82 E2 2.000',
+             #'Enercon E-70 E4 2.300',
+             #'Enercon E-82 E2 2.000',
              'Enercon E-115 2.500',
-             'Vestas V90',
-             'Vestas V112-3.45',
-             'Vestas V80-1.8'
+             #'Vestas V90',
+             #'Vestas V112-3.45',
+             #'Vestas V80-1.8'
             ]
   known_features: [
                    #'wind_speed_t1', #'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
@@ -37,8 +34,7 @@ params:
   observed_features: [
                       #'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
                       #'wind_speed_10m',
-                      'wind_speed_t',
-                      #'density_t',
+                      #'wind_speed',
                       #'wind_speed_t1', 'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
                       'power'
                       ] # lag features
@@ -69,10 +65,10 @@ params:
 
 model:
   output_dim: 48
-  lookback: 144
+  lookback: 48
   horizon: 48
   step_size: 3
-  batch_size: 700
+  batch_size: 4000
   epochs: 100
   lr: 0.0005
   optimizer: 'adam'
@@ -99,8 +95,7 @@ model:
   save_model: True
   shuffle: True
   force_retrain: True
-  parallelize: True
-  lookup_hpo: False
+  parallelize: False
   verbose: 1
 
 
@@ -111,11 +106,11 @@ hpo:
   kfolds: 5
   val_split: 1
   batch_size: [32, 512]
-  epochs: [1, 50]
+  epochs: [1, 100]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
   n_rnn_layers: [1, 5]
-  learning_rate: [0.0001, 0.1]
+  learning_rate: [0.0001, 0.01]
   attention_heads: [1,64] # if attention is used in hybrid models
   fnn:
     units: [32, 256]
@@ -129,8 +124,8 @@ hpo:
   tft:
     lookback: [48, 96, 144, 192]
     n_heads: [1, 64]
-    hidden_dim: [8, 256]
-    dropout: [0.0, 0.8]
+    hidden_dim: [16, 256]
+    dropout: [0.0, 0.5]
   fl:
     strategy: 'fedavg'
     personalize: False

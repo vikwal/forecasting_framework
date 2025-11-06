@@ -12,7 +12,7 @@ from datetime import datetime
 
 from utils import tools, eval, preprocessing, federated, hpo, models
 
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 os.environ['RAY_DEDUP_LOGS'] = '0'
 
@@ -40,7 +40,7 @@ def main() -> None:
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
-    logging.info(f'Federated Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}')
+    logging.info(f'Federated Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}, Step size: {config["model"]["step_size"]}')
     config['model']['name'] = args.model
     config['model']['shuffle'] = True
     config['model']['fl'] = True

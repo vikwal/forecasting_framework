@@ -219,8 +219,14 @@ def get_hyperparameters(config: dict,
         if is_tft_type:
             hyperparameters['horizon'] = horizon
             hyperparameters['lookback'] = lookback#trial.suggest_categorical('lookback', lookback)
-            hyperparameters['n_heads'] = trial.suggest_int('n_heads', n_heads[0], n_heads[1])
-            hyperparameters['hidden_dim'] = trial.suggest_int('hidden_dim', hidden_dim[0], hidden_dim[1])
+            n_heads_hpo = trial.suggest_int('n_heads', n_heads[0], n_heads[1])
+            hyperparameters['n_heads'] = n_heads_hpo
+            hyperparameters['hidden_dim'] = trial.suggest_int(
+                'hidden_dim',
+                n_heads_hpo,
+                hidden_dim[1],
+                step=n_heads_hpo
+            )
             hyperparameters['dropout'] = trial.suggest_float('dropout', dropout[0], dropout[1])
         if 'attn' in model_name:
             hyperparameters['attention_heads'] = trial.suggest_int('attention_heads', attention_heads[0], attention_heads[1])

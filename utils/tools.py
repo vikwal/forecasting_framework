@@ -84,37 +84,68 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     if val: X_val, y_val = val
     config['model']['feature_dim'] = get_feature_dim(X=X_train)
     parallelize = config['model'].get('parallelize', False)
+
     if parallelize:
-        n_gpus = len(tf.config.list_physical_devices('GPU'))
-        batch_size = hyperparameters.get('batch_size')
+        # Get available GPUs
+        available_gpus = tf.config.list_physical_devices('GPU')
+        n_gpus = len(available_gpus)
+
         if n_gpus > 1:
-            adjusted_batch_size = batch_size
-            while adjusted_batch_size % n_gpus != 0:
-                adjusted_batch_size -= 1
-            if adjusted_batch_size != batch_size:
-                logging.warning(f'Batch size had to be reduced from {batch_size} to {adjusted_batch_size} for parallel GPU use.')
-            hyperparameters['batch_size'] = adjusted_batch_size
-        strategy = tf.distribute.MirroredStrategy()
-        logging.info(f"Using MirroredStrategy with {n_gpus} GPUs.")
+            logging.info(f"Found {n_gpus} GPUs for parallel training")
+
+            # Keep original batch size - it will be split across GPUs
+            original_batch_size = hyperparameters.get('batch_size')
+
+            # Ensure batch size is divisible by number of GPUs
+            if original_batch_size % n_gpus != 0:
+                # Adjust to nearest divisible number
+                adjusted_batch_size = original_batch_size
+                while adjusted_batch_size % n_gpus != 0:
+                    adjusted_batch_size += 1
+
+                hyperparameters['batch_size'] = adjusted_batch_size
+                logging.warning(f"Adjusted batch size from {original_batch_size} to {adjusted_batch_size} to be divisible by {n_gpus} GPUs")
+                logging.debug(f"Each GPU will process {adjusted_batch_size // n_gpus} samples per batch")
+            else:
+                logging.debug(f"Batch size {original_batch_size} is divisible by {n_gpus} GPUs")
+                logging.debug(f"Each GPU will process {original_batch_size // n_gpus} samples per batch")
+
+            # Create strategy
+            strategy = tf.distribute.MirroredStrategy()
+            logging.debug(f"Using MirroredStrategy with {strategy.num_replicas_in_sync} GPUs")
+        else:
+            logging.debug("Only 1 GPU available, using single GPU training")
+            strategy = tf.distribute.get_strategy()
     else:
         strategy = tf.distribute.get_strategy()  # DefaultStrategy (no distribution)
-        logging.debug("Using default strategy (single device).")
+        logging.debug("Using default strategy (single device)")    # Create datasets within strategy scope for better performance
     with strategy.scope():
         model = models.get_model(config=config, hyperparameters=hyperparameters)
+
+        # Create distributed datasets
+        batch_size = hyperparameters['batch_size']
+
+        # Create training dataset
+        train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+        if config['model']['shuffle']:
+            train_dataset = train_dataset.shuffle(buffer_size=min(len(y_train), 10000), reshuffle_each_iteration=True)
+        train_dataset = train_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+
+        # Create validation dataset if provided
+        val_dataset = None
+        if val:
+            val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+            val_dataset = val_dataset.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+
     if config['model']['callbacks']:
         callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model"]["name"]}.keras', save_best_only=True)]
-    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-    if config['model']['shuffle']:
-        train_dataset = train_dataset.shuffle(buffer_size=len(y_train), reshuffle_each_iteration=True)
-    train_dataset = train_dataset.batch(hyperparameters['batch_size']).prefetch(tf.data.AUTOTUNE)
+
     history = model.fit(
         x=train_dataset,
-        batch_size = hyperparameters['batch_size'],
-        epochs = hyperparameters['epochs'],
-        verbose = config['model']['verbose'],
-        validation_data = (X_val, y_val) if val else None,
-        callbacks = callbacks if config['model']['callbacks'] else None,
-        shuffle = config['model']['shuffle']
+        epochs=hyperparameters['epochs'],
+        verbose=config['model']['verbose'],
+        validation_data=val_dataset,
+        callbacks=callbacks if config['model']['callbacks'] else None
     )
     return history, model
 
@@ -151,11 +182,21 @@ def concatenate_data(old, new):
 def initialize_gpu(use_gpu=None):
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
+        # Enable memory growth for all GPUs
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        if use_gpu:
-            selected_gpus = [gpus[i] for i in use_gpu] if isinstance(use_gpu, list) else [gpus[use_gpu]]
+
+        if use_gpu is not None:
+            # Select specific GPUs
+            if isinstance(use_gpu, list):
+                selected_gpus = [gpus[i] for i in use_gpu if i < len(gpus)]
+            else:
+                selected_gpus = [gpus[use_gpu]] if use_gpu < len(gpus) else gpus
+
             tf.config.experimental.set_visible_devices(selected_gpus, 'GPU')
+            print(f"Using GPUs: {[gpu.name for gpu in selected_gpus]}")
+        else:
+            print(f"Using all available GPUs: {[gpu.name for gpu in gpus]}")
     else:
         print("No Physical GPUs found.")
 

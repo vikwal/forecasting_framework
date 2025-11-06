@@ -44,7 +44,7 @@ def main() -> None:
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
-    logging.info(f'HPO for Federated Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}')
+    logging.info(f'HPO for Federated Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}, Step size: {config["model"]["step_size"]}')
     config['model']['name'] = args.model
     config['model']['shuffle'] = False  # Usually False for HPO to reduce variance
     config['model']['fl'] = True

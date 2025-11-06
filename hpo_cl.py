@@ -20,9 +20,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Hyperparameter Optimization with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('-c', '--config', type=str, help='Select config')
+    parser.add_argument('-i', '--index', type=str, default='', help='Define index')
     args = parser.parse_args()
     os.makedirs('logs', exist_ok=True)
-    log_file = f'logs/hpo_cl_m-{args.model}.log'
+    index = ''
+    if args.index:
+        index = f'_{args.index}'
+    log_file = f'logs/hpo_cl_m-{args.model}{index}.log'
     logging.basicConfig(level=logging.INFO,
                 format='%(asctime)s - %(levelname)s - %(message)s',
                 handlers=[
@@ -44,7 +48,7 @@ def main() -> None:
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['fl'] = False
-    logging.info(f'HPO for Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}')
+    logging.info(f'HPO for Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}, Step size: {config["model"]["step_size"]}')
     config['model']['name'] = args.model
     test_start = pd.Timestamp(config.get('data').get('test_start', 0))
     # get observed, known and static features
@@ -54,9 +58,10 @@ def main() -> None:
     base_dir = os.path.basename(data_dir)
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}'
-    config['model']['name'] = args.model
-    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}'
+    study_name_suffix = ''
+    if len(config['data']['files']) == 1:
+        study_name_suffix = f'_{config["data"]["files"][0]}'
+    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}{study_name_suffix}'
     config['model']['name'] = args.model
 
     # Create study for hyperparameter optimization
@@ -74,7 +79,7 @@ def main() -> None:
     y_train_all = None
 
     for key, df in tqdm(dfs.items(), desc="Preprocessing data"):
-        logging.info(f'Preprocessing {key} for HPO.')
+        logging.debug(f'Preprocessing {key} for HPO.')
         prepared_data, dfs[key] = preprocessing.pipeline(data=df,
                                             config=config,
                                             known_cols=features['known'],

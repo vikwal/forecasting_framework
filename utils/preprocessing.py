@@ -1,4 +1,5 @@
 import os
+import random
 import pandas as pd
 import numpy as np
 from sklearn.impute import KNNImputer
@@ -45,7 +46,6 @@ def _get_data_from_config_files(config: dict,
 
     is_pv_data = ('pv' in base_path.lower() or
                   'solar' in base_path.lower())
-
     for file in files:
         # Try different possible file patterns
         possible_paths = [
@@ -155,6 +155,7 @@ def pipeline(data: pd.DataFrame,
         prepared_data = prepare_data_for_tft(data=df,
                                              history_length=config['model']['lookback'], # e.g., 72 (for 3 days history)
                                              future_horizon=config['model']['horizon'], # e.g., 24 (for 24 hours forecast)
+                                             step_size=config['model']['step_size'],
                                              known_future_cols=known_cols,
                                              observed_past_cols=observed_cols,
                                              static_cols=static_cols,
@@ -716,10 +717,6 @@ def preprocess_synth_wind_openmeteo(path: str,
     rel_features = list(set(features['known'] + features['observed']))
     static_features = features.get('static', [])
     static_data = {}
-    if 'turbines' in config['params']:
-        turbines_list = config['params']['turbines']
-    else:
-        turbines_list = None
     wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
     turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
     power_curves = pd.read_csv(power_curves_path, sep=';', decimal=',')
@@ -727,10 +724,17 @@ def preprocess_synth_wind_openmeteo(path: str,
     df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
     df.set_index(timestamp_col, inplace=True)
     commissioning_date = wind_parameter.loc[wind_parameter.park_id == park_id]['commissioning_date'].values[0]
+    random.seed(config['params']['random_seed'])
     if commissioning_date != '-':
-        park_age = pd.Timestamp.now() - pd.to_datetime(commissioning_date)
+        park_age_years = (pd.Timestamp.now() - pd.to_datetime(commissioning_date)).days // 365
+    else:
+        park_age_years = 0
     heights = []
-    if turbines_list:
+    if 'turbines' in config['params']:
+        turbines_list = config['params']['turbines']
+        if 'turbines_per_park' in config['params']:
+            turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
+            config['params']['random_seed'] += 1
         power_curves = power_curves[turbines_list]
         installed_capacity = power_curves.sum(axis=1).max() * 1000 # in Watts
         turbines = turbine_parameter.loc[turbine_parameter.turbine_name.isin(turbines_list)]
@@ -747,26 +751,51 @@ def preprocess_synth_wind_openmeteo(path: str,
         turbines = turbine_parameter
     if static_features:
         static_data['park_id'] = park_id
-        static_data['park_age'] = park_age.years
+        static_data['park_age'] = park_age_years
         static_data['installed_capacity'] = installed_capacity
         for index, turbine in turbines.iterrows():
             turbine_name = turbine['turbine_name']
             turbine_id = turbine['turbine']
-            static_data[f'turbine_{turbine_id}_hub_height'] = turbine['hub_height']
-            static_data[f'turbine_{turbine_id}_diameter'] = turbine['diameter']
-            static_data[f'turbine_{turbine_id}_rated_power'] = power_curves[turbine_name].max() * 1000
-            static_data[f'turbine_{turbine_id}_cut_in'] = turbine['cut_in']
-            static_data[f'turbine_{turbine_id}_cut_out'] = turbine['cut_out']
-            static_data[f'turbine_{turbine_id}_rated_wind_speed'] = turbine['rated']
+            if 'wind_speed_hub' in features['observed']:
+                rel_features.append(f'wind_speed_t{turbine_id}')
+                # drop wind_speed_hub from features['observed']
+                rel_features.remove('wind_speed_hub')
+            static_data[f'hub_height'] = turbine['hub_height']
+            static_data[f'rotor_diameter'] = turbine['diameter']
+            static_data[f'rated_power'] = power_curves[turbine_name].max() * 1000
+            static_data[f'cut_in'] = turbine['cut_in']
+            static_data[f'cut_out'] = turbine['cut_out']
+            static_data[f'rated_wind_speed'] = turbine['rated']
     df['power'] = df['power'] / installed_capacity # in Watts
     df = df.resample(freq, closed='left', label='left', origin='start').mean()
+
+    # Expand generic turbine features to specific turbine columns
+    if 'wind_speed_t' in rel_features:
+        rel_features.remove('wind_speed_t')
+        for index, turbine in turbines.iterrows():
+            turbine_id = turbine['turbine']
+            turbine_col = f'wind_speed_{turbine_id}'  # turbine_id is already 't1', 't2', etc.
+            logging.debug(f"Looking for turbine column: {turbine_col}")
+            if turbine_col in df.columns:
+                rel_features.append(turbine_col)
+            else:
+                logging.warning(f"Turbine column {turbine_col} not found in dataframe")
+
+    if 'density_t' in rel_features:
+        rel_features.remove('density_t')
+        for index, turbine in turbines.iterrows():
+            turbine_id = turbine['turbine']
+            turbine_col = f'density_{turbine_id}'  # turbine_id is already 't1', 't2', etc.
+            if turbine_col in df.columns:
+                rel_features.append(turbine_col)
+            else:
+                logging.warning(f"Turbine column {turbine_col} not found in dataframe")
+
     # get nwp data if nwp is mentioned in the known features
     df_nwp = pd.DataFrame()
     new_rel_features = []
-    exclude_features = [f'wind_speed_t{i}' for i in range(1,7)]
-    exclude_features.extend([f'density_t{i}' for i in range(1,7)])
-    exclude_features.append('power')
-    basis_features = rel_features.copy()
+    exclude_features = ['power', 'wind_speed']  # Only exclude generic features that shouldn't be model-specific
+    basis_features = rel_features.copy()  # Use updated rel_features after turbine expansion
     height_levels = [10, 80, 120, 180]
     nwp_heights = [10, 77.745, 126.858, 183.592]
     for model in nwp_models:
@@ -794,11 +823,28 @@ def preprocess_synth_wind_openmeteo(path: str,
         nwp_features = []
         for col in basis_features:
             if col not in exclude_features:
-                model_specific_col = f'{col}_{model}'
-                nwp_features.append(model_specific_col)
-                new_rel_features.append(model_specific_col)
+                # Check if this is a turbine-specific measurement (like wind_speed_t1, wind_speed_t2, etc.)
+                if col.startswith('wind_speed_t') and col[len('wind_speed_t'):].isdigit():
+                    # This is a turbine measurement, don't add model suffix
+                    if col in df.columns:  # Check if it exists in the main dataframe
+                        new_rel_features.append(col)
+                    continue
+                elif col.startswith('density_t') and col[len('density_t'):].isdigit():
+                    # This is a turbine measurement, don't add model suffix
+                    if col in df.columns:  # Check if it exists in the main dataframe
+                        new_rel_features.append(col)
+                    continue
+                else:
+                    # This is an NWP feature, add model suffix
+                    model_specific_col = f'{col}_{model}'
+                    if model_specific_col in nwp.columns:
+                        nwp_features.append(model_specific_col)
+                        new_rel_features.append(model_specific_col)
+                    else:
+                        logging.debug(f"Column {model_specific_col} not found in NWP data for model {model}")
             else:
-                new_rel_features.append(col)
+                if col not in new_rel_features:  # Avoid duplicates
+                    new_rel_features.append(col)
         wind_speed_cols = [f'wind_speed_{h}m_{model}' for h in height_levels]
         if config['params']['aggregate_nwp_layers'] == 'weighted_mean' or \
             config['params']['aggregate_nwp_layers'] == 'mean':
@@ -848,16 +894,33 @@ def preprocess_synth_wind_openmeteo(path: str,
     new_rel_features.append(target_col)
     new_rel_features.extend(static_features)
     for static_feature in static_features:
-        if static_feature in static_data:
-            df[static_feature] = static_data[static_feature]
+        if any(static_feature in key for key in static_data.keys()):
+            matching_key = next(key for key in static_data.keys() if static_feature in key)
+            df[static_feature] = static_data[matching_key]
         else:
-            logging.warning(f"Static feature '{static_feature}' not found in static data.")
+            logging.warning(f"Static feature '{static_feature}' not found in static data keys.")
     new_rel_features = list(set(new_rel_features))
     df = df[new_rel_features]
     df.reset_index(inplace=True)
     df.sort_values(['timestamp'], ascending=True, inplace=True)
     df.set_index(['timestamp'], inplace=True)
     df.dropna(inplace=True)
+    first_timestamp = df.index[0]
+    # time series start at hour divisible by 3
+    first_hour = first_timestamp.hour
+    if first_hour % 3 != 0:
+        next_valid_hour = ((first_hour // 3) + 1) * 3
+        # Handle hour overflow (e.g., if next_valid_hour = 24, it becomes 0 of next day)
+        if next_valid_hour >= 24:
+            # Move to next day at hour 0
+            start_timestamp = first_timestamp.replace(hour=0, minute=0, second=0, microsecond=0) + pd.Timedelta(days=1)
+        else:
+            # Same day, but at the next valid hour
+            start_timestamp = first_timestamp.replace(hour=next_valid_hour, minute=0, second=0, microsecond=0)
+        logging.debug(f"Adjusting start time from {first_timestamp} (hour {first_hour}) to {start_timestamp} (hour {start_timestamp.hour}) - hour divisible by 3")
+        df = df[df.index >= start_timestamp]
+    else:
+        logging.debug(f"Time series already starts at valid hour {first_hour} (divisible by 3)")
     return df
 
 
@@ -885,6 +948,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          known_future_cols: list,
                          observed_past_cols: list,
                          static_cols: list,
+                         step_size: int = 1, # Step size for windowing (e.g., 3 to take every 3rd window)
                          train_frac: float = 0.75,
                          target_col: str = 'power',
                          test_start: pd.Timestamp = None,
@@ -920,8 +984,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
     logging.debug(f"Known future columns for TFT: {known_future_cols}")
     logging.debug(f"Observed past columns for TFT: {observed_past_cols}")
     # add target to observed_past_cols if not already included
-    if target_col not in observed_past_cols:
-        observed_past_cols.append(target_col)
+    #if target_col not in observed_past_cols:
+    #    observed_past_cols.append(target_col)
     df = data.copy()
     # --- Data Splitting ---
     if test_start:
@@ -977,7 +1041,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
         target_train_scaled, # Pass the separately handled target data
         train_df.index,
         history_length,
-        future_horizon
+        future_horizon,
+        step_size
     )
     X_known_test, X_observed_test, y_test, test_indices = create_tft_sequences(
         known_test_data,
@@ -985,7 +1050,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
         target_test_scaled, # Pass the separately handled target data
         test_df.index,
         history_length,
-        future_horizon
+        future_horizon,
+        step_size
     )
 
     num_train_samples = X_observed_train.shape[0] # z.B. 24918
@@ -1065,7 +1131,8 @@ def create_tft_sequences(known_data: np.ndarray,
                          target_data: np.ndarray,
                          indices: np.ndarray,
                          history_len: int,
-                         future_len: int):
+                         future_len: int,
+                         step_size: int = 1):
         """Creates sequences for TFT inputs and outputs."""
         X_known_list, X_observed_list, y_list, index_list = [], [], [], []
         total_len = history_len + future_len
@@ -1073,7 +1140,7 @@ def create_tft_sequences(known_data: np.ndarray,
             len_data = len(observed_data)
         if known_data is not None:
             len_data = len(known_data)
-        for i in range(len_data - total_len + 1):
+        for i in range(0, len_data - total_len + 1, step_size):
             if observed_data is not None:
                 observed_past_window = observed_data[i : i + history_len]
                 X_observed_list.append(observed_past_window)
