@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for i in {1..6}; do
+for i in {0..3}; do
     screen -X -S hpo_$i quit
     echo "Closed screen sessions"
 done

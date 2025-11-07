@@ -15,6 +15,7 @@ from utils import preprocessing, tools, hpo
 optuna.logging.set_verbosity(optuna.logging.INFO)
 
 def main() -> None:
+    tools.initialize_gpu()
     logger = logging.getLogger(__name__)
     # argument parser
     parser = argparse.ArgumentParser(description="Hyperparameter Optimization with Tensorflow/Keras")

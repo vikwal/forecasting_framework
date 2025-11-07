@@ -86,19 +86,14 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     parallelize = config['model'].get('parallelize', False)
 
     if parallelize:
-        # Get available GPUs
         available_gpus = tf.config.list_physical_devices('GPU')
         n_gpus = len(available_gpus)
 
         if n_gpus > 1:
             logging.info(f"Found {n_gpus} GPUs for parallel training")
-
-            # Keep original batch size - it will be split across GPUs
             original_batch_size = hyperparameters.get('batch_size')
 
-            # Ensure batch size is divisible by number of GPUs
             if original_batch_size % n_gpus != 0:
-                # Adjust to nearest divisible number
                 adjusted_batch_size = original_batch_size
                 while adjusted_batch_size % n_gpus != 0:
                     adjusted_batch_size += 1
@@ -118,20 +113,14 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
             strategy = tf.distribute.get_strategy()
     else:
         strategy = tf.distribute.get_strategy()  # DefaultStrategy (no distribution)
-        logging.debug("Using default strategy (single device)")    # Create datasets within strategy scope for better performance
+        logging.debug("Using default strategy (single device)")
     with strategy.scope():
         model = models.get_model(config=config, hyperparameters=hyperparameters)
-
-        # Create distributed datasets
         batch_size = hyperparameters['batch_size']
-
-        # Create training dataset
         train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
         if config['model']['shuffle']:
             train_dataset = train_dataset.shuffle(buffer_size=min(len(y_train), 10000), reshuffle_each_iteration=True)
         train_dataset = train_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
-
-        # Create validation dataset if provided
         val_dataset = None
         if val:
             val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val))
@@ -182,17 +171,13 @@ def concatenate_data(old, new):
 def initialize_gpu(use_gpu=None):
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
-        # Enable memory growth for all GPUs
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-
         if use_gpu is not None:
-            # Select specific GPUs
             if isinstance(use_gpu, list):
                 selected_gpus = [gpus[i] for i in use_gpu if i < len(gpus)]
             else:
                 selected_gpus = [gpus[use_gpu]] if use_gpu < len(gpus) else gpus
-
             tf.config.experimental.set_visible_devices(selected_gpus, 'GPU')
             print(f"Using GPUs: {[gpu.name for gpu in selected_gpus]}")
         else:
