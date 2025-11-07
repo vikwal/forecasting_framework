@@ -118,7 +118,7 @@ hpo:
   fnn:
     units: [32, 256]
   cnn:
-    filters: [16, 128]
+    filters: [16, 150]
     kernel_size: [2, 5]
     increase_filters: False
   rnn:

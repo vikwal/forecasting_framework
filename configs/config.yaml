@@ -50,6 +50,16 @@ hpo:
   kfolds: 3
   min_train_len: 8760 # hours
   val_split: 1
+  # Pruning Konfiguration
+  pruning:
+    enabled: True
+    min_folds: 2          # Mindestens 2 Folds vor Pruning
+    patience_threshold: 1.3   # Faktor über dem besten bekannten Wert (aggressiver)
+    absolute_threshold: 1.5   # Absoluter Schwellenwert für RMSE (angepasst)
+    # Optional: Median Pruner (automatisch durch Optuna)
+    use_median_pruner: False
+    median_startup_trials: 15
+    median_warmup_steps: 1    # Bei 3-Fold CV: Pruning ab Fold 2
   batch_size: [32, 512]
   epochs: [1, 50]
   n_layers: [1, 4]

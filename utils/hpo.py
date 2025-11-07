@@ -266,13 +266,36 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
     return combined_kfolds
 
 
-def create_or_load_study(path, study_name, direction):
+def create_or_load_study(path, study_name, direction, pruning_config=None):
     storage = f'sqlite:///{path}'
+
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=15,  # Mehr Random-Trials für robuste TPE-Basis
+        n_ei_candidates=24,   # Mehr Kandidaten für Expected Improvement
+        gamma=lambda x: min(int(0.25 * x), 30),  # Kleinerer gamma (25% statt 15%)
+        multivariate=True,    # Berücksichtigt Korrelationen zwischen Parametern
+        group=True,           # Gruppiert ähnliche Parameter
+        warn_independent_sampling=False,
+        seed=42  # Für Reproduzierbarkeit
+    )
+
+    # Optionales Median Pruning (automatisches Pruning durch Optuna)
+    pruner = None
+    if pruning_config and pruning_config.get('use_median_pruner', False):
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=pruning_config.get('median_startup_trials', 10),
+            n_warmup_steps=pruning_config.get('median_warmup_steps', 3),
+            interval_steps=1  # Prüfe nach jedem Fold
+        )
+        logging.debug("Using MedianPruner for automatic pruning")
+
     study = optuna.create_study(
         storage=storage,
         study_name=study_name,
         direction=direction,
-        load_if_exists=True
+        load_if_exists=True,
+        sampler=sampler,
+        pruner=pruner
     )
     return study
 

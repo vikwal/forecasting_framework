@@ -68,7 +68,9 @@ def main() -> None:
     config['model']['name'] = args.model
 
     # Create study for hyperparameter optimization
-    study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name, direction='minimize')
+    pruning_config = config.get('hpo', {}).get('pruning', {})
+    study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name,
+                                    direction='minimize', pruning_config=pruning_config)
 
     # load and prepare training and test data
     dfs = preprocessing.get_data(data_dir=data_dir,
@@ -124,6 +126,15 @@ def main() -> None:
 
         try:
             accuracies = []
+            # Pruning-Konfiguration laden
+            pruning_enabled = config['hpo']['pruning'].get('enabled', False)
+
+            # Berechne bisherige beste Performance für relatives Pruning
+            completed_trials_list = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            best_value = None
+            if completed_trials_list:
+                best_value = min([t.value for t in completed_trials_list])  # minimieren
+
             for fold_idx, fold in enumerate(combined_kfolds):
                 train, val = fold
                 # config model name relevant for callbacks
@@ -133,16 +144,34 @@ def main() -> None:
                                                      val=val,
                                                      hyperparameters=hyperparameters,
                                                      config=config)
-                accuracies.append(history.history[config['hpo']['metric']][-1])
-                logging.info(f'Processed fold {fold_idx + 1}/{len(combined_kfolds)}.')
+                fold_accuracy = history.history[config['hpo']['metric']][-1]
+                accuracies.append(fold_accuracy)
 
-            logging.info(f'Accuracies for the folds: {accuracies}')
-            average_accuracy = sum(accuracies) / len(accuracies)
+                # CRUCIAL: Report intermediate value für MedianPruner
+                trial.report(fold_accuracy, step=fold_idx)
 
-            study.tell(trial, average_accuracy)
-            completed_trials += 1
-            logging.info(f'Trial {trial_number+1} completed with average {config["hpo"]["metric"]}: {average_accuracy:.4f}')
-            logging.info(f'Progress: {completed_trials}/{config["hpo"]["trials"]} successful trials completed.')
+                logging.info(f'Processed fold {fold_idx + 1}/{len(combined_kfolds)}, {config["hpo"]["metric"]}: {fold_accuracy:.4f}')
+
+                # MedianPruner Check (automatisch durch Optuna)
+                if trial.should_prune():
+                    logging.info(f'Trial {trial_number} PRUNED after fold {fold_idx + 1} by MedianPruner')
+                    study.tell(trial, state=optuna.trial.TrialState.PRUNED)
+                    trial_counter += 1
+                    break  # Breche aus der Fold-Schleife aus
+
+                logging.info(f'Accuracies for the folds: {accuracies}')
+                average_accuracy = sum(accuracies) / len(accuracies)
+
+                study.tell(trial, average_accuracy)
+                completed_trials += 1
+                logging.info(f'Trial {trial_number+1} completed with average {config["hpo"]["metric"]}: {average_accuracy:.4f}')
+                logging.info(f'Progress: {completed_trials}/{config["hpo"]["trials"]} successful trials completed.')
+
+        except optuna.TrialPruned:
+            # Wird ausgelöst wenn trial.should_prune() True zurückgibt und eine Exception geworfen wird
+            logging.info(f'Trial {trial_number} was pruned by Optuna')
+            study.tell(trial, state=optuna.trial.TrialState.PRUNED)
+            trial_counter += 1
 
         except KeyboardInterrupt:
             logging.warning(f'Trial {trial_number+1} interrupted by user. Marking as failed.')
@@ -152,6 +181,7 @@ def main() -> None:
         except Exception as e:
             logging.error(f'Trial {trial_number+1} failed with error: {str(e)}. Marking as failed.')
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            raise
 
         trial_counter += 1
 
