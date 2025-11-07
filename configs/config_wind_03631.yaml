@@ -7,7 +7,8 @@ data:
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2025-01-01'
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
   target_col: 'power'
   scale_y: False
   lag_in_col: False
@@ -104,13 +105,14 @@ hpo:
   studies_path: '/mnt/nas/optuna_studies.db'
   metric: 'rmse'
   trials: 1000
-  kfolds: 5
+  kfolds: 12
+  min_train_len: 8760 # hours
   val_split: 1
   batch_size: [32, 512]
   epochs: [1, 100]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
-  n_rnn_layers: [1, 5]
+  n_rnn_layers: [1, 7]
   learning_rate: [0.0001, 0.01]
   attention_heads: [1,64] # if attention is used in hybrid models
   fnn:
@@ -121,7 +123,7 @@ hpo:
     increase_filters: False
   rnn:
     units: [16, 100]
-    dropout: [0.0, 0.8]
+    dropout: [0.0, 0.2]
   tft:
     lookback: [48, 96, 144, 192]
     n_heads: [1, 64]

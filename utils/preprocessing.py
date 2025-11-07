@@ -145,7 +145,6 @@ def pipeline(data: pd.DataFrame,
              known_cols: List[str] = None,
              observed_cols: List[str] = None,
              static_cols: List[str] = None,
-             test_start: pd.Timestamp = None,
              target_col: str = 'power') -> Tuple[Dict, pd.DataFrame]:
     df = data.copy()
     df = knn_imputer(data=df, n_neighbors=config['data']['n_neighbors'])
@@ -161,6 +160,7 @@ def pipeline(data: pd.DataFrame,
                                              static_cols=static_cols,
                                              train_frac=config['data']['train_frac'],
                                              test_start=pd.Timestamp(config['data']['test_start']),
+                                             test_end=pd.Timestamp(config['data']['test_end']),
                                              t_0=t_0)
     else:
         # create new known cols
@@ -182,7 +182,8 @@ def pipeline(data: pd.DataFrame,
                                      train_frac=config['data']['train_frac'],
                                      scale_y=config['data']['scale_y'],
                                      t_0=t_0,
-                                     test_start=pd.Timestamp(test_start, tz='UTC'),
+                                     test_start=pd.Timestamp(config['data']['test_start'], tz='UTC'),
+                                     test_end=pd.Timestamp(config['data']['test_end'], tz='UTC'),
                                      target_col=target_col)
     return prepared_data, df
 
@@ -322,6 +323,7 @@ def prepare_data(data: pd.DataFrame,
                  target_col: str = 'power',
                  t_0: int = 0,
                  test_start: pd.Timestamp = None,
+                 test_end: pd.Timestamp = None,
                  seq2seq: bool = False):
     df = data.copy()
     df.dropna(inplace=True)
@@ -351,9 +353,9 @@ def prepare_data(data: pd.DataFrame,
         target_test = target[target.index.get_level_values('starttime') > pd.Timestamp(train_end, tz='UTC')]
     else:
         df_train = df[:train_end]
-        df_test = df[test_start:]
+        df_test = df[test_start:test_end]
         target_train = target[:train_end]
-        target_test = target[test_start:]
+        target_test = target[test_start:test_end]
 
     #logging.info(f"Training data range: {df_train.index.min()} to {df_train.index.max()} ({len(df_train)} rows)")
     #logging.info(f"Test data range:     {df_test.index.min()} to {df_test.index.max()} ({len(df_test)} rows)")
@@ -952,6 +954,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          train_frac: float = 0.75,
                          target_col: str = 'power',
                          test_start: pd.Timestamp = None,
+                         test_end: pd.Timestamp = None,
                          t_0: int = 0,
                          scale_target: bool = False): # New flag to control lag feature
     """
@@ -997,8 +1000,9 @@ def prepare_data_for_tft(data: pd.DataFrame,
 
     train_end = pd.Timestamp(train_end, tzinfo=data.index.tz)
     test_start = pd.Timestamp(test_start, tzinfo=data.index.tz)
+    test_end = pd.Timestamp(test_end, tzinfo=data.index.tz)
     train_df = df[:train_end]
-    test_df = df[test_start:]
+    test_df = df[test_start:test_end]
 
     #logging.info(f"Training data range: {train_df.index.min()} to {train_df.index.max()} ({len(train_df)} rows)")
     #logging.info(f"Test data range:     {test_df.index.min()} to {test_df.index.max()} ({len(test_df)} rows)")

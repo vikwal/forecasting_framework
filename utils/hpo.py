@@ -13,6 +13,209 @@ from sklearn.model_selection import TimeSeriesSplit
 from . import tools, models
 
 
+def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
+                                min_train_len: int = None,
+                                step_size: int = 1) -> Dict[str, Any]:
+    """
+    Wendet min_train_len auf jede einzelne Datei an, bevor sie kombiniert werden.
+
+    Args:
+        prepared_datasets: Liste von prepared_data Dictionaries von jeder Datei
+        min_train_len: Mindestanzahl ursprünglicher Samples für Training pro Datei
+        step_size: Schrittweite beim Windowing im Preprocessing
+
+    Returns:
+        Dictionary mit 'min_blocks' (kombinierte minimum blocks) und 'remaining_datasets'
+        (verbleibende Daten pro Datei nach Abzug der min blocks)
+    """
+    if min_train_len is None:
+        # Wenn kein min_train_len, gib alle Daten als "remaining" zurück
+        return {
+            'min_blocks': None,
+            'remaining_datasets': prepared_datasets
+        }
+
+    # Berechne die tatsächliche minimum training length basierend auf step_size
+    actual_min_train_len = max(1, min_train_len // step_size)
+    logging.debug(f"Per-file min_train_len={min_train_len} with step_size={step_size} -> actual min_train_len={actual_min_train_len}")
+
+    min_blocks = []
+    remaining_datasets = []
+
+    for i, prepared_data in enumerate(prepared_datasets):
+        X_train = prepared_data['X_train']
+        y_train = prepared_data['y_train']
+
+        if len(y_train) <= actual_min_train_len:
+            logging.debug(f"File {i}: Not enough data ({len(y_train)} samples) for min_train_len ({actual_min_train_len}). Using all data as minimum block.")
+            # Wenn die ganze Datei kleiner ist als min_train_len, verwende alles als min_block
+            min_blocks.append(prepared_data)
+            # Erstelle leeres "remaining" dataset
+            if isinstance(X_train, dict):
+                X_remaining = {key: np.array([]).reshape(0, *value.shape[1:]) for key, value in X_train.items() if len(value) > 0}
+            else:
+                X_remaining = np.array([]).reshape(0, *X_train.shape[1:])
+            y_remaining = np.array([])
+
+            remaining_datasets.append({
+                'X_train': X_remaining,
+                'y_train': y_remaining,
+                'X_test': prepared_data.get('X_test', None),
+                'y_test': prepared_data.get('y_test', None)
+            })
+        else:
+            # Teile die Datei in minimum block + remaining
+            min_block_end = actual_min_train_len
+
+            # Minimum block
+            if isinstance(X_train, dict):
+                X_min_block = {key: value[:min_block_end] for key, value in X_train.items() if len(value) > 0}
+                X_remaining = {key: value[min_block_end:] for key, value in X_train.items() if len(value) > 0}
+            else:
+                X_min_block = X_train[:min_block_end]
+                X_remaining = X_train[min_block_end:]
+
+            y_min_block = y_train[:min_block_end]
+            y_remaining = y_train[min_block_end:]
+
+            min_blocks.append({
+                'X_train': X_min_block,
+                'y_train': y_min_block,
+                'X_test': prepared_data.get('X_test', None),
+                'y_test': prepared_data.get('y_test', None)
+            })
+
+            remaining_datasets.append({
+                'X_train': X_remaining,
+                'y_train': y_remaining,
+                'X_test': prepared_data.get('X_test', None),
+                'y_test': prepared_data.get('y_test', None)
+            })
+
+            logging.debug(f"File {i}: Split into min_block ({len(y_min_block)} samples) + remaining ({len(y_remaining)} samples)")
+
+    return {
+        'min_blocks': min_blocks,
+        'remaining_datasets': remaining_datasets
+    }
+
+
+def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
+                                      n_splits: int,
+                                      val_split: float = None,
+                                      min_train_len: int = None,
+                                      step_size: int = 1) -> List:
+    """
+    Erstellt k-folds mit per-file minimum training length.
+
+    Args:
+        prepared_datasets: Liste von prepared_data Dictionaries von jeder Datei
+        n_splits: Anzahl der Splits
+        val_split: Validation split ratio (nur für n_splits=1)
+        min_train_len: Mindestanzahl ursprünglicher Samples für Training pro Datei
+        step_size: Schrittweite beim Windowing im Preprocessing
+
+    Returns:
+        Liste von ((X_train_combined, y_train_combined), (X_val_combined, y_val_combined)) Tupeln
+    """
+    if n_splits == 1:
+        # Für n_splits=1, kombiniere einfach alle Daten und verwende val_split
+        X_train_all = None
+        y_train_all = None
+
+        for prepared_data in prepared_datasets:
+            if X_train_all is None:
+                X_train_all = prepared_data['X_train']
+                y_train_all = prepared_data['y_train']
+            else:
+                X_train_all = tools.concatenate_data(old=X_train_all, new=prepared_data['X_train'])
+                y_train_all = np.concatenate((y_train_all, prepared_data['y_train']))
+
+        X_train, y_train, X_val, y_val = split_val(X=X_train_all, y=y_train_all, val_split=val_split)
+        return [((X_train, y_train), (X_val, y_val))]
+
+    # Wende min_train_len pro Datei an
+    split_result = apply_min_train_len_per_file(prepared_datasets, min_train_len, step_size)
+    min_blocks = split_result['min_blocks']
+    remaining_datasets = split_result['remaining_datasets']
+
+    if min_blocks is None:
+        # Kein min_train_len spezifiziert, verwende normale Kombination + k-folds
+        X_train_all = None
+        y_train_all = None
+
+        for prepared_data in prepared_datasets:
+            if X_train_all is None:
+                X_train_all = prepared_data['X_train']
+                y_train_all = prepared_data['y_train']
+            else:
+                X_train_all = tools.concatenate_data(old=X_train_all, new=prepared_data['X_train'])
+                y_train_all = np.concatenate((y_train_all, prepared_data['y_train']))
+
+        return kfolds(X=X_train_all, y=y_train_all, n_splits=n_splits, val_split=val_split,
+                     min_train_len=None, step_size=step_size)
+
+    # Kombiniere die minimum blocks
+    X_min_combined = None
+    y_min_combined = None
+
+    for min_block in min_blocks:
+        if len(min_block['y_train']) > 0:  # Nur wenn der Block nicht leer ist
+            if X_min_combined is None:
+                X_min_combined = min_block['X_train']
+                y_min_combined = min_block['y_train']
+            else:
+                X_min_combined = tools.concatenate_data(old=X_min_combined, new=min_block['X_train'])
+                y_min_combined = np.concatenate((y_min_combined, min_block['y_train']))
+
+    # Erstelle k-folds für die remaining datasets
+    remaining_kfolds = []
+    for prepared_data in remaining_datasets:
+        if len(prepared_data['y_train']) > 0:  # Nur wenn noch Daten vorhanden sind
+            fold_data = kfolds(X=prepared_data['X_train'], y=prepared_data['y_train'],
+                             n_splits=n_splits, val_split=val_split,
+                             min_train_len=None, step_size=step_size)
+            remaining_kfolds.append(fold_data)
+
+    # Kombiniere minimum block mit jedem fold
+    combined_kfolds = []
+    for fold_idx in range(n_splits):
+        X_fold_combined = X_min_combined
+        y_fold_combined = y_min_combined
+        X_val_combined = None
+        y_val_combined = None
+
+        # Kombiniere den fold-spezifischen Teil von jeder Datei
+        for file_kfolds in remaining_kfolds:
+            if fold_idx < len(file_kfolds):
+                (X_train_fold, y_train_fold), (X_val_fold, y_val_fold) = file_kfolds[fold_idx]
+
+                # Füge Training-Teil hinzu
+                if len(y_train_fold) > 0:
+                    X_fold_combined = tools.concatenate_data(old=X_fold_combined, new=X_train_fold)
+                    y_fold_combined = np.concatenate((y_fold_combined, y_train_fold))
+
+                # Füge Validation-Teil hinzu
+                if len(y_val_fold) > 0:
+                    if X_val_combined is None:
+                        X_val_combined = X_val_fold
+                        y_val_combined = y_val_fold
+                    else:
+                        X_val_combined = tools.concatenate_data(old=X_val_combined, new=X_val_fold)
+                        y_val_combined = np.concatenate((y_val_combined, y_val_fold))
+
+        combined_kfolds.append(((X_fold_combined, y_fold_combined), (X_val_combined, y_val_combined)))
+
+        # Logging
+        if X_min_combined is not None:
+            min_samples = len(y_min_combined)
+            fold_samples = len(y_fold_combined) - min_samples
+            val_samples = len(y_val_combined) if y_val_combined is not None else 0
+            logging.debug(f"Combined Fold {fold_idx+1}: {len(y_fold_combined)} training total (min_blocks: {min_samples}, fold_parts: {fold_samples}), {val_samples} validation")
+
+    return combined_kfolds
+
+
 def create_or_load_study(path, study_name, direction):
     storage = f'sqlite:///{path}'
     study = optuna.create_study(
@@ -61,25 +264,108 @@ def split_val(X: Any,
 def kfolds(X: Any,
            y: np.ndarray,
            n_splits: int,
-           val_split: float = None) -> List:
+           val_split: float = None,
+           min_train_len: int = None,
+           step_size: int = 1) -> List:
+    """
+    Erstellt k-folds für Zeitserien mit optionaler Mindesttrainingsmenge.
+
+    Args:
+        X: Features (numpy array oder dict für TFT)
+        y: Target values
+        n_splits: Anzahl der Splits
+        val_split: Validation split ratio (nur für n_splits=1)
+        min_train_len: Mindestanzahl ursprünglicher Samples für Training (z.B. 8760 für 1 Jahr)
+                      Wird automatisch durch step_size geteilt für die tatsächliche Datenlänge
+        step_size: Schrittweite beim Windowing im Preprocessing (default: 1)
+
+    Returns:
+        Liste von ((X_train, y_train), (X_val, y_val)) Tupeln
+    """
     kfolds = []
     if n_splits == 1: # if not kfolds
         X_train, y_train, X_val, y_val = split_val(X=X, y=y, val_split=val_split)
         kfolds.append(((X_train, y_train), (X_val, y_val)))
         return kfolds
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    for train_index, val_index in tscv.split(y):
-        if type(X) == dict:
-            X_train, X_val = {}, {}
-            for key, value in X.items():
-                if len(value) == 0:
-                    continue
-                X_train[key] = value[train_index]
-                X_val[key] = value[val_index]
-        else:
-            X_train, X_val = X[train_index], X[val_index]
-        y_train, y_val = y[train_index], y[val_index]
-        kfolds.append(((X_train, y_train), (X_val, y_val)))
+    # Berechne die tatsächliche minimum training length basierend auf step_size
+    if min_train_len is not None:
+        actual_min_train_len = max(1, min_train_len // step_size)
+        logging.debug(f"min_train_len={min_train_len} with step_size={step_size} -> actual min_train_len={actual_min_train_len}")
+
+        # Stelle sicher, dass wir genug Daten haben
+        if actual_min_train_len >= len(y):
+            logging.debug(f"min_train_len ({actual_min_train_len}) >= data length ({len(y)}). Using normal TimeSeriesSplit.")
+            actual_min_train_len = None
+    else:
+        actual_min_train_len = None
+    if actual_min_train_len is not None:
+        # Neue Strategie: Fester minimum training block + k-folds auf dem Rest
+        # 1. Trenne den minimum training block ab
+        min_block_end = actual_min_train_len
+        # 2. Der Rest wird für k-folds verwendet
+        remaining_data_len = len(y) - min_block_end
+        if remaining_data_len <= 0:
+            logging.debug(f"Not enough data after minimum training block. Required: {actual_min_train_len}, available: {len(y)}")
+            # Fallback auf normale TimeSeriesSplit
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            for train_index, val_index in tscv.split(y):
+                if type(X) == dict:
+                    X_train, X_val = {}, {}
+                    for key, value in X.items():
+                        if len(value) == 0:
+                            continue
+                        X_train[key] = value[train_index]
+                        X_val[key] = value[val_index]
+                else:
+                    X_train, X_val = X[train_index], X[val_index]
+                y_train, y_val = y[train_index], y[val_index]
+                kfolds.append(((X_train, y_train), (X_val, y_val)))
+            return kfolds
+        # 3. Erstelle TimeSeriesSplit für den verbleibenden Teil
+        remaining_y = y[min_block_end:]
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        remaining_splits = list(tscv.split(remaining_y))
+        logging.debug(f"Minimum training block: 0-{min_block_end-1} ({min_block_end} samples)")
+        logging.debug(f"Remaining data for k-folds: {min_block_end}-{len(y)-1} ({remaining_data_len} samples)")
+        # 4. Kombiniere minimum block mit jedem fold
+        for i, (rel_train_index, rel_val_index) in enumerate(remaining_splits):
+            # Konvertiere relative Indizes zu absoluten Indizes
+            abs_train_index = rel_train_index + min_block_end
+            abs_val_index = rel_val_index + min_block_end
+            # Kombiniere minimum block mit dem aktuellen training teil
+            combined_train_index = np.concatenate([
+                np.arange(0, min_block_end),  # Minimum block
+                abs_train_index               # Aktueller training teil
+            ])
+            train_len = len(combined_train_index)
+            val_len = len(abs_val_index)
+            logging.debug(f"Fold {i+1}: {train_len} samples training (min_block: {min_block_end} + fold: {len(abs_train_index)}), {val_len} samples validation")
+            # Erstelle die Daten-Splits
+            if type(X) == dict:
+                X_train, X_val = {}, {}
+                for key, value in X.items():
+                    if len(value) == 0:
+                        continue
+                    X_train[key] = value[combined_train_index]
+                    X_val[key] = value[abs_val_index]
+            else:
+                X_train, X_val = X[combined_train_index], X[abs_val_index]
+            y_train, y_val = y[combined_train_index], y[abs_val_index]
+            kfolds.append(((X_train, y_train), (X_val, y_val)))
+    else:
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        for train_index, val_index in tscv.split(y):
+            if type(X) == dict:
+                X_train, X_val = {}, {}
+                for key, value in X.items():
+                    if len(value) == 0:
+                        continue
+                    X_train[key] = value[train_index]
+                    X_val[key] = value[val_index]
+            else:
+                X_train, X_val = X[train_index], X[val_index]
+            y_train, y_val = y[train_index], y[val_index]
+            kfolds.append(((X_train, y_train), (X_val, y_val)))
     return kfolds
 
 def concatenate_processed_data(data_parts: List) -> Any:
@@ -88,19 +374,15 @@ def concatenate_processed_data(data_parts: List) -> Any:
     valid_parts = [p for p in data_parts if p is not None]
     if not valid_parts:
         return None
-
     first_item = valid_parts[0]
-
     if isinstance(first_item, np.ndarray):
         # Prüfe auf leere Arrays, bevor konkateniert wird
         valid_parts = [p for p in valid_parts if p.shape[0] > 0]
         return np.concatenate(valid_parts, axis=0)
-
     elif isinstance(first_item, dict):
          # Stelle sicher, dass alle Teile Dictionaries sind
          if not all(isinstance(p, dict) for p in valid_parts):
              raise TypeError("Mische Typen beim Konkatenieren von Dictionaries")
-
          combined_dict = {}
          # Nehme an, alle dicts haben dieselben Keys wie das erste
          keys = first_item.keys()
@@ -108,7 +390,6 @@ def concatenate_processed_data(data_parts: List) -> Any:
              arrays_to_concat = []
              for d in valid_parts:
                 arrays_to_concat.append(d[key])
-
              if arrays_to_concat: # Nur konkatenieren, wenn es etwas gibt
                  # Sicherstellen, dass alle Teile für diesen Key numpy arrays sind
                  if not all(isinstance(arr, np.ndarray) for arr in arrays_to_concat):
@@ -123,31 +404,21 @@ def concatenate_processed_data(data_parts: List) -> Any:
 def combine_kfolds(n_splits: int,
                    kfolds_per_series: list):
     combined_kfolds = []
-    for i in range(n_splits): # Iteriere über die Split-Indizes (0 bis k-1)
+    for i in range(n_splits):
         xtr_parts = []
         ytr_parts = []
         xval_parts = []
         yval_parts = []
-
-        # Sammle die Daten des i-ten Splits von JEDER Serie
         for series_folds in kfolds_per_series:
             (xtr, ytr), (xval, yval) = series_folds[i]
-
             xtr_parts.append(xtr)
             ytr_parts.append(ytr)
             xval_parts.append(xval)
             yval_parts.append(yval)
-
-        # Konkateniere die gesammelten Teile für diesen Split-Index i
-        # Konkateniere y (sollten immer numpy arrays sein)
         y_train_combined = np.concatenate([p for p in ytr_parts if p is not None and p.shape[0]>0], axis=0)
         y_val_combined = np.concatenate([p for p in yval_parts if p is not None and p.shape[0]>0], axis=0)
-
-        # Konkateniere X mithilfe der Helper-Funktion
         X_train_combined = concatenate_processed_data(xtr_parts)
         X_val_combined = concatenate_processed_data(xval_parts)
-
-        # Füge den kombinierten Split zur finalen Liste hinzu
         combined_kfolds.append(((X_train_combined, y_train_combined), (X_val_combined, y_val_combined)))
     return combined_kfolds
 
@@ -498,35 +769,125 @@ def get_train_history(client_results: List[Dict[str, Any]]):
         histories[client_id] = history
     return histories
 
-def get_kfolds_partitions(n_splits, partitions):
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    raw_partitions = [] # Speichert Folds pro ursprünglicher Partition: [[fold1_p1, fold2_p1,...], [fold1_p2, ...]]
+def get_kfolds_partitions(n_splits, partitions, min_train_len=None, step_size=1):
+    """
+    Erstellt k-folds für mehrere Partitionen mit optionaler Mindesttrainingsmenge.
+
+    Args:
+        n_splits: Anzahl der Splits
+        partitions: Liste von Partitionen [(X_train, y_train), ...]
+        min_train_len: Mindestanzahl ursprünglicher Samples für Training (z.B. 8760 für 1 Jahr)
+        step_size: Schrittweite beim Windowing im Preprocessing (default: 1)
+
+    Returns:
+        Liste von k-folds Partitionen
+    """
+    # Berechne die tatsächliche minimum training length basierend auf step_size
+    if min_train_len is not None:
+        actual_min_train_len = max(1, min_train_len // step_size)
+        logging.debug(f"Partitions: min_train_len={min_train_len} with step_size={step_size} -> actual min_train_len={actual_min_train_len}")
+    else:
+        actual_min_train_len = None
+
+    raw_partitions = [] # Speichert Folds pro ursprünglicher Partition
+
     for i, part in enumerate(partitions):
         X_train_orig = part[0] # Kann np.ndarray oder dict sein
         y_train = part[1]      # Sollte immer np.ndarray sein
         folds = [] # Speichert die Folds für DIESE eine Partition part
-        data_for_splitting = y_train
-        for fold_idx, (train_index, val_index) in enumerate(tscv.split(data_for_splitting)):
-            # 1. Teile y_train (ist immer ein Array)
-            y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
-            if isinstance(X_train_orig, np.ndarray):
-                X_train_fold = X_train_orig[train_index]
-                X_val_fold = X_train_orig[val_index]
-            elif isinstance(X_train_orig, dict):
-                # Case for TFT
-                X_train_fold = {}
-                X_val_fold = {}
-                for key, value_array in X_train_orig.items():
-                    # Prüfe, ob der Key 'static_input' ist
-                    if key == 'static_input':
-                        # Statische Features werden nicht gesplittet, sondern übernommen
-                        X_train_fold[key] = value_array
-                        X_val_fold[key] = value_array
-                        logging.debug(f"Fold {fold_idx}, Partition {i}: Passing through static_input.")
-                    else:
-                        X_train_fold[key] = value_array[train_index]
-                        X_val_fold[key] = value_array[val_index]
-            folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
+
+        if actual_min_train_len is not None and actual_min_train_len < len(y_train):
+            # Neue Strategie: Fester minimum training block + k-folds auf dem Rest
+
+            # 1. Trenne den minimum training block ab
+            min_block_end = actual_min_train_len
+
+            # 2. Der Rest wird für k-folds verwendet
+            remaining_data_len = len(y_train) - min_block_end
+
+            if remaining_data_len > 0:
+                # 3. Erstelle TimeSeriesSplit für den verbleibenden Teil
+                remaining_y = y_train[min_block_end:]
+                tscv = TimeSeriesSplit(n_splits=n_splits)
+                remaining_splits = list(tscv.split(remaining_y))
+
+                logging.debug(f"Partition {i}: Minimum block: 0-{min_block_end-1} ({min_block_end} samples), remaining: {remaining_data_len} samples")
+
+                # 4. Kombiniere minimum block mit jedem fold
+                for fold_idx, (rel_train_index, rel_val_index) in enumerate(remaining_splits):
+                    # Konvertiere relative Indizes zu absoluten Indizes
+                    abs_train_index = rel_train_index + min_block_end
+                    abs_val_index = rel_val_index + min_block_end
+
+                    # Kombiniere minimum block mit dem aktuellen training teil
+                    combined_train_index = np.concatenate([
+                        np.arange(0, min_block_end),  # Minimum block
+                        abs_train_index               # Aktueller training teil
+                    ])
+
+                    # Erstelle die Daten-Splits
+                    y_train_fold, y_val_fold = y_train[combined_train_index], y_train[abs_val_index]
+
+                    if isinstance(X_train_orig, np.ndarray):
+                        X_train_fold = X_train_orig[combined_train_index]
+                        X_val_fold = X_train_orig[abs_val_index]
+                    elif isinstance(X_train_orig, dict):
+                        # Case for TFT
+                        X_train_fold = {}
+                        X_val_fold = {}
+                        for key, value_array in X_train_orig.items():
+                            # Prüfe, ob der Key 'static_input' ist
+                            if key == 'static_input':
+                                # Statische Features werden entsprechend der Länge repliziert
+                                X_train_fold[key] = value_array[:len(combined_train_index)]
+                                X_val_fold[key] = value_array[:len(abs_val_index)]
+                                logging.debug(f"Fold {fold_idx}, Partition {i}: Adjusted static_input.")
+                            else:
+                                X_train_fold[key] = value_array[combined_train_index]
+                                X_val_fold[key] = value_array[abs_val_index]
+
+                    folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
+            else:
+                # Fallback: Nicht genug Daten für die neue Strategie
+                logging.debug(f"Partition {i}: Not enough data after minimum block. Using normal TimeSeriesSplit.")
+                tscv = TimeSeriesSplit(n_splits=n_splits)
+                for fold_idx, (train_index, val_index) in enumerate(tscv.split(y_train)):
+                    y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
+                    if isinstance(X_train_orig, np.ndarray):
+                        X_train_fold = X_train_orig[train_index]
+                        X_val_fold = X_train_orig[val_index]
+                    elif isinstance(X_train_orig, dict):
+                        X_train_fold = {}
+                        X_val_fold = {}
+                        for key, value_array in X_train_orig.items():
+                            if key == 'static_input':
+                                X_train_fold[key] = value_array
+                                X_val_fold[key] = value_array
+                            else:
+                                X_train_fold[key] = value_array[train_index]
+                                X_val_fold[key] = value_array[val_index]
+                    folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
+        else:
+            # Normale TimeSeriesSplit wenn kein min_train_len oder zu wenig Daten
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            for fold_idx, (train_index, val_index) in enumerate(tscv.split(y_train)):
+                y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
+                if isinstance(X_train_orig, np.ndarray):
+                    X_train_fold = X_train_orig[train_index]
+                    X_val_fold = X_train_orig[val_index]
+                elif isinstance(X_train_orig, dict):
+                    X_train_fold = {}
+                    X_val_fold = {}
+                    for key, value_array in X_train_orig.items():
+                        if key == 'static_input':
+                            X_train_fold[key] = value_array
+                            X_val_fold[key] = value_array
+                            logging.debug(f"Fold {fold_idx}, Partition {i}: Passing through static_input.")
+                        else:
+                            X_train_fold[key] = value_array[train_index]
+                            X_val_fold[key] = value_array[val_index]
+                folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
+
         raw_partitions.append(folds)
 
     kfolds_partitions = []
@@ -557,7 +918,7 @@ def run_simulation(partitions: List,
     ray.init(num_gpus=total_num_gpus,
              ignore_reinit_error=True,
              include_dashboard=False,
-             logging_level=logging.WARNING,  # Setzt den Level für Ray-Komponenten und oft auch für Worker
+             logging_level=logging.WARNING,  # Sets the level for Ray components and often also for workers
              log_to_driver=True         # Leitet Worker-Logs an den Driver (deine Konsole)
             )
 

@@ -1,32 +1,14 @@
 data:
   path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
-  files: ['07412', '03631', '03287', '04177', '03513',
-          '00183', '01200', '00198', '00953', '03093',
-          '15813', '05705', '01759', '02961', '00691',
-          '00232', '03196', '00298', '00460', '05404',
-          '03126', '00427', '02171', '01684', '03897',
-          '03015', '07393', '00164', '01346', '00662',
-          '03987', '00282', '00704', '07370', '02928',
-          '05490', '00161', '03668', '05856', '05930',
-          '04642', '05906', '00342', '00591', '01048',
-          '05100', '00596', '04745', '07410', '05397',
-          '05371', '03366', '01605', '03362', '03166',
-          '04104', '02290', '01587', '07395', '01262',
-          '07367', '05440', '04280', '03379', '07369',
-          '15207', '05792', '05426', '03231', '01078',
-          '03158', '05516', '01544', '03761', '01832',
-          '02712', '02044', '02564', '01443', '05349',
-          '04336', '01691', '07403', '03086', '05546',
-          '01766', '01303', '00880', '07396', '03730',
-          '01612', '05142', '00433', '02023', '00096',
-          '03268', '00303', '05158', '00701', '02559']  # Specific client files to load (without .csv extension)
+  files: ['03362']  # Specific client files to load (without .csv extension)
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/open-meteo/wind'
   synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2025-01-01'
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
   target_col: 'power'
   scale_y: False
   lag_in_col: False
@@ -34,12 +16,12 @@ data:
 
 params:
   turbines: [
-             'Enercon E-70 E4 2.300',
-             'Enercon E-82 E2 2.000',
+             #'Enercon E-70 E4 2.300',
+             #'Enercon E-82 E2 2.000',
              'Enercon E-115 2.500',
-             'Vestas V90',
-             'Vestas V112-3.45',
-             'Vestas V80-1.8'
+             #'Vestas V90',
+             #'Vestas V112-3.45',
+             #'Vestas V80-1.8'
             ]
   known_features: [
                    #'wind_speed_t1', #'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
@@ -123,13 +105,14 @@ hpo:
   studies_path: '/mnt/nas/optuna_studies.db'
   metric: 'rmse'
   trials: 1000
-  kfolds: 5
+  kfolds: 12
+  min_train_len: 8760 # hours
   val_split: 1
-  batch_size: [100, 5000]
+  batch_size: [32, 512]
   epochs: [1, 100]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
-  n_rnn_layers: [1, 5]
+  n_rnn_layers: [1, 7]
   learning_rate: [0.0001, 0.01]
   attention_heads: [1,64] # if attention is used in hybrid models
   fnn:
@@ -140,11 +123,11 @@ hpo:
     increase_filters: False
   rnn:
     units: [16, 100]
-    dropout: [0.0, 0.8]
+    dropout: [0.0, 0.2]
   tft:
     lookback: [48, 96, 144, 192]
     n_heads: [1, 64]
-    hidden_dim: [16, 512]
+    hidden_dim: [16, 256]
     dropout: [0.0, 0.5]
   fl:
     strategy: 'fedavg'

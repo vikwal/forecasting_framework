@@ -49,7 +49,9 @@ def main() -> None:
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
     config['model']['fl'] = False
-    logging.info(f'HPO for Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}, Step size: {config["model"]["step_size"]}')
+    test_end = config.get('data').get('test_end', None)
+    test_start = config['data']['test_start']
+    logging.info(f'HPO for Model: {args.model}, Output dim: {output_dim}, Frequency: {freq}, Lookback: {lookback}, Horizon: {horizon}, Step size: {config["model"]["step_size"]}, Test start: {test_start}, Test end: {test_end}')
     config['model']['name'] = args.model
     test_start = pd.Timestamp(config.get('data').get('test_start', 0))
     # get observed, known and static features
@@ -74,10 +76,9 @@ def main() -> None:
                                  freq=freq,
                                  features=features)
 
-    # Prepare k-folds for cross-validation
+    # Prepare k-folds for cross-validation with per-file minimum training length
     kfolds = []
-    X_train_all = None
-    y_train_all = None
+    prepared_datasets = []
 
     for key, df in tqdm(dfs.items(), desc="Preprocessing data"):
         logging.debug(f'Preprocessing {key} for HPO.')
@@ -86,22 +87,21 @@ def main() -> None:
                                             known_cols=features['known'],
                                             observed_cols=features['observed'],
                                             static_cols=features['static'],
-                                            test_start=test_start,
                                             target_col=config['data']['target_col'])
 
-        # Combine all training data for k-fold creation
-        if X_train_all is None:
-            X_train_all = prepared_data['X_train']
-            y_train_all = prepared_data['y_train']
-        else:
-            X_train_all = tools.concatenate_data(old=X_train_all, new=prepared_data['X_train'])
-            y_train_all = np.concatenate((y_train_all, prepared_data['y_train']))
+        # Sammle alle prepared datasets
+        prepared_datasets.append(prepared_data)
 
-    # Create k-folds from combined training data
-    combined_kfolds = hpo.kfolds(X=X_train_all,
-                                y=y_train_all,
-                                n_splits=config['hpo']['kfolds'],
-                                val_split=config['hpo']['val_split'])
+    # Create k-folds with per-file minimum training length consideration
+    min_train_len = config['hpo'].get('min_train_len', None)
+    step_size = config['model'].get('step_size', 1)
+    combined_kfolds = hpo.kfolds_with_per_file_min_train_len(
+        prepared_datasets=prepared_datasets,
+        n_splits=config['hpo']['kfolds'],
+        val_split=config['hpo']['val_split'],
+        min_train_len=min_train_len,
+        step_size=step_size
+    )
 
     # Run hyperparameter optimization
     len_trials = len(study.trials)

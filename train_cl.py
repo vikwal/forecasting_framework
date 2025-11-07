@@ -82,7 +82,6 @@ def main() -> None:
                                             known_cols=features['known'],
                                             observed_cols=features['observed'],
                                             static_cols=features['static'],
-                                            test_start=test_start,
                                             target_col=config['data']['target_col'])
         index_test = prepared_data['index_test']
         scalers = prepared_data['scalers']

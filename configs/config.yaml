@@ -48,6 +48,7 @@ hpo:
   metric: 'rmse'
   trials: 1000
   kfolds: 3
+  min_train_len: 8760 # hours
   val_split: 1
   batch_size: [32, 512]
   epochs: [1, 50]

@@ -91,7 +91,6 @@ def main() -> None:
                                                 known_cols=features['known'],
                                                 observed_cols=features['observed'],
                                                 static_cols=features['static'],
-                                                test_start=test_start,
                                                 target_col=config['data']['target_col'])
 
             # Combine data within client if multiple files

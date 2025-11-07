@@ -1,13 +1,17 @@
 data:
   path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
-  files: ['07370']  # Specific client files to load (without .csv extension)
+  files: ['synth_00342', 'synth_04928', 'synth_05158',
+          'synth_01612', 'synth_00164', 'synth_01544',
+          'synth_03268', 'synth_05349', 'synth_01303',
+          'synth_07393']  # Specific client files to load (without .csv extension)
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/open-meteo/wind'
   synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2025-01-01'
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
   target_col: 'power'
   scale_y: False
   lag_in_col: False
@@ -15,11 +19,11 @@ data:
 
 params:
   turbines: [
-             #'Enercon E-70 E4 2.300',
-             #'Enercon E-82 E2 2.000',
-             #'Enercon E-115 2.500',
-             #'Vestas V90',
-             #'Vestas V112-3.45',
+             'Enercon E-70 E4 2.300',
+             'Enercon E-82 E2 2.000',
+             'Enercon E-115 2.500',
+             'Vestas V90',
+             'Vestas V112-3.45',
              'Vestas V80-1.8'
             ]
   known_features: [
@@ -34,7 +38,8 @@ params:
   observed_features: [
                       #'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
                       #'wind_speed_10m',
-                      #'wind_speed',
+                      'wind_speed_t',
+                      #'density_t',
                       #'wind_speed_t1', 'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
                       'power'
                       ] # lag features
@@ -68,7 +73,7 @@ model:
   lookback: 48
   horizon: 48
   step_size: 3
-  batch_size: 4000
+  batch_size: 700
   epochs: 100
   lr: 0.0005
   optimizer: 'adam'
@@ -95,8 +100,8 @@ model:
   save_model: True
   shuffle: True
   force_retrain: True
-  parallelize: False
-  lookup_hpo: True
+  parallelize: True
+  lookup_hpo: False
   verbose: 1
 
 
@@ -105,9 +110,10 @@ hpo:
   metric: 'rmse'
   trials: 1000
   kfolds: 5
+  min_train_len: 8760 # hours
   val_split: 1
-  batch_size: [32, 512]
-  epochs: [1, 100]
+  batch_size: [32, 1024]
+  epochs: [1, 50]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
   n_rnn_layers: [1, 5]
@@ -125,8 +131,8 @@ hpo:
   tft:
     lookback: [48, 96, 144, 192]
     n_heads: [1, 64]
-    hidden_dim: [16, 256]
-    dropout: [0.0, 0.5]
+    hidden_dim: [8, 256]
+    dropout: [0.0, 0.8]
   fl:
     strategy: 'fedavg'
     personalize: False

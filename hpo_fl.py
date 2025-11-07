@@ -109,10 +109,14 @@ def main() -> None:
                 y_train_client = np.concatenate((y_train_client, prepared_data['y_train']))
 
         # Create k-folds for this client
+        min_train_len = config['hpo'].get('min_train_len', None)
+        step_size = config['model'].get('step_size', 1)
         client_folds = hpo.kfolds(X=X_train_client,
                                  y=y_train_client,
                                  n_splits=config['hpo']['kfolds'],
-                                 val_split=config['hpo']['val_split'])
+                                 val_split=config['hpo']['val_split'],
+                                 min_train_len=min_train_len,
+                                 step_size=step_size)
         client_kfolds[client_id] = client_folds
 
     # Create federated k-folds by combining folds across clients
