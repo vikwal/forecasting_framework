@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for i in {1..6}; do
+for i in {0..3}; do
     screen -dmS hpo_$i bash -c "
         cd ~/Work/forecasting_framework
         source frcst/bin/activate

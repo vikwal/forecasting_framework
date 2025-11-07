@@ -96,6 +96,7 @@ model:
   shuffle: True
   force_retrain: True
   parallelize: False
+  lookup_hpo: True
   verbose: 1
 
 

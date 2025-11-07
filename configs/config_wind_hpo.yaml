@@ -115,6 +115,7 @@ model:
   shuffle: True
   force_retrain: True
   parallelize: False
+  lookup_hpo: True
   verbose: 1
 
 
@@ -143,7 +144,7 @@ hpo:
   tft:
     lookback: [48, 96, 144, 192]
     n_heads: [1, 64]
-    hidden_dim: [16, 256]
+    hidden_dim: [16, 512]
     dropout: [0.0, 0.5]
   fl:
     strategy: 'fedavg'

@@ -14,9 +14,6 @@ from tqdm import tqdm
 from utils import tools, eval, preprocessing, hpo
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    )
 
 def main() -> None:
     logger = logging.getLogger(__name__)
@@ -24,7 +21,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Simulation with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('-c', '--config', type=str, help='Select config')
+    parser.add_argument('-i', '--index', type=str, default='', help='Define index')
     args = parser.parse_args()
+    index = ''
+    if args.index:
+        index = f'_{args.index}'
+    log_file = f'logs/train_cl_m-{args.model}{index}.log'
+    logging.basicConfig(level=logging.INFO,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+        ])
     # create directories
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
@@ -52,7 +60,10 @@ def main() -> None:
     base_dir = os.path.basename(data_dir)
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}'
+    study_name_suffix = ''
+    if len(config['data']['files']) == 1:
+        study_name_suffix = f'_{config["data"]["files"][0]}'
+    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}{study_name_suffix}'
     config['model']['name'] = args.model
     # load and prepare training and test data
     dfs = preprocessing.get_data(data_dir=data_dir,

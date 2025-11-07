@@ -104,38 +104,57 @@ def main() -> None:
 
     # Run hyperparameter optimization
     len_trials = len(study.trials)
-    logging.info(f'Starting HPO with {config["hpo"]["trials"] - len_trials} new trials.')
+    completed_trials = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+    logging.info(f'Starting HPO with {config["hpo"]["trials"] - completed_trials} new trials.')
+    logging.info(f'Previous trials: {len_trials} total, {completed_trials} completed successfully.')
 
-    for i in tqdm(range(len_trials, config['hpo']['trials']), desc="HPO Progress"):
-        combinations = [trial.params for trial in study.trials]
+    trial_counter = 0
+    while completed_trials < config['hpo']['trials']:
         trial = study.ask()
+        trial_number = len_trials + trial_counter
         hyperparameters = hpo.get_hyperparameters(config=config,
                                                   hpo=True,
                                                   trial=trial)
-        check_params = hyperparameters.copy()
-        if check_params in combinations:
-            study.tell(trial, state=optuna.trial.TrialState.PRUNED)
-            continue
+        #combinations = [trial.params for trial in study.trials]
+        #check_params = hyperparameters.copy()
+        #if check_params in combinations:
+        #    study.tell(trial, state=optuna.trial.TrialState.PRUNED)
+        #    continue
 
-        logger.info(f"Trial {i}: {json.dumps(hyperparameters)}")
-        accuracies = []
+        logger.info(f"Trial {trial_number}: {json.dumps(hyperparameters)}")
 
-        for fold_idx, fold in enumerate(combined_kfolds):
-            train, val = fold
-            # config model name relevant for callbacks
-            config['model_name'] = f'hpo_cl_m-{args.model}_out-{output_dim}_freq-{freq}_trial-{i}_fold-{fold_idx}'
+        try:
+            accuracies = []
+            for fold_idx, fold in enumerate(combined_kfolds):
+                train, val = fold
+                # config model name relevant for callbacks
+                config['model_name'] = f'hpo_cl_m-{args.model}_out-{output_dim}_freq-{freq}_trial-{trial_number}_fold-{fold_idx}'
 
-            history, _ = tools.training_pipeline(train=train,
-                                                 val=val,
-                                                 hyperparameters=hyperparameters,
-                                                 config=config)
-            accuracies.append(history.history[config['hpo']['metric']][-1])
-            logging.info(f'Processed fold {fold_idx + 1}/{len(combined_kfolds)}.')
+                history, _ = tools.training_pipeline(train=train,
+                                                     val=val,
+                                                     hyperparameters=hyperparameters,
+                                                     config=config)
+                accuracies.append(history.history[config['hpo']['metric']][-1])
+                logging.info(f'Processed fold {fold_idx + 1}/{len(combined_kfolds)}.')
 
-        logging.info(f'Accuracies for the folds: {accuracies}')
-        average_accuracy = sum(accuracies) / len(accuracies)
-        study.tell(trial, average_accuracy)
-        logging.info(f'Trial {i+1} completed with average {config["hpo"]["metric"]}: {average_accuracy:.6f}')
+            logging.info(f'Accuracies for the folds: {accuracies}')
+            average_accuracy = sum(accuracies) / len(accuracies)
+
+            study.tell(trial, average_accuracy)
+            completed_trials += 1
+            logging.info(f'Trial {trial_number+1} completed with average {config["hpo"]["metric"]}: {average_accuracy:.4f}')
+            logging.info(f'Progress: {completed_trials}/{config["hpo"]["trials"]} successful trials completed.')
+
+        except KeyboardInterrupt:
+            logging.warning(f'Trial {trial_number+1} interrupted by user. Marking as failed.')
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            raise
+
+        except Exception as e:
+            logging.error(f'Trial {trial_number+1} failed with error: {str(e)}. Marking as failed.')
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+
+        trial_counter += 1
 
 if __name__ == '__main__':
     main()

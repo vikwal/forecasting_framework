@@ -170,13 +170,14 @@ def get_hyperparameters(config: dict,
     attention_heads = config['hpo']['attention_heads']
     filters = config['hpo']['cnn']['filters']
     kernel_size = config['hpo']['cnn']['kernel_size']
+    dropout_rnn = config['hpo']['rnn']['dropout']
     rnn_units = config['hpo']['rnn']['units']
     fnn_units = config['hpo']['fnn']['units']
     increase_filters = config['hpo']['cnn']['increase_filters']
     # tft specific hyperparameters
     n_heads = config['hpo']['tft']['n_heads']
     hidden_dim = config['hpo']['tft']['hidden_dim']
-    dropout = config['hpo']['rnn']['dropout']
+    dropout_tft = config['hpo']['tft']['dropout']
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
     # fl specific hyperparameters
@@ -210,7 +211,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['n_cnn_layers'] = trial.suggest_int('n_cnn_layers', n_cnn_layers[0], n_cnn_layers[1])
             hyperparameters['increase_filters'] = increase_filters
         if is_rnn_type:
-            hyperparameters['dropout'] = trial.suggest_float('dropout', dropout[0], dropout[1])
+            hyperparameters['dropout'] = trial.suggest_float('dropout', dropout_rnn[0], dropout_rnn[1])
             hyperparameters['units'] = trial.suggest_int('units', rnn_units[0], rnn_units[1])
             hyperparameters['n_rnn_layers'] = trial.suggest_int('n_rnn_layers', n_rnn_layers[0], n_rnn_layers[1])
         if is_fnn_type:
@@ -227,7 +228,7 @@ def get_hyperparameters(config: dict,
                 hidden_dim[1],
                 step=n_heads_hpo
             )
-            hyperparameters['dropout'] = trial.suggest_float('dropout', dropout[0], dropout[1])
+            hyperparameters['dropout'] = trial.suggest_float('dropout', dropout_tft[0], dropout_tft[1])
         if 'attn' in model_name:
             hyperparameters['attention_heads'] = trial.suggest_int('attention_heads', attention_heads[0], attention_heads[1])
     else:
