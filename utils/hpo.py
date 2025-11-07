@@ -155,20 +155,34 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
         return kfolds(X=X_train_all, y=y_train_all, n_splits=n_splits, val_split=val_split,
                      min_train_len=None, step_size=step_size)
 
-    # Kombiniere die minimum blocks
+    # Kombiniere die minimum blocks effizienter
     X_min_combined = None
     y_min_combined = None
 
-    for min_block in min_blocks:
-        if len(min_block['y_train']) > 0:  # Nur wenn der Block nicht leer ist
-            if X_min_combined is None:
-                X_min_combined = min_block['X_train']
-                y_min_combined = min_block['y_train']
-            else:
-                X_min_combined = tools.concatenate_data(old=X_min_combined, new=min_block['X_train'])
-                y_min_combined = np.concatenate((y_min_combined, min_block['y_train']))
+    # Sammle erst alle nicht-leeren Blöcke
+    valid_min_blocks = [block for block in min_blocks if len(block['y_train']) > 0]
 
-    # Erstelle k-folds für die remaining datasets
+    if valid_min_blocks:
+        # Extrahiere alle y_train Arrays und konkateniere sie auf einmal
+        y_parts = [block['y_train'] for block in valid_min_blocks]
+        y_min_combined = np.concatenate(y_parts, axis=0)
+
+        # Für X_train: Prüfe den Typ des ersten gültigen Blocks
+        first_block = valid_min_blocks[0]
+        if isinstance(first_block['X_train'], dict):
+            # TFT case: Konkateniere jedes Feature separat
+            X_min_combined = {}
+            for key in first_block['X_train'].keys():
+                X_parts = [block['X_train'][key] for block in valid_min_blocks
+                          if key in block['X_train'] and len(block['X_train'][key]) > 0]
+                if X_parts:
+                    X_min_combined[key] = np.concatenate(X_parts, axis=0)
+        else:
+            # Standard numpy array case
+            X_parts = [block['X_train'] for block in valid_min_blocks]
+            X_min_combined = np.concatenate(X_parts, axis=0)
+
+    # Erstelle k-folds für die remaining datasets - optimiert
     remaining_kfolds = []
     for prepared_data in remaining_datasets:
         if len(prepared_data['y_train']) > 0:  # Nur wenn noch Daten vorhanden sind
@@ -177,32 +191,68 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
                              min_train_len=None, step_size=step_size)
             remaining_kfolds.append(fold_data)
 
-    # Kombiniere minimum block mit jedem fold
+    # Kombiniere minimum block mit jedem fold - optimiert für bessere Performance
     combined_kfolds = []
     for fold_idx in range(n_splits):
-        X_fold_combined = X_min_combined
-        y_fold_combined = y_min_combined
-        X_val_combined = None
-        y_val_combined = None
+        # Sammle alle fold-Teile erst in Listen, dann batch-konkateniere
+        train_X_parts = []
+        train_y_parts = []
+        val_X_parts = []
+        val_y_parts = []
 
-        # Kombiniere den fold-spezifischen Teil von jeder Datei
+        # Füge min_block hinzu (falls vorhanden)
+        if X_min_combined is not None:
+            train_X_parts.append(X_min_combined)
+            train_y_parts.append(y_min_combined)
+
+        # Sammle fold-spezifische Teile von allen Dateien
         for file_kfolds in remaining_kfolds:
             if fold_idx < len(file_kfolds):
                 (X_train_fold, y_train_fold), (X_val_fold, y_val_fold) = file_kfolds[fold_idx]
 
-                # Füge Training-Teil hinzu
+                # Sammle Training-Teile
                 if len(y_train_fold) > 0:
-                    X_fold_combined = tools.concatenate_data(old=X_fold_combined, new=X_train_fold)
-                    y_fold_combined = np.concatenate((y_fold_combined, y_train_fold))
+                    train_X_parts.append(X_train_fold)
+                    train_y_parts.append(y_train_fold)
 
-                # Füge Validation-Teil hinzu
+                # Sammle Validation-Teile
                 if len(y_val_fold) > 0:
-                    if X_val_combined is None:
-                        X_val_combined = X_val_fold
-                        y_val_combined = y_val_fold
-                    else:
-                        X_val_combined = tools.concatenate_data(old=X_val_combined, new=X_val_fold)
-                        y_val_combined = np.concatenate((y_val_combined, y_val_fold))
+                    val_X_parts.append(X_val_fold)
+                    val_y_parts.append(y_val_fold)
+
+        # Batch-Konkatenation für Training
+        if train_y_parts:
+            y_fold_combined = np.concatenate(train_y_parts, axis=0)
+            if isinstance(train_X_parts[0], dict):
+                # TFT case
+                X_fold_combined = {}
+                for key in train_X_parts[0].keys():
+                    X_key_parts = [X_part[key] for X_part in train_X_parts
+                                  if key in X_part and len(X_part[key]) > 0]
+                    if X_key_parts:
+                        X_fold_combined[key] = np.concatenate(X_key_parts, axis=0)
+            else:
+                # Standard numpy case
+                X_fold_combined = np.concatenate(train_X_parts, axis=0)
+        else:
+            X_fold_combined, y_fold_combined = None, None
+
+        # Batch-Konkatenation für Validation
+        if val_y_parts:
+            y_val_combined = np.concatenate(val_y_parts, axis=0)
+            if isinstance(val_X_parts[0], dict):
+                # TFT case
+                X_val_combined = {}
+                for key in val_X_parts[0].keys():
+                    X_key_parts = [X_part[key] for X_part in val_X_parts
+                                  if key in X_part and len(X_part[key]) > 0]
+                    if X_key_parts:
+                        X_val_combined[key] = np.concatenate(X_key_parts, axis=0)
+            else:
+                # Standard numpy case
+                X_val_combined = np.concatenate(val_X_parts, axis=0)
+        else:
+            X_val_combined, y_val_combined = None, None
 
         combined_kfolds.append(((X_fold_combined, y_fold_combined), (X_val_combined, y_val_combined)))
 

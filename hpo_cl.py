@@ -88,8 +88,6 @@ def main() -> None:
                                             observed_cols=features['observed'],
                                             static_cols=features['static'],
                                             target_col=config['data']['target_col'])
-
-        # Sammle alle prepared datasets
         prepared_datasets.append(prepared_data)
 
     # Create k-folds with per-file minimum training length consideration
