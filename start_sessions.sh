@@ -5,7 +5,7 @@ model="tft"
 start_from_gpu=0
 
 # Use array index directly
-for i in {1..3}; do
+for i in {1..7}; do
     config_suffix="${configs[$i]:-100}"
     gpu_id=$((i+start_from_gpu))
     screen -dmS ${model}_$i bash -c "

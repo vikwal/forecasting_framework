@@ -121,54 +121,34 @@ def main() -> None:
         #if check_params in combinations:
         #    study.tell(trial, state=optuna.trial.TrialState.PRUNED)
         #    continue
-
         logger.info(f"Trial {trial_number}: {json.dumps(hyperparameters)}")
-
         try:
             accuracies = []
-            # Pruning-Konfiguration laden
-            pruning_enabled = config['hpo']['pruning'].get('enabled', False)
-
-            # Berechne bisherige beste Performance für relatives Pruning
-            completed_trials_list = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-            best_value = None
-            if completed_trials_list:
-                best_value = min([t.value for t in completed_trials_list])  # minimieren
-
             for fold_idx, fold in enumerate(combined_kfolds):
                 train, val = fold
                 # config model name relevant for callbacks
                 config['model_name'] = f'hpo_cl_m-{args.model}_out-{output_dim}_freq-{freq}_trial-{trial_number}_fold-{fold_idx}'
-
                 history, _ = tools.training_pipeline(train=train,
                                                      val=val,
                                                      hyperparameters=hyperparameters,
                                                      config=config)
                 fold_accuracy = history.history[config['hpo']['metric']][-1]
                 accuracies.append(fold_accuracy)
-
-                # CRUCIAL: Report intermediate value für MedianPruner
+                # Report intermediate value für MedianPruner
                 trial.report(fold_accuracy, step=fold_idx)
-
                 logging.info(f'Processed fold {fold_idx + 1}/{len(combined_kfolds)}, {config["hpo"]["metric"]}: {fold_accuracy:.4f}')
-
-                # MedianPruner Check (automatisch durch Optuna)
                 if trial.should_prune():
-                    logging.info(f'Trial {trial_number} PRUNED after fold {fold_idx + 1} by MedianPruner')
-                    study.tell(trial, state=optuna.trial.TrialState.PRUNED)
-                    trial_counter += 1
-                    break  # Breche aus der Fold-Schleife aus
-
+                    raise optuna.TrialPruned()
+            else:
+                # Dieser Block wird NUR ausgeführt, wenn die Fold-Schleife NICHT durch break verlassen wurde
                 logging.info(f'Accuracies for the folds: {accuracies}')
                 average_accuracy = sum(accuracies) / len(accuracies)
-
                 study.tell(trial, average_accuracy)
                 completed_trials += 1
                 logging.info(f'Trial {trial_number+1} completed with average {config["hpo"]["metric"]}: {average_accuracy:.4f}')
                 logging.info(f'Progress: {completed_trials}/{config["hpo"]["trials"]} successful trials completed.')
 
         except optuna.TrialPruned:
-            # Wird ausgelöst wenn trial.should_prune() True zurückgibt und eine Exception geworfen wird
             logging.info(f'Trial {trial_number} was pruned by Optuna')
             study.tell(trial, state=optuna.trial.TrialState.PRUNED)
             trial_counter += 1

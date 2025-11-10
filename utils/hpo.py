@@ -270,7 +270,7 @@ def create_or_load_study(path, study_name, direction, pruning_config=None):
     storage = f'sqlite:///{path}'
 
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=15,  # Mehr Random-Trials für robuste TPE-Basis
+        n_startup_trials=10,
         n_ei_candidates=24,   # Mehr Kandidaten für Expected Improvement
         gamma=lambda x: min(int(0.25 * x), 30),  # Kleinerer gamma (25% statt 15%)
         multivariate=True,    # Berücksichtigt Korrelationen zwischen Parametern
