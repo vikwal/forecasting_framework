@@ -127,14 +127,8 @@ hpo:
   kfolds: 12
   min_train_len: 8760 # hours
   val_split: 1
-  # Pruning Konfiguration
-  pruning:
-    enabled: True
-    use_median_pruner: True
-    median_startup_trials: 10
-    median_warmup_steps: 2    # Bei 12-Fold CV: Pruning ab Fold 4
   batch_size: [100, 2000]
-  epochs: [1, 100]
+  epochs: [1, 150]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
   n_rnn_layers: [1, 7]
@@ -151,7 +145,7 @@ hpo:
     dropout: [0.0, 0.8]
   tft:
     lookback: [48, 96, 144, 192]
-    n_heads: [1, 64]
+    n_heads: [1, 16]
     hidden_dim: [16, 350]
     dropout: [0.0, 0.7]
   fl:

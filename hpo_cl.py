@@ -116,11 +116,16 @@ def main() -> None:
         hyperparameters = hpo.get_hyperparameters(config=config,
                                                   hpo=True,
                                                   trial=trial)
-        #combinations = [trial.params for trial in study.trials]
-        #check_params = hyperparameters.copy()
-        #if check_params in combinations:
-        #    study.tell(trial, state=optuna.trial.TrialState.PRUNED)
-        #    continue
+        # Check for duplicate parameters from other trials (including running ones)
+        existing_params = [t.params for t in study.trials]
+        current_params = trial.params
+        # Count how many trials have these exact parameters
+        param_count = sum(1 for params in existing_params if params == current_params)
+        if param_count > 1:  # More than just the current trial
+            logging.info(f"Trial {trial_number}: Duplicate parameters detected (found {param_count} times), marking as failed...")
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            continue  # Kein trial_counter += 1, damit Nummerierung stimmt
+
         logger.info(f"Trial {trial_number}: {json.dumps(hyperparameters)}")
         try:
             accuracies = []

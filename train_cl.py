@@ -23,6 +23,7 @@ def main() -> None:
     parser.add_argument('-c', '--config', type=str, help='Select config')
     parser.add_argument('-i', '--index', type=str, default='', help='Define index')
     args = parser.parse_args()
+    os.makedirs('logs', exist_ok=True)
     index = ''
     if args.index:
         index = f'_{args.index}'
