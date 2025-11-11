@@ -574,9 +574,10 @@ def get_hyperparameters(config: dict,
             hyperparameters['lookback'] = lookback#trial.suggest_categorical('lookback', lookback)
             n_heads_hpo = trial.suggest_int('n_heads', n_heads[0], n_heads[1])
             hyperparameters['n_heads'] = n_heads_hpo
+            minimum_head_dim = 4
             hyperparameters['hidden_dim'] = trial.suggest_int(
                 'hidden_dim',
-                n_heads_hpo,
+                n_heads_hpo * minimum_head_dim, # minimum hidden dim per attention head
                 hidden_dim[1],
                 step=n_heads_hpo
             )
