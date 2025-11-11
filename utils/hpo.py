@@ -275,28 +275,36 @@ def create_or_load_study(path, study_name, direction, pruning_config=None):
         gamma=lambda x: min(int(0.25 * x), 30),  # Kleinerer gamma (25% statt 15%)
         multivariate=True,    # Berücksichtigt Korrelationen zwischen Parametern
         group=True,           # Gruppiert ähnliche Parameter
-        warn_independent_sampling=False,
-        seed=42  # Für Reproduzierbarkeit
+        warn_independent_sampling=False
     )
-
-    # Optionales Median Pruning (automatisches Pruning durch Optuna)
     pruner = None
     if pruning_config and pruning_config.get('use_median_pruner', False):
         pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=pruning_config.get('median_startup_trials', 10),
-            n_warmup_steps=pruning_config.get('median_warmup_steps', 3),
-            interval_steps=1  # Prüfe nach jedem Fold
+            n_startup_trials=pruning_config.get('n_startup_trials', 10),
+            n_warmup_steps=pruning_config.get('n_warmup_steps', 1),
+            interval_steps=pruning_config.get('interval_steps', 1)
         )
-        logging.debug("Using MedianPruner for automatic pruning")
+        logging.debug(f"Using MedianPruner with n_startup_trials={pruner._n_startup_trials}, "
+                     f"n_warmup_steps={pruner._n_warmup_steps}, interval_steps={pruner._interval_steps}")
+    elif pruning_config and pruning_config.get('disable_pruning', False):
+        pruner = optuna.pruners.NopPruner()
+        logging.debug("Using NopPruner (no pruning)")
 
-    study = optuna.create_study(
-        storage=storage,
-        study_name=study_name,
-        direction=direction,
-        load_if_exists=True,
-        sampler=sampler,
-        pruner=pruner
-    )
+    try:
+        existing_study = optuna.load_study(study_name=study_name, storage=storage)
+        if pruner is not None and existing_study:
+            logging.debug(f"Overriding pruner for existing study '{study_name}' (session-only)")
+            existing_study.pruner = pruner
+        study = existing_study
+    except:
+        study = optuna.create_study(
+            storage=storage,
+            study_name=study_name,
+            direction=direction,
+            load_if_exists=False,
+            sampler=sampler,
+            pruner=pruner
+        )
     return study
 
 def load_study(studies_path: str,

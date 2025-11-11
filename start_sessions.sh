@@ -1,11 +1,12 @@
 #!/bin/bash
 # Define list of 5-digit strings for config names
 #configs=("00164" "03362" "03631" "07370")
-model="tft"
+configs=("03631" "07370")
+model="tcn-gru"
 start_from_gpu=0
 
 # Use array index directly
-for i in {0..7}; do
+for i in {0..1}; do
     config_suffix="${configs[$i]:-100}"
     gpu_id=$((i+start_from_gpu))
     screen -dmS ${model}_$i bash -c "

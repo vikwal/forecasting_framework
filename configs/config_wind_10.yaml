@@ -112,6 +112,12 @@ hpo:
   kfolds: 12
   min_train_len: 8760 # hours
   val_split: 1
+  pruning:
+    use_median_pruner: True
+    n_startup_trials: 10
+    n_warmup_steps: 2
+    interval_steps: 1
+    disable_pruning: False
   batch_size: [32, 1024]
   epochs: [1, 50]
   n_layers: [1, 4]

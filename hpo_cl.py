@@ -122,11 +122,10 @@ def main() -> None:
         # Count how many trials have these exact parameters
         param_count = sum(1 for params in existing_params if params == current_params)
         if param_count > 1:  # More than just the current trial
-            logging.info(f"Trial {trial_number}: Duplicate parameters detected (found {param_count} times), marking as failed...")
+            logging.warning(f"Trial number {trial_number}: Duplicate parameters detected (found {param_count} times), marking as failed...")
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
             continue  # Kein trial_counter += 1, damit Nummerierung stimmt
-
-        logger.info(f"Trial {trial_number}: {json.dumps(hyperparameters)}")
+        logging.info(f"Complete trial number {completed_trials+1}: {json.dumps(hyperparameters)}")
         try:
             accuracies = []
             for fold_idx, fold in enumerate(combined_kfolds):
@@ -150,21 +149,21 @@ def main() -> None:
                 average_accuracy = sum(accuracies) / len(accuracies)
                 study.tell(trial, average_accuracy)
                 completed_trials += 1
-                logging.info(f'Trial {trial_number+1} completed with average {config["hpo"]["metric"]}: {average_accuracy:.4f}')
+                logging.info(f'Trial number {trial_number+1} completed with average {config["hpo"]["metric"]}: {average_accuracy:.4f}')
                 logging.info(f'Progress: {completed_trials}/{config["hpo"]["trials"]} successful trials completed.')
 
         except optuna.TrialPruned:
-            logging.info(f'Trial {trial_number} was pruned by Optuna')
+            logging.info(f'Trial number {trial_number+1} was pruned by Optuna')
             study.tell(trial, state=optuna.trial.TrialState.PRUNED)
             trial_counter += 1
 
         except KeyboardInterrupt:
-            logging.warning(f'Trial {trial_number+1} interrupted by user. Marking as failed.')
+            logging.warning(f'Trial number {trial_number+1} interrupted by user. Marking as failed.')
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
             raise
 
         except Exception as e:
-            logging.error(f'Trial {trial_number+1} failed with error: {str(e)}. Marking as failed.')
+            logging.error(f'Trial number {trial_number+1} failed with error: {str(e)}. Marking as failed.')
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
             raise
 
