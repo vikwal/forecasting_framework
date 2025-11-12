@@ -726,7 +726,15 @@ def preprocess_synth_wind_openmeteo(path: str,
     df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
     df.set_index(timestamp_col, inplace=True)
     commissioning_date = wind_parameter.loc[wind_parameter.park_id == park_id]['commissioning_date'].values[0]
-    random.seed(config['params']['random_seed'])
+    if 'random_seeds' not in config['params']:
+        random.seed(config['params']['random_seed'])
+    else:
+        iterator = config['params'].get('iterator', 0)
+        config['params']['iterator'] = iterator
+        random_seed = config['params']['random_seeds'][iterator]
+        config['params']['random_seed'] = random_seed
+        random.seed(random_seed)
+        config['params']['iterator'] = iterator + 1
     if commissioning_date != '-':
         park_age_years = (pd.Timestamp.now() - pd.to_datetime(commissioning_date)).days // 365
     else:

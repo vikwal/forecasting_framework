@@ -16,11 +16,11 @@ data:
 
 params:
   turbines: [
-             'Enercon E-70 E4 2.300',
+             #'Enercon E-70 E4 2.300',
              #'Enercon E-82 E2 2.000',
              #'Enercon E-115 2.500',
              #'Vestas V90',
-             #'Vestas V112-3.45',
+             'Vestas V112-3.45',
              #'Vestas V80-1.8'
             ]
   known_features: [
