@@ -1,0 +1,210 @@
+data:
+  path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
+  files: ['07412', '03631', '03287', '04177', '03513',
+          '00183', '01200', '00198', '00953', '03093',
+          '15813', '05705', '01759', '02961', '00691',
+          '00232', '03196', '00298', '00460', '05404',
+          '03126', '00427', '02171', '01684', '03897',
+          '03015', '07393', '00164', '01346', '00662',
+          '03987', '00282', '00704', '07370', '02928',
+          '05490', '00161', '03668', '05856', '05930',
+          '04642', '05906', '00342', '00591', '01048',
+          '05100', '00596', '04745', '07410', '05397',
+          '05371', '03366', '01605', '03362', '03166',
+          '04104', '02290', '01587', '07395', '01262',
+          '07367', '05440', '04280', '03379', '07369',
+          '15207', '05792', '05426', '03231', '01078',
+          '03158', '05516', '01544', '03761', '01832',
+          '02712', '02044', '02564', '01443', '05349',
+          '04336', '01691', '07403', '03086', '05546',
+          '01766', '01303', '00880', '07396', '03730',
+          '01612', '05142', '00433', '02023', '00096',
+          '03268', '00303', '05158', '00701', '03631']  # Specific client files to load (without .csv extension)
+  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
+  nwp_path: '/mnt/nas/open-meteo/wind'
+  synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  freq: '1h'
+  train_frac: 1
+  val_frac: 0.25 # abs from train_frac
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
+  target_col: 'power'
+  scale_y: False
+  lag_in_col: False
+  n_neighbors: 5
+
+params:
+  turbines: [
+             'Enercon E-70 E4 2.300',
+             'Enercon E-82 E2 2.000',
+             'Enercon E-115 2.500',
+             'Vestas V90',
+             'Vestas V112-3.45',
+             'Vestas V80-1.8'
+            ]
+  known_features: [
+                   #'wind_speed_t1', #'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
+                    #'density_t1',
+                   'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
+                   #'temperature_2m', 'relative_humidity_2m', 'surface_pressure',
+                   'density_10m', 'density_80m', 'density_120m', 'density_180m'
+                   #'relhum_nwp',
+                   #'density_nwp'
+                   ]
+  observed_features: [
+                      #'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
+                      #'wind_speed_10m',
+                      #'wind_speed',
+                      #'wind_speed_t1', 'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
+                      'power'
+                      ] # lag features
+  static_features: [
+    #'park_id',
+    #'rated_power',
+    #'hub_height',
+    #'rotor_diameter',
+    'cut_in',
+    'cut_out',
+    'rated_wind_speed',
+    'park_age',
+    #'installed_capacity'
+  ]
+  aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
+  features_to_pivot: [
+                      'wind_speed_nwp',
+                      #'density_nwp',
+                      #'temperature_nwp',
+                      #'pressure_nwp',
+                      #'relhum_nwp',
+                      ]
+  get_density: True
+  openmeteo:
+    nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
+  turbines_per_park: 1
+  random_seed: 42
+
+model:
+  output_dim: 48
+  lookback: 48
+  horizon: 48
+  step_size: 3
+  batch_size: 4000
+  epochs: 100
+  lr: 0.0005
+  optimizer: 'adam'
+  loss: 'mse'
+  metrics: ['mae', 'rmse', 'r^2']
+  fnn:
+    units: 128
+    n_layers: 2
+  cnn:
+    filters: 64
+    kernel_size: 3
+    n_cnn_layers: 5
+    increase_filters: False
+  rnn:
+    n_rnn_layers: 1
+    units: 64
+    dropout: 0.2
+  attention_heads: 32 # if attention is used in hybrid models
+  tft:
+    n_heads: 6
+    hidden_dim: 120
+    dropout: 0.1
+  callbacks: False
+  save_model: True
+  shuffle: True
+  force_retrain: True
+  parallelize: False
+  lookup_hpo: True
+  verbose: 1
+
+
+hpo:
+  studies_path: '/mnt/nas/optuna_studies.db'
+  metric: 'rmse'
+  trials: 1000
+  kfolds: 12
+  min_train_len: 8760 # hours
+  val_split: 1
+  pruning:
+    use_median_pruner: True
+    n_startup_trials: 10
+    n_warmup_steps: 2
+    interval_steps: 1
+    disable_pruning: False
+  batch_size: [512, 2048]
+  epochs: [1, 150]
+  n_layers: [1, 4]
+  n_cnn_layers: [1, 10]
+  n_rnn_layers: [1, 7]
+  learning_rate: [0.0001, 0.01]
+  attention_heads: [1,64] # if attention is used in hybrid models
+  fnn:
+    units: [32, 256]
+  cnn:
+    filters: [16, 128]
+    kernel_size: [2, 5]
+    increase_filters: False
+  rnn:
+    units: [16, 100]
+    dropout: [0.0, 0.8]
+  tft:
+    lookback: [48, 96, 144, 192]
+    n_heads: [2, 16]
+    hidden_dim: [16, 512]
+    dropout: [0.0, 0.7]
+  fl:
+    strategy: 'fedavg'
+    personalize: False
+    n_rounds: [1,20]
+    server_lr: [0.0001, 0.1]
+    beta_1: [0,1]
+    beta_2: [0,1]
+    tau: [0.0001, 0.1]
+
+eval:
+  results_path: 'results'
+  eval_on_all_test_data: True
+  retrain_interval: 0 # in hours - 0 if no retraining is wanted
+  t_0: 12
+  synth_wind:
+    h1: 10
+    p_s_model: 'huang'
+    v2_method: 'alphaI'
+    karman: 0.4
+    temp_gradient: 0.00649
+    interpol_method: 'polynomial'
+    polynom_grad: 3
+    noise: 0.0
+    annual_degradation: 0.0063
+    apply_ageing: True
+    hourly_resolution: True
+    random_seed: 42
+    turbine_dir: "/mnt/nas/synthetic/wind/power_curves"
+    turbine_power: 'turbine_power.csv'
+    turbine_specs: "turbine_specs.csv"
+    turbine_cp: "turbine_cp.csv"
+    turbine_names: "turbine_names.csv"
+    wind_ages: '/mnt/nas/synthetic/wind/wind_ages.npy'
+  synth_pv:
+    pv_ages: 'data/pv_ages.npy'
+
+fl:
+  clients:
+    clientA: ['synth_00342', 'synth_04928']
+    clientB: ['synth_05158', 'synth_01612']
+    clientC: ['synth_00164']
+  strategy: 'fedavg'
+  n_rounds: 2
+  personalize: False
+  fedopt:
+    server_lr: 0.001
+    beta_1: 0.9
+    beta_2: 0.99
+    tau: 0.001
+  force_retrain: True
+  verbose: True
+  save_history: False
+  num_gpus: 1
+  num_cpus: 11

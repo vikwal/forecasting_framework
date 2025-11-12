@@ -1,5 +1,3 @@
-### WORK IN PROGRESS
-
 import ray
 import time
 import optuna
