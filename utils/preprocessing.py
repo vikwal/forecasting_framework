@@ -1,5 +1,6 @@
 import os
 import random
+import gc
 import pandas as pd
 import numpy as np
 from sklearn.impute import KNNImputer
@@ -105,6 +106,53 @@ def _get_data_from_config_files(config: dict,
     return dfs
 
 
+def process_large_file_chunked(file_path: str,
+                             preprocess_func: callable,
+                             preprocess_kwargs: dict,
+                             chunk_size: int = 50000) -> pd.DataFrame:
+    """
+    Verarbeitet große Dateien in Chunks um RAM-Verbrauch zu reduzieren.
+    """
+    logging.info(f"Processing large file {file_path} in chunks of {chunk_size}")
+
+    # Lese Datei-Info ohne alles zu laden
+    try:
+        # Bestimme Dateigröße
+        file_size = os.path.getsize(file_path)
+        logging.debug(f"File size: {file_size / (1024**3):.2f} GB")
+
+        # Für sehr große Dateien verwende chunked processing
+        if file_size > 100 * 1024 * 1024:  # > 100MB
+            logging.debug(f"Using chunked processing for large file")
+
+            # Lese in Chunks
+            chunk_list = []
+            for chunk in pd.read_csv(file_path, sep=';', chunksize=chunk_size):
+                # Verarbeite jeden Chunk separat
+                preprocess_kwargs['path'] = file_path  # Update path for each chunk
+                processed_chunk = preprocess_func(**preprocess_kwargs, data_chunk=chunk)
+                chunk_list.append(processed_chunk)
+
+                # Explizit freigeben
+                del chunk, processed_chunk
+                gc.collect()
+
+            # Kombiniere Chunks
+            result = pd.concat(chunk_list, ignore_index=True)
+            del chunk_list
+            gc.collect()
+
+            return result
+        else:
+            # Standard processing für kleinere Dateien
+            preprocess_kwargs['path'] = file_path
+            return preprocess_func(**preprocess_kwargs)
+
+    except Exception as e:
+        logging.warning(f"Chunked processing failed: {e}, falling back to standard processing")
+        preprocess_kwargs['path'] = file_path
+        return preprocess_func(**preprocess_kwargs)
+
 def get_data(data_dir: str,
              freq: str,
              config: dict,
@@ -147,8 +195,14 @@ def pipeline(data: pd.DataFrame,
              static_cols: List[str] = None,
              target_col: str = 'power') -> Tuple[Dict, pd.DataFrame]:
     df = data.copy()
+
+    # MEMORY CLEANUP: Delete original data after copying
+    del data
+    gc.collect()
+
     df = knn_imputer(data=df, n_neighbors=config['data']['n_neighbors'])
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+
     if config['model']['name'] == 'tft':
         logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
         prepared_data = prepare_data_for_tft(data=df,
@@ -174,7 +228,11 @@ def pipeline(data: pd.DataFrame,
                                 horizon=config['model']['horizon'],
                                 lag_in_col=config['data']['lag_in_col'],
                                 target_col=new_col)
-                if new_col != target_col and new_col not in all_known_cols: df.drop(new_col, axis=1, inplace=True, errors='ignore')
+                if new_col != target_col and new_col not in all_known_cols:
+                    df.drop(new_col, axis=1, inplace=True, errors='ignore')
+                    # MEMORY CLEANUP: Garbage collect after dropping columns
+                    gc.collect()
+
         logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
         prepared_data = prepare_data(data=df,
                                      output_dim=config['model']['output_dim'],
@@ -185,6 +243,9 @@ def pipeline(data: pd.DataFrame,
                                      test_start=pd.Timestamp(config['data']['test_start'], tz='UTC'),
                                      test_end=pd.Timestamp(config['data']['test_end'], tz='UTC'),
                                      target_col=target_col)
+
+    # MEMORY CLEANUP: Force garbage collection after processing
+    gc.collect()
     return prepared_data, df
 
 
@@ -283,21 +344,62 @@ def lag_features(data: pd.DataFrame,
         )
     return df
 
+def make_windows_efficient(data: np.ndarray,
+                           seq_len: int,
+                           step_size: int = 1,
+                           indices: pd.DatetimeIndex = None,
+                           use_memmap: bool = False) -> np.ndarray:
+    """
+    Memory-effiziente Windowing-Funktion mit optionaler Memory-Mapping.
+    """
+    n_windows = (data.shape[0] - seq_len) // step_size + 1
+
+    if use_memmap and n_windows > 1000:  # Nur bei vielen Fenstern
+        import tempfile
+        # Erstelle temporäre Memory-Mapped Datei
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        temp_file.close()
+
+        # Erstelle Memory-Mapped Array
+        windows_shape = (n_windows, seq_len) + data.shape[1:]
+        windows = np.memmap(temp_file.name, dtype=data.dtype, mode='w+', shape=windows_shape)
+
+        # Fülle Memory-Mapped Array
+        for i, start_idx in enumerate(range(0, data.shape[0] - seq_len + 1, step_size)):
+            windows[i] = data[start_idx:start_idx + seq_len]
+    else:
+        # Standard-Implementierung mit Stride-Tricks für bessere Performance
+        try:
+            from numpy.lib.stride_tricks import sliding_window_view
+            # Moderne NumPy sliding window (verfügbar ab NumPy 1.20.0)
+            windows = sliding_window_view(data, window_shape=seq_len, axis=0)[::step_size]
+        except ImportError:
+            # Fallback auf stride_tricks
+            from numpy.lib.stride_tricks import as_strided
+            windows_shape = (n_windows, seq_len) + data.shape[1:]
+            strides = (data.strides[0] * step_size, data.strides[0]) + data.strides[1:]
+            windows = as_strided(data, shape=windows_shape, strides=strides)
+
+    # Indizierung wie vorher
+    if hasattr(data, 'index') and indices is not None:
+        index = data.index
+        freq = data.index[1] - data.index[0]
+        shifted_index = index
+        shifted_index = shifted_index[:shifted_index.shape[0]-seq_len+1:step_size]
+        mask = np.array([True if i in indices else False for i in shifted_index])
+        windows = windows[mask]
+
+    return windows
+
 def make_windows(data: np.ndarray,
                  seq_len: int,
                  step_size: int = 1,
                  indices: pd.DatetimeIndex = None) -> np.ndarray:
-    windows = np.array([data[i:i + seq_len] for i in range(0,
-                                                           data.shape[0]-seq_len+1,
-                                                           step_size)])
-    if 'index' in dir(data) and indices is not None:
-        index = data.index
-        freq = data.index[1] - data.index[0]
-        shifted_index = index # - freq # laut Gemini ein Bug
-        shifted_index = shifted_index[:shifted_index.shape[0]-seq_len+1]
-        mask = np.array([True if i in indices else False for i in shifted_index])
-        windows = windows[mask]
-    return windows
+    """
+    OPTIMIZED: Memory-effiziente Version der ursprünglichen Funktion.
+    """
+    # Verwende die effiziente Implementierung
+    return make_windows_efficient(data, seq_len, step_size, indices, use_memmap=False)
 
 def apply_scaling(df_train,
                   df_test,
@@ -387,8 +489,14 @@ def prepare_data(data: pd.DataFrame,
 
     X_train = make_windows(data=X_train, seq_len=output_dim, step_size=step_size)
     X_test = make_windows(data=X_test, seq_len=output_dim, step_size=step_size)
+
     y_train = make_windows(data=Y_train, seq_len=output_dim, step_size=step_size).reshape(-1, output_dim)
     y_test = make_windows(data=Y_test, seq_len=output_dim, step_size=step_size).reshape(-1, output_dim)
+
+    # FIXED: Transpose X arrays from (samples, features, time) to (samples, time, features) for Keras
+    X_train = X_train.transpose(0, 2, 1)  # (samples, features, time) -> (samples, time, features)
+    X_test = X_test.transpose(0, 2, 1)    # (samples, features, time) -> (samples, time, features)
+
     if seq2seq:
         y_train = y_train.reshape(-1, output_dim, 1)
         y_test = y_test.reshape(-1, output_dim, 1)

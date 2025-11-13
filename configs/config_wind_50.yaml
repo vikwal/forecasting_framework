@@ -1,5 +1,5 @@
 data:
-  path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
+  path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
   files: ['03086', '03631', '03158', '05100', '01048',
           '05930', '02171', '04336', '15813', '07412',
           '00460', '03987', '03761', '01346', '01612',

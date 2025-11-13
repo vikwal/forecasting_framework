@@ -1,5 +1,5 @@
 data:
-  path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
+  path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
   files: ['07370']  # Specific client files to load (without .csv extension)
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/open-meteo/wind'

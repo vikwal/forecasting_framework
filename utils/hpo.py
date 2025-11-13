@@ -290,11 +290,14 @@ def create_or_load_study(path, study_name, direction, pruning_config=None):
 
     try:
         existing_study = optuna.load_study(study_name=study_name, storage=storage)
+        completed_trials = len([t for t in existing_study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+        logging.info(f"Loaded existing study '{study_name}' with {completed_trials} completed trials.")
         if pruner is not None and existing_study:
             logging.debug(f"Overriding pruner for existing study '{study_name}' (session-only)")
             existing_study.pruner = pruner
         study = existing_study
     except:
+        logging.info(f"Creating new study '{study_name}'.")
         study = optuna.create_study(
             storage=storage,
             study_name=study_name,

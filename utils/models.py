@@ -225,27 +225,27 @@ def _variable_selection_network(x, num_features, hidden_dim, static_context, dro
 
 # --- Einzelne Modell-Builder-Funktionen ---
 
-def build_fnn(n_features: int, output_dim: int, hp: Dict[str, Any]) -> Model:
+def build_fnn(n_features: int, input_seq_len: int, hp: Dict[str, Any]) -> Model:
     """Baut ein Feedforward Neural Network (FNN)."""
     units = hp.get('units', 32)
     n_layers = hp.get('n_layers', 1) # Anzahl der *hidden* Dense Layer
 
-    input_layer = layers.Input(shape=(output_dim, n_features), name='input')
+    input_layer = layers.Input(shape=(input_seq_len, n_features), name='input')
     x = input_layer
     for i in range(n_layers):
          x = layers.Dense(units=units, activation='relu', name=f'dense_{i+1}')(x)
     x = layers.Flatten(name='flatten')(x)
-    output_layer = layers.Dense(output_dim, name='output')(x)
+    output_layer = layers.Dense(input_seq_len, name='output')(x)  # Output same as input seq len
     return Model(inputs=input_layer, outputs=output_layer, name='fnn')
 
-def build_conv1d(n_features: int, output_dim: int, hp: Dict[str, Any], conv_type: str) -> Model:
+def build_conv1d(n_features: int, input_seq_len: int, hp: Dict[str, Any], conv_type: str) -> Model:
     """
     Baut ein einfaches Conv1D-basiertes Modell (CNN oder TCN).
     ERSETZT build_cnn und build_tcn.
 
     Args:
         n_features: Anzahl der Eingabemerkmale.
-        output_dim: Dimension der Ausgabe (Zeitschritte).
+        input_seq_len: Länge der Eingabesequenz (Zeitschritte).
         hp: Dictionary mit Hyperparametern.
         conv_type: Der Typ der Faltung ('cnn' oder 'tcn').
 
@@ -262,7 +262,7 @@ def build_conv1d(n_features: int, output_dim: int, hp: Dict[str, Any], conv_type
     activation = hp.get('activation', 'relu') # Wird an Stack-Builder übergeben
 
     # Baue das Modell
-    input_layer = layers.Input(shape=(output_dim, n_features), name='input')
+    input_layer = layers.Input(shape=(input_seq_len, n_features), name='input')
 
     # Rufe den vereinheitlichten Stack-Builder auf
     conv_output = _build_conv_stack(
@@ -277,14 +277,14 @@ def build_conv1d(n_features: int, output_dim: int, hp: Dict[str, Any], conv_type
     )
 
     x = layers.Flatten(name='flatten')(conv_output)
-    output_layer = layers.Dense(output_dim, name='output')(x)
+    output_layer = layers.Dense(input_seq_len, name='output')(x)  # Output same as input seq len
 
     # Nutze conv_type als Modellnamen
     model = Model(inputs=input_layer, outputs=output_layer, name=conv_type)
     return model
 
 def build_rnn(n_features: int,
-              output_dim: int,
+              input_seq_len: int,
               hp: Dict[str, Any],
               layer_type: Callable,
               bidirectional: bool = False,
@@ -293,14 +293,14 @@ def build_rnn(n_features: int,
     units = hp.get('units', 16)
     n_layers = hp.get('n_rnn_layers', 1)
     dropout = hp.get('dropout', 0)
-    input_layer = layers.Input(shape=(output_dim, n_features), name='input')
+    input_layer = layers.Input(shape=(input_seq_len, n_features), name='input')
     x = _build_rnn_stack(input_layer, layer_type, units, n_layers, dropout, bidirectional=bidirectional, layer_name_prefix=name)
-    output_layer = layers.Dense(output_dim, name='output')(x)
+    output_layer = layers.Dense(input_seq_len, name='output')(x)  # Output same as input seq len
     return Model(inputs=input_layer, outputs=output_layer, name=name)
 
 # --- Hybrid Modell-Builder ---
 
-def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
+def build_cnn_rnn(n_features: int, input_seq_len: int, hp: Dict[str, Any],
                   conv_type: str,
                   rnn_layer_type: Callable,
                   rnn_bidirectional: bool,
@@ -316,7 +316,7 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
     use_attention = hp.get('use_attention', False)
     attention_heads = hp.get('attention_heads', 16)
 
-    input_layer = layers.Input(shape=(output_dim, n_features), name='input')
+    input_layer = layers.Input(shape=(input_seq_len, n_features), name='input')
 
     conv_output = _build_conv_stack(
         input_tensor=input_layer,
@@ -353,14 +353,14 @@ def build_cnn_rnn(n_features: int, output_dim: int, hp: Dict[str, Any],
         x = layers.Flatten()(x) # layers.GlobalMaxPooling1D(name='attention_pooling')(x)
     else:
         x = rnn_output
-    output_layer = layers.Dense(output_dim, name='output')(x)
+    output_layer = layers.Dense(input_seq_len, name='output')(x)  # Output same as input seq len
     model = Model(inputs=input_layer, outputs=output_layer, name=model_name)
     return model
 
 # Special model builders
 
 def build_convlstm1d(n_features: int,
-                     output_dim: int,
+                     input_seq_len: int,
                      hp: Dict[str, Any]) -> Model:
     """
     Baut ein ConvLSTM1D Netzwerk unter Verwendung von _build_convlstm1d_stack.
@@ -376,9 +376,9 @@ def build_convlstm1d(n_features: int,
     increase_filters = hp.get('increase_filters', False) # Standardmäßig keine Erhöhung
 
     # Input Layer
-    input_layer = layers.Input(shape=(output_dim, n_features), name='input')
+    input_layer = layers.Input(shape=(input_seq_len, n_features), name='input')
     # Reshape für ConvLSTM1D
-    reshaped_input = layers.Reshape((output_dim, 1, n_features),
+    reshaped_input = layers.Reshape((input_seq_len, 1, n_features),
                                   name='reshape_for_convlstm1d')(input_layer)
     convlstm_output = _build_convlstm1d_stack(
         input_tensor=reshaped_input,
@@ -391,7 +391,7 @@ def build_convlstm1d(n_features: int,
         layer_name_prefix='convlstm1d'
     )
     x = layers.Flatten(name='flatten')(convlstm_output)
-    output_layer = layers.Dense(output_dim, name='output')(x)
+    output_layer = layers.Dense(input_seq_len, name='output')(x)  # Output same as input seq len
     model_name = f"convlstm1d"
     model = Model(inputs=input_layer, outputs=output_layer, name=model_name)
     return model
@@ -593,6 +593,8 @@ def get_model(config: Dict[str, Any],
 
     output_dim = config['model']['output_dim']
     feature_dim = config['model']['feature_dim']
+
+    # CORRECT: Use feature_dim as number of features, output_dim as sequence length
     model = builder(feature_dim, output_dim, hyperparameters)
 
     # optimizer

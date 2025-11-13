@@ -5,6 +5,7 @@ from typing import Dict, Tuple, Any
 from sklearn.preprocessing import StandardScaler
 import os
 import logging
+import gc
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import tensorflow as tf
@@ -66,6 +67,7 @@ def y_to_df(y: np.ndarray,
 
 def get_feature_dim(X: Any):
     if type(X) == np.ndarray:
+        # Nach Transposition ist die Form (samples, time, features), also feature_dim = X.shape[2]
         feature_dim = X.shape[2]
     # relevant for tft
     elif (len(X) <= 3):
@@ -75,6 +77,38 @@ def get_feature_dim(X: Any):
         feature_dim['static_dim'] = X['static'].shape[-1] if 'static' in X else 0
     return feature_dim
 
+
+def create_tf_dataset_from_arrays(X, y, batch_size, shuffle=True, buffer_size=5000):
+    """
+    Erstellt ein optimiertes tf.data.Dataset mit memory-effizienten Optionen.
+    ALTERNATIVE: Nutze from_tensor_slices für bessere Performance, aber mit reduzierter Buffer-Size
+    """
+    logging.debug(f"Creating TensorFlow dataset with batch_size={batch_size}, shuffle={shuffle}")
+
+    # OPTION 1: Verwende from_tensor_slices (einfacher, aber etwas mehr RAM)
+    if isinstance(X, dict):
+        # TFT case
+        dataset = tf.data.Dataset.from_tensor_slices((X, y))
+    else:
+        # Standard case
+        dataset = tf.data.Dataset.from_tensor_slices((X, y))
+
+    # Optimierte Pipeline
+    if shuffle:
+        # Reduzierte Buffer-Size für weniger RAM-Verbrauch
+        actual_buffer_size = min(len(y), buffer_size)
+        dataset = dataset.shuffle(
+            buffer_size=actual_buffer_size,
+            reshuffle_each_iteration=True
+        )
+        logging.debug(f"Applied shuffling with buffer_size={actual_buffer_size}")
+
+    # Batch und Prefetch
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
+    logging.debug(f"Dataset created successfully")
+    return dataset
 
 def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                       hyperparameters: dict,
@@ -114,17 +148,35 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     else:
         strategy = tf.distribute.get_strategy()  # DefaultStrategy (no distribution)
         logging.debug("Using default strategy (single device)")
+
     with strategy.scope():
         model = models.get_model(config=config, hyperparameters=hyperparameters)
         batch_size = hyperparameters['batch_size']
-        train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-        if config['model']['shuffle']:
-            train_dataset = train_dataset.shuffle(buffer_size=min(len(y_train), 10000), reshuffle_each_iteration=True)
-        train_dataset = train_dataset.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+
+        # MEMORY OPTIMIZED: Use generator-based dataset creation
+        logging.debug("Creating memory-efficient training dataset...")
+        train_dataset = create_tf_dataset_from_arrays(
+            X_train, y_train,
+            batch_size=batch_size,
+            shuffle=config['model']['shuffle'],
+            buffer_size=5000  # Reduziert von 10000 für weniger RAM
+        )
+
         val_dataset = None
         if val:
-            val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-            val_dataset = val_dataset.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+            logging.debug("Creating validation dataset...")
+            val_dataset = create_tf_dataset_from_arrays(
+                X_val, y_val,
+                batch_size=batch_size,
+                shuffle=False  # Validation nicht shuffeln
+            )
+
+        # Explizit freigeben nach Dataset-Erstellung
+        logging.debug("Cleaning up arrays after dataset creation...")
+        del X_train, y_train
+        if val:
+            del X_val, y_val
+        gc.collect()
 
     if config['model']['callbacks']:
         callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model"]["name"]}.keras', save_best_only=True)]
@@ -167,6 +219,169 @@ def concatenate_data(old, new):
         for key, value in old.items():
             result[key] = np.concatenate((value, new[key]))
         return result
+
+def create_data_generator(dfs, config, features):
+    """
+    Generator-basierte Datenverarbeitung für memory-effizientes Training.
+    Lädt und verarbeitet Dateien einzeln, um RAM-Verbrauch zu minimieren.
+    """
+    # Import hier um zirkuläre Imports zu vermeiden
+    from . import preprocessing
+
+    for key, df in dfs.items():
+        logging.debug(f'Processing {key} in generator.')
+        prepared_data, _ = preprocessing.pipeline(
+            data=df,
+            config=config,
+            known_cols=features['known'],
+            observed_cols=features['observed'],
+            static_cols=features['static'],
+            target_col=config['data']['target_col']
+        )
+
+        yield {
+            'key': key,
+            'X_train': prepared_data['X_train'],
+            'y_train': prepared_data['y_train'],
+            'X_test': prepared_data['X_test'],
+            'y_test': prepared_data['y_test'],
+            'index_test': prepared_data['index_test'],
+            'scalers': prepared_data['scalers']
+        }
+
+        # Explizit freigeben
+        del prepared_data
+        del df
+        import gc
+        gc.collect()
+
+def combine_datasets_efficiently(data_generator):
+    """
+    Kombiniert Datasets memory-effizient durch schrittweise Akkumulation.
+    Vermeidet RAM-Verdopplung durch temporäre Arrays.
+    """
+    X_train, y_train = None, None
+    X_test, y_test = None, None
+    test_data = {}
+    total_samples = 0
+
+    for data_dict in data_generator:
+        key = data_dict['key']
+        logging.debug(f'Combining data from {key}')
+
+        # Für Test-Daten: Speichere separat (weniger problematisch wegen kleinerer Größe)
+        test_data[key] = (
+            data_dict['X_test'],
+            data_dict['y_test'],
+            data_dict['index_test'],
+            data_dict['scalers']['y']
+        )
+
+        # Kombiniere auch Test-Daten für globale Auswertung
+        if X_test is None:
+            X_test = data_dict['X_test']
+            y_test = data_dict['y_test']
+        else:
+            # Memory-effizientere Konkatenation für Test-Daten
+            if isinstance(X_test, dict):
+                # TFT case
+                new_X_test = {}
+                for feature_key in X_test.keys():
+                    old_len = X_test[feature_key].shape[0]
+                    new_len = data_dict['X_test'][feature_key].shape[0]
+                    combined_shape = (old_len + new_len,) + X_test[feature_key].shape[1:]
+
+                    combined_array = np.empty(combined_shape, dtype=X_test[feature_key].dtype)
+                    combined_array[:old_len] = X_test[feature_key]
+                    combined_array[old_len:] = data_dict['X_test'][feature_key]
+
+                    new_X_test[feature_key] = combined_array
+
+                del X_test
+                X_test = new_X_test
+            else:
+                # Standard numpy case
+                old_len = X_test.shape[0]
+                new_len = data_dict['X_test'].shape[0]
+                combined_shape = (old_len + new_len,) + X_test.shape[1:]
+
+                combined_X_test = np.empty(combined_shape, dtype=X_test.dtype)
+                combined_X_test[:old_len] = X_test
+                combined_X_test[old_len:] = data_dict['X_test']
+
+                del X_test
+                X_test = combined_X_test
+
+            # Gleiches für y_test
+            old_len = y_test.shape[0]
+            new_len = data_dict['y_test'].shape[0]
+            combined_shape = (old_len + new_len,) + y_test.shape[1:]
+
+            combined_y_test = np.empty(combined_shape, dtype=y_test.dtype)
+            combined_y_test[:old_len] = y_test
+            combined_y_test[old_len:] = data_dict['y_test']
+
+            del y_test
+            y_test = combined_y_test
+
+        # Für Training-Daten: Akkumuliere effizient
+        if X_train is None:
+            X_train = data_dict['X_train']
+            y_train = data_dict['y_train']
+        else:
+            # Memory-effizientere Konkatenation
+            if isinstance(X_train, dict):
+                # TFT case
+                new_X_train = {}
+                for feature_key in X_train.keys():
+                    # Erstelle neues Array direkt in korrekter Größe
+                    old_len = X_train[feature_key].shape[0]
+                    new_len = data_dict['X_train'][feature_key].shape[0]
+                    combined_shape = (old_len + new_len,) + X_train[feature_key].shape[1:]
+
+                    combined_array = np.empty(combined_shape, dtype=X_train[feature_key].dtype)
+                    combined_array[:old_len] = X_train[feature_key]
+                    combined_array[old_len:] = data_dict['X_train'][feature_key]
+
+                    new_X_train[feature_key] = combined_array
+
+                # Explizit alte Arrays freigeben
+                del X_train
+                X_train = new_X_train
+            else:
+                # Standard numpy case
+                old_len = X_train.shape[0]
+                new_len = data_dict['X_train'].shape[0]
+                combined_shape = (old_len + new_len,) + X_train.shape[1:]
+
+                combined_X = np.empty(combined_shape, dtype=X_train.dtype)
+                combined_X[:old_len] = X_train
+                combined_X[old_len:] = data_dict['X_train']
+
+                del X_train  # Explizit freigeben
+                X_train = combined_X
+
+            # Gleiches für y_train
+            old_len = y_train.shape[0]
+            new_len = data_dict['y_train'].shape[0]
+            combined_shape = (old_len + new_len,) + y_train.shape[1:]
+
+            combined_y = np.empty(combined_shape, dtype=y_train.dtype)
+            combined_y[:old_len] = y_train
+            combined_y[old_len:] = data_dict['y_train']
+
+            del y_train  # Explizit freigeben
+            y_train = combined_y
+
+        total_samples += len(data_dict['y_train'])
+        logging.debug(f'Combined data now has {total_samples} samples')
+
+        # Explizit freigeben
+        del data_dict
+        import gc
+        gc.collect()
+
+    return X_train, y_train, X_test, y_test, test_data
 
 def initialize_gpu(use_gpu=None):
     gpus = tf.config.list_physical_devices('GPU')

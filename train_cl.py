@@ -8,6 +8,7 @@ import numpy as np
 import logging
 import pickle
 import optuna
+import gc
 from datetime import datetime
 from tqdm import tqdm
 
@@ -66,36 +67,29 @@ def main() -> None:
         study_name_suffix = f'_{config["data"]["files"][0]}'
     study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}{study_name_suffix}'
     config['model']['name'] = args.model
-    # load and prepare training and test data
+    # load and prepare training and test data - MEMORY OPTIMIZED
     dfs = preprocessing.get_data(data_dir=data_dir,
                                  config=config,
                                  freq=freq,
                                  features=features)
+
+    # Use memory-efficient data processing
+    logging.debug("Starting memory-efficient data processing...")
+    data_generator = tools.create_data_generator(dfs, config, features)
+    X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+
+    # Store evaluation DataFrames before cleaning up memory
+    eval_dfs = dfs.copy()
+
+    # Explizit dfs löschen um Speicher freizugeben
+    del dfs
+    gc.collect()
+    logging.debug("Data processing completed and memory cleaned up.")
+
+    # Initialize results and paths
     results = {}
-    test_data = {}
-    X_train = None
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
     path_to_pkl = os.path.join('results', base_dir, f'{study_name}_{timestamp}.pkl')
-    for key, df in tqdm(dfs.items(), desc='Preparing data'):
-        logging.debug(f'Preprocessing {key}.')
-        prepared_data, dfs[key] = preprocessing.pipeline(data=df,
-                                            config=config,
-                                            known_cols=features['known'],
-                                            observed_cols=features['observed'],
-                                            static_cols=features['static'],
-                                            target_col=config['data']['target_col'])
-        index_test = prepared_data['index_test']
-        scalers = prepared_data['scalers']
-        scaler_y = scalers['y']
-        if X_train is None:
-            X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
-            X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
-        else:
-            X_train = tools.concatenate_data(old=X_train, new=prepared_data['X_train'])
-            X_test = tools.concatenate_data(old=X_test, new=prepared_data['X_test'])
-            y_train = np.concatenate((y_train, prepared_data['y_train']))
-            y_test = np.concatenate((y_test, prepared_data['y_test']))
-        test_data[key] = prepared_data['X_test'], prepared_data['y_test'], prepared_data['index_test'], prepared_data['scalers']['y']
     # log shapes
     if isinstance(X_train, dict):
         if 'known' in X_train:
@@ -144,9 +138,16 @@ def main() -> None:
     logging.info('Start evaluation pipeline.')
     # evaluate the global model on the specific test datasets
     evaluation = pd.DataFrame()
-    for key, df in dfs.items():
+
+    for key in test_data.keys():
+        if key not in eval_dfs:
+            logging.warning(f"Key {key} not found in evaluation data, skipping...")
+            continue
+
         park_id = key.split('.csv')[0][-5:]
         X_test, y_test, index_test, scaler_y = test_data[key]
+        df = eval_dfs[key]
+
         new_evaluation = eval.evaluation_pipeline(data=df,
                                                 model=model,
                                                 model_name=args.model,
@@ -173,6 +174,7 @@ def main() -> None:
             evaluation = new_evaluation
         else:
             evaluation = pd.concat([evaluation, new_evaluation], axis=0)
+
     # save evaluation
     # include last row as column wise average
     evaluation.loc['mean'] = evaluation.mean(numeric_only=True)

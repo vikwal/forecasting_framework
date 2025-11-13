@@ -1,5 +1,5 @@
 data:
-  path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
+  path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
   files: ['00164', '03362', '03631', '07370',
           '02638', '02932', '06163', '07374']  # Specific client files to load (without .csv extension)
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
@@ -70,8 +70,8 @@ model:
   lookback: 48
   horizon: 48
   step_size: 3
-  batch_size: 4000
-  epochs: 100
+  batch_size: 512
+  epochs: 10
   lr: 0.0005
   optimizer: 'adam'
   loss: 'mse'
@@ -98,7 +98,7 @@ model:
   shuffle: True
   force_retrain: True
   parallelize: False
-  lookup_hpo: True
+  lookup_hpo: False
   verbose: 1
 
 
@@ -133,7 +133,7 @@ hpo:
     dropout: [0.0, 0.2]
   tft:
     lookback: [48, 96, 144, 192]
-    n_heads: [1, 64]
+    n_heads: [1, 16]
     hidden_dim: [16, 256]
     dropout: [0.0, 0.5]
   fl:

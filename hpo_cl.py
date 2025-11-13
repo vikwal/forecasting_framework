@@ -1,39 +1,64 @@
 # Hyperparameter optimization for model which is trained on all parks data at once
 
+# Suppress TensorFlow logging for cleaner HPO logs
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress all TF logs
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN warnings
+
 import json
 import argparse
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import logging
+import gc
+
+# Import TensorFlow and disable verbose logging
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
+# Suppress additional TensorFlow info messages
+tf.autograph.set_verbosity(0)
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
 
 import optuna
 
-from utils import preprocessing, tools, hpo
+from utils import preprocessing, tools, hpo, data_cache
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 
 def main() -> None:
     tools.initialize_gpu()
-    logger = logging.getLogger(__name__)
     # argument parser
     parser = argparse.ArgumentParser(description="Hyperparameter Optimization with Tensorflow/Keras")
     parser.add_argument('-m', '--model', type=str, default='fnn', help='Select Model (default: fnn)')
     parser.add_argument('-c', '--config', type=str, help='Select config')
     parser.add_argument('-i', '--index', type=str, default='', help='Define index')
+    parser.add_argument('--no-cache', action='store_true', help='Disable caching for small datasets')
     args = parser.parse_args()
     os.makedirs('logs', exist_ok=True)
     index = ''
     if args.index:
         index = f'_{args.index}'
-    log_file = f'logs/hpo_cl_m-{args.model}{index}.log'
+    log_file = f'logs/hpo_cl_m-{args.model}_c-{args.config}{index}.log'
+
+    # Configure logging with append mode
+    # Clear any existing handlers first
+    logging.getLogger().handlers.clear()
+
     logging.basicConfig(level=logging.INFO,
                 format='%(asctime)s - %(levelname)s - %(message)s',
                 handlers=[
-        logging.FileHandler(log_file),
+        logging.FileHandler(log_file, mode='a'),  # Append mode instead of overwrite
         logging.StreamHandler()
-        ])
+        ],
+        force=True)  # Force reconfiguration of logging
+
+    # Add session separator to distinguish different HPO runs
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 80)
+    logger.info(f"NEW HPO SESSION STARTED - Model: {args.model}, Config: {args.config}")
+    logger.info("=" * 80)
     # create directories
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
@@ -42,6 +67,10 @@ def main() -> None:
     if '.yaml' in args.config:
         args.config = args.config.split('.')[0]
     config = tools.load_config(f'configs/{args.config}.yaml')
+
+    # Override verbose setting to suppress training progress bars in HPO logs
+    config['model']['verbose'] = 0
+
     freq = config['data']['freq']
     params = config['params']
     config = tools.handle_freq(config=config)
@@ -61,10 +90,8 @@ def main() -> None:
     base_dir = os.path.basename(data_dir)
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    study_name_suffix = ''
-    if len(config['data']['files']) == 1:
-        study_name_suffix = f'_{config["data"]["files"][0]}'
-    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}{study_name_suffix}'
+    study_name_suffix = '_'.join(args.config.split('_')[1:3])
+    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
     config['model']['name'] = args.model
 
     # Create study for hyperparameter optimization
@@ -72,42 +99,38 @@ def main() -> None:
     study = hpo.create_or_load_study(config['hpo']['studies_path'], study_name,
                                     direction='minimize', pruning_config=pruning_config)
 
-    # load and prepare training and test data
-    dfs = preprocessing.get_data(data_dir=data_dir,
-                                 config=config,
-                                 freq=freq,
-                                 features=features)
+    # Create or load preprocessed data with caching (MEMORY OPTIMIZED)
+    use_cache = not args.no_cache
+    if use_cache:
+        logging.info("Creating or loading preprocessed data with caching...")
+    else:
+        logging.info("Processing data without caching (small dataset mode)...")
 
-    # Prepare k-folds for cross-validation with per-file minimum training length
-    kfolds = []
-    prepared_datasets = []
-
-    for key, df in tqdm(dfs.items(), desc="Preprocessing data"):
-        logging.debug(f'Preprocessing {key} for HPO.')
-        prepared_data, dfs[key] = preprocessing.pipeline(data=df,
-                                            config=config,
-                                            known_cols=features['known'],
-                                            observed_cols=features['observed'],
-                                            static_cols=features['static'],
-                                            target_col=config['data']['target_col'])
-        prepared_datasets.append(prepared_data)
-
-    # Create k-folds with per-file minimum training length consideration
-    min_train_len = config['hpo'].get('min_train_len', None)
-    step_size = config['model'].get('step_size', 1)
-    combined_kfolds = hpo.kfolds_with_per_file_min_train_len(
-        prepared_datasets=prepared_datasets,
-        n_splits=config['hpo']['kfolds'],
-        val_split=config['hpo']['val_split'],
-        min_train_len=min_train_len,
-        step_size=step_size
+    lazy_fold_loader, cache_id = data_cache.create_or_load_preprocessed_data(
+        config=config,
+        features=features,
+        model_name=args.model,
+        force_reprocess=False,  # Set to True to force reprocessing
+        use_cache=use_cache
     )
+
+    if use_cache:
+        logging.info(f"Using cached data with ID: {cache_id}")
+    else:
+        logging.info("Using data directly from memory (no cache)")
+    logging.info(f"Available folds: {len(lazy_fold_loader)}")
+
+    # Log fold information
+    for i in range(min(3, len(lazy_fold_loader))):  # Show info for first 3 folds
+        fold_info = lazy_fold_loader.get_fold_info(i)
+        logging.info(f"Fold {i}: {fold_info['train_samples']} train, {fold_info['val_samples']} val samples")
 
     # Run hyperparameter optimization
     len_trials = len(study.trials)
     completed_trials = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+    pruned_trials = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
     logging.info(f'Starting HPO with {config["hpo"]["trials"] - completed_trials} new trials.')
-    logging.info(f'Previous trials: {len_trials} total, {completed_trials} completed successfully.')
+    logging.info(f'Previous trials: {len_trials} total, {completed_trials} completed, {pruned_trials} pruned.')
 
     trial_counter = 0
     while completed_trials < config['hpo']['trials']:
@@ -128,7 +151,9 @@ def main() -> None:
         logging.info(f"Complete trial number {completed_trials+1}: {json.dumps(hyperparameters)}")
         try:
             accuracies = []
-            for fold_idx, fold in enumerate(combined_kfolds):
+            for fold_idx in range(len(lazy_fold_loader)):
+                # Load fold on demand (lazy loading)
+                fold = lazy_fold_loader[fold_idx]
                 train, val = fold
                 # config model name relevant for callbacks
                 config['model_name'] = f'hpo_cl_m-{args.model}_out-{output_dim}_freq-{freq}_trial-{trial_number}_fold-{fold_idx}'
@@ -140,7 +165,7 @@ def main() -> None:
                 accuracies.append(fold_accuracy)
                 # Report intermediate value für MedianPruner
                 trial.report(fold_accuracy, step=fold_idx)
-                logging.info(f'Processed fold {fold_idx + 1}/{len(combined_kfolds)}, {config["hpo"]["metric"]}: {fold_accuracy:.4f}')
+                logging.info(f'Processed fold {fold_idx + 1}/{len(lazy_fold_loader)}, {config["hpo"]["metric"]}: {fold_accuracy:.4f}')
                 if trial.should_prune():
                     raise optuna.TrialPruned()
             else:

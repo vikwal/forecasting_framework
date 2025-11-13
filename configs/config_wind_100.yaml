@@ -1,5 +1,5 @@
 data:
-  path: '/mnt/nas/synthetic/wind/wind_hourly_age'  # Base path where client CSV files are located
+  path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
   files: ['07412', '03631', '03287', '04177', '03513',
           '00183', '01200', '00198', '00953', '03093',
           '15813', '05705', '01759', '02961', '00691',
@@ -134,7 +134,7 @@ hpo:
     interval_steps: 1
     disable_pruning: False
   batch_size: [512, 2048]
-  epochs: [1, 150]
+  epochs: [1, 100]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
   n_rnn_layers: [1, 7]
@@ -152,8 +152,8 @@ hpo:
   tft:
     lookback: [48, 96, 144, 192]
     n_heads: [2, 16]
-    hidden_dim: [16, 512]
-    dropout: [0.0, 0.7]
+    hidden_dim: [16, 256]
+    dropout: [0.0, 0.5]
   fl:
     strategy: 'fedavg'
     personalize: False
