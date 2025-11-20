@@ -15,8 +15,8 @@ export TF_CPP_MIN_LOG_LEVEL=3
 export TF_ENABLE_ONEDNN_OPTS=0
 
 # Default values
-GPUS="1,2,3,4,5,6,7"  # GPUs 1-7 (excluding 0 which might be in use)
-TRIALS_PER_GPU=10
+GPUS="0"  # GPUs 1-7 (excluding 0 which might be in use)
+TRIALS_PER_GPU=1000
 FORCE_PREPROCESS=false
 CACHE_DIR="data_cache"
 USE_CACHE=true  # New: Enable/disable caching

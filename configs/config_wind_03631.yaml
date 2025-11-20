@@ -115,20 +115,20 @@ hpo:
     interval_steps: 1
     disable_pruning: False
   batch_size: [32, 512]
-  epochs: [1, 100]
+  epochs: [1, 150]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
-  n_rnn_layers: [1, 7]
+  n_rnn_layers: [1, 10]
   learning_rate: [0.0001, 0.01]
   attention_heads: [1,64] # if attention is used in hybrid models
   fnn:
     units: [32, 256]
   cnn:
-    filters: [16, 150]
-    kernel_size: [2, 5]
+    filters: [16, 200]
+    kernel_size: [2, 7]
     increase_filters: False
   rnn:
-    units: [16, 100]
+    units: [16, 128]
     dropout: [0.0, 0.2]
   tft:
     lookback: [48, 96, 144, 192]

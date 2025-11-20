@@ -133,8 +133,8 @@ hpo:
     n_warmup_steps: 2
     interval_steps: 1
     disable_pruning: False
-  batch_size: [512, 2048]
-  epochs: [1, 100]
+  batch_size: [128, 2048]
+  epochs: [1, 150]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
   n_rnn_layers: [1, 7]
@@ -152,7 +152,7 @@ hpo:
   tft:
     lookback: [48, 96, 144, 192]
     n_heads: [2, 16]
-    hidden_dim: [16, 256]
+    hidden_dim: [16, 512]
     dropout: [0.0, 0.5]
   fl:
     strategy: 'fedavg'
