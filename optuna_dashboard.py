@@ -71,18 +71,148 @@ def get_available_studies(studies_dir="./data"):
 
     return study_info
 
+def load_optuna_studie(study_file_path, study_name=None, readonly=True):
+    """
+    Lädt eine einzelne Optuna Study in read-only Modus
+
+    Args:
+        study_file_path: Pfad zur .db Datei
+        study_name: Name der Study (optional, lädt erste verfügbare wenn None)
+        readonly: Ob read-only Modus verwendet werden soll (Standard: True)
+
+    Returns:
+        study: Optuna Study object or None on error
+    """
+    try:
+        if readonly:
+            # Read-only Zugriff über URL Parameter
+            storage_url = f"sqlite:///{study_file_path}?mode=ro"
+            storage = RDBStorage(url=storage_url)
+        else:
+            # Standard Zugriff (nicht empfohlen für Dashboard)
+            storage = RDBStorage(url=f"sqlite:///{study_file_path}")
+
+        # Verfügbare Studies abrufen
+        study_summaries = optuna.get_all_study_summaries(storage=storage)
+
+        if not study_summaries:
+            st.warning(f"No studies found in {study_file_path}")
+            return None
+
+        # Study Name bestimmen
+        if study_name is None:
+            study_name = study_summaries[0].study_name
+        elif study_name not in [s.study_name for s in study_summaries]:
+            available_names = [s.study_name for s in study_summaries]
+            st.error(f"Study '{study_name}' nicht gefunden. Verfügbare Studies: {available_names}")
+            return None
+
+        # Study im read-only Modus laden
+        study = optuna.load_study(study_name=study_name, storage=storage)
+
+        return study
+
+    except Exception as e:
+        st.error(f"Error loading study: {str(e)}")
+        return None
+
+def load_all_optuna_studies(studies_dir):
+    """Lädt alle Optuna Study-Dateien (Session State basiert, kein Streamlit Cache mehr)"""
+    all_results = {}
+    all_studies = {}
+
+    available_studies = get_available_studies(studies_dir=studies_dir)
+
+    for study_info in available_studies:
+        study_file_path = study_info['file_path']
+        study_key = study_info['name']
+
+        try:
+            # Read-only Zugriff
+            storage = RDBStorage(url=f"sqlite:///{study_file_path}?mode=ro")
+            study_summaries = optuna.get_all_study_summaries(storage=storage)
+
+            if not study_summaries:
+                continue
+
+            study_names = [summary.study_name for summary in study_summaries]
+            studies = [optuna.load_study(study_name=study_name, storage=RDBStorage(url=f"sqlite:///{study_file_path}?mode=ro"))
+                      for study_name in study_names]
+
+            # Process data wie in der ursprünglichen load_optuna_data Funktion
+            entries = []
+            for study in studies:
+                completed_trials = [trial for trial in study.trials
+                                  if trial.value is not None and trial.state == optuna.trial.TrialState.COMPLETE]
+                pruned_trials = [trial for trial in study.trials
+                               if trial.state == optuna.trial.TrialState.PRUNED]
+
+                study_name = study.study_name
+                study_setting = study_name[0:2] if len(study_name) > 2 else "NA"
+
+                # Regex for various parameters
+                model_match = re.search(r'_m-([^_]+)', study_name)
+                model_type = model_match.group(1) if model_match else "Unknown"
+
+                out_match = re.search(r'_out-([^_]+)', study_name)
+                out_type = out_match.group(1) if out_match else "Unknown"
+
+                freq_match = re.search(r'_freq-([^_]+)', study_name)
+                freq_type = freq_match.group(1) if freq_match else "Unknown"
+
+                additional = None
+                try:
+                    best_value = study.best_trial.value if study.best_trial else None
+                    best_params = study.best_trial.params if study.best_trial else {}
+                except (ValueError, AttributeError):
+                    best_value = None
+                    best_params = {}
+
+                if len(study_name.split('_')) > 4:
+                    additional = study_name.split('_')[-1]
+
+                entry = {
+                    'study_name': study.study_name,
+                    'model': model_type,
+                    'setting': study_setting,
+                    'output_type': out_type,
+                    'frequency': freq_type,
+                    'additional': additional,
+                    'n_trials': len(study.trials),
+                    'n_completed_trials': len(completed_trials),
+                    'n_pruned_trials': len(pruned_trials),
+                    'best_value': round(best_value, 4) if best_value is not None else None,
+                    'best_params': best_params,
+                    'last_trial_time': max([trial.datetime_complete for trial in completed_trials
+                                          if trial.datetime_complete], default=None),
+                    'study_file': study_key  # Hinzugefügt für Filtering
+                }
+                entries.append(entry)
+
+            if entries:
+                all_results[study_key] = pd.DataFrame(entries)
+                all_studies[study_key] = studies
+
+        except Exception as e:
+            st.warning(f"Error loading {study_key}: {str(e)}")
+            continue
+
+    return all_results, all_studies
+
 @st.cache_data(ttl=30)  # Cache for 30 seconds
 def load_optuna_data(study_file_path):
-    """Loads a single Optuna study file and prepares the data"""
+    """Legacy function - verwendet für Kompatibilität"""
     try:
-        storage = RDBStorage(url=f"sqlite:///{study_file_path}")
+        # Sicherstellen dass die Datei im read-only Modus geöffnet wird
+        storage = RDBStorage(url=f"sqlite:///{study_file_path}?mode=ro")
         study_summaries = optuna.get_all_study_summaries(storage=storage)
 
         if not study_summaries:
             return None, None
 
         study_names = [summary.study_name for summary in study_summaries]
-        studies = [optuna.load_study(study_name=study_name, storage=f"sqlite:///{study_file_path}")
+        # Explizit read-only Storage für jede Study verwenden
+        studies = [optuna.load_study(study_name=study_name, storage=RDBStorage(url=f"sqlite:///{study_file_path}?mode=ro"))
                   for study_name in study_names]
 
         entries = []
@@ -141,7 +271,7 @@ def load_optuna_data(study_file_path):
         return None, None
 
 def create_progress_plot(study, study_name):
-    """Creates a Plotly progress plot for a study"""
+    """Creates a Plotly progress plot for a study (only completed trials)"""
     trials = [trial for trial in study.trials
               if trial.value is not None and trial.state == optuna.trial.TrialState.COMPLETE]
 
@@ -150,7 +280,8 @@ def create_progress_plot(study, study_name):
 
     sorted_by_number = sorted(trials, key=lambda x: x.number)
     progress = [trial.value for trial in sorted_by_number]
-    trial_numbers = [trial.number for trial in sorted_by_number]
+    # Use consecutive numbering for completed trials only (1, 2, 3, ...)
+    trial_numbers = list(range(1, len(sorted_by_number) + 1))
 
     # Linear regression for trend
     x = np.arange(len(progress)).reshape(-1, 1)
@@ -165,10 +296,11 @@ def create_progress_plot(study, study_name):
     fig.add_trace(go.Scatter(
         x=trial_numbers,
         y=progress,
-        mode='lines+markers',
+        mode='lines',
         name='HPO Progress',
         line=dict(color='#1f77b4', width=2),
-        marker=dict(size=6)
+        customdata=[f"Original Trial #{trial.number}" for trial in sorted_by_number],
+        hovertemplate='Completed Trial: %{x}<br>Value: %{y:.6f}<br>%{customdata}<extra></extra>'
     ))
 
     # Trend Line
@@ -181,8 +313,8 @@ def create_progress_plot(study, study_name):
     ))
 
     fig.update_layout(
-        title=f'HPO Progress: {study_name}',
-        xaxis_title='Trial Number',
+        title=f'HPO Progress: {study_name} ({len(trials)} completed trials)',
+        xaxis_title='Completed Trial Number',
         yaxis_title='Objective Value',
         height=400,
         showlegend=True
@@ -286,7 +418,7 @@ def get_all_parameters_from_studies(studies):
     return sorted(list(all_params))
 
 def create_progress_plot_with_parameters(study, study_name, selected_params=None):
-    """Creates a progress plot with optional parameter visualization"""
+    """Creates a progress plot with optional parameter visualization (only completed trials)"""
     trials = [trial for trial in study.trials
               if trial.value is not None and trial.state == optuna.trial.TrialState.COMPLETE]
 
@@ -295,7 +427,8 @@ def create_progress_plot_with_parameters(study, study_name, selected_params=None
 
     sorted_by_number = sorted(trials, key=lambda x: x.number)
     progress = [trial.value for trial in sorted_by_number]
-    trial_numbers = [trial.number for trial in sorted_by_number]
+    # Use consecutive numbering for completed trials only (1, 2, 3, ...)
+    trial_numbers = list(range(1, len(sorted_by_number) + 1))
 
     # Linear regression for trend
     x = np.arange(len(progress)).reshape(-1, 1)
@@ -308,7 +441,7 @@ def create_progress_plot_with_parameters(study, study_name, selected_params=None
     if selected_params and len(selected_params) == 1:
         fig = make_subplots(
             specs=[[{"secondary_y": True}]],
-            subplot_titles=[f'HPO Progress: {study_name}']
+            subplot_titles=[f'HPO Progress: {study_name} ({len(trials)} completed trials)']
         )
     else:
         fig = go.Figure()
@@ -320,7 +453,9 @@ def create_progress_plot_with_parameters(study, study_name, selected_params=None
             y=progress,
             mode='lines',  # Entferne 'markers'
             name='HPO Progress',
-            line=dict(color='#1f77b4', width=2)
+            line=dict(color='#1f77b4', width=2),
+            customdata=[f"Original Trial #{trial.number}" for trial in sorted_by_number],
+            hovertemplate='Completed Trial: %{x}<br>Value: %{y:.6f}<br>%{customdata}<extra></extra>'
         )
     )
 
@@ -344,10 +479,11 @@ def create_progress_plot_with_parameters(study, study_name, selected_params=None
             param_values = []
             param_trial_numbers = []
 
-            for trial in sorted_by_number:
+            # Map parameter values to consecutive completed trial numbers
+            for i, trial in enumerate(sorted_by_number):
                 if param in trial.params:
                     param_values.append(trial.params[param])
-                    param_trial_numbers.append(trial.number)
+                    param_trial_numbers.append(i + 1)  # Use consecutive numbering
 
             if param_values:
                 color = color_palette.get(param, '#808080')  # Default gray if not in palette
@@ -388,13 +524,35 @@ def create_progress_plot_with_parameters(study, study_name, selected_params=None
                                 name=f'{param} (normalized)',
                                 marker=dict(color=color, size=8, symbol=symbol),
                                 customdata=param_values,
+                                hovertemplate=f'{param}: %{{customdata}}<br>Completed Trial: %{{x}}<extra></extra>'
+                            )
+                        )
+
+                        if param_max != param_min:
+                            normalized_values = [
+                                progress_min + (val - param_min) / (param_max - param_min) * (progress_max - progress_min)
+                                for val in param_values
+                            ]
+                        else:
+                            normalized_values = [progress_min] * len(param_values)
+
+                        fig.add_trace(
+                            go.Scatter(
+                                x=param_trial_numbers,
+                                y=normalized_values,
+                                mode='markers',
+                                name=f'{param} (normalized)',
+                                marker=dict(color=color, size=8, symbol=symbol),
+                                customdata=param_values,
                                 hovertemplate=f'{param}: %{{customdata}}<br>Trial: %{{x}}<extra></extra>'
                             )
-                        )    # Update layout
+                        )
+
+    # Update layout
     if selected_params and len(selected_params) == 1:
         fig.update_layout(
-            title=f'HPO Progress with {selected_params[0]}: {study_name}',
-            xaxis_title='Trial Number',
+            title=f'HPO Progress with {selected_params[0]}: {study_name} ({len(trials)} completed trials)',
+            xaxis_title='Completed Trial Number',
             height=400,
             showlegend=True
         )
@@ -402,8 +560,8 @@ def create_progress_plot_with_parameters(study, study_name, selected_params=None
         fig.update_yaxes(title_text=selected_params[0], secondary_y=True)
     else:
         fig.update_layout(
-            title=f'HPO Progress: {study_name}',
-            xaxis_title='Trial Number',
+            title=f'HPO Progress: {study_name} ({len(trials)} completed trials)',
+            xaxis_title='Completed Trial Number',
             yaxis_title='Objective Value',
             height=400,
             showlegend=True
@@ -457,60 +615,93 @@ def create_model_performance_plot(results_df):
 def main():
     st.markdown('<h1 class="main-header">🔬 Optuna HPO Dashboard</h1>', unsafe_allow_html=True)
 
+    # URL-Parameter für persistente Navigation
+    query_params = st.query_params
+
     # Session State initialisieren um Tab-Zustand zu erhalten
     if 'active_tab' not in st.session_state:
-        st.session_state.active_tab = 0
+        # Versuche Tab aus URL-Parametern zu laden
+        tab_param = query_params.get('tab', ['0'])[0] if isinstance(query_params.get('tab', ['0']), list) else query_params.get('tab', '0')
+        try:
+            st.session_state.active_tab = int(tab_param)
+        except (ValueError, TypeError):
+            st.session_state.active_tab = 0
 
-    # Session State für Selektoren initialisieren
+    # Session State für Selektoren und Caching initialisieren
     if 'current_study' not in st.session_state:
         st.session_state.current_study = None
     if 'selected_params' not in st.session_state:
         st.session_state.selected_params = []
+    if 'last_refresh_time' not in st.session_state:
+        st.session_state.last_refresh_time = 0
+    # Neues Session State für gecachte Study-Daten
+    if 'cached_studies_data' not in st.session_state:
+        st.session_state.cached_studies_data = None
+    if 'cached_available_studies' not in st.session_state:
+        st.session_state.cached_available_studies = None
 
-    # Sidebar für Konfiguration
-    st.sidebar.header("⚙️ Konfiguration")
+    # Sidebar for configuration
+    st.sidebar.header("⚙️ Configuration")
 
-    studies_dir = "./data"
+    studies_dir = "/mnt/nas/optuna_studies"
 
-    # Lade verfügbare Studies
-    available_studies = get_available_studies(studies_dir=studies_dir)
+    # UI elements for refresh control
+    auto_refresh = st.sidebar.checkbox("Auto Refresh (5min)", value=True)
+    refresh_button = st.sidebar.button("🔄 Manual Refresh")
+
+    # Determine if reload is needed (define EARLY!)
+    current_time = time.time()
+    force_reload = refresh_button or (auto_refresh and current_time - st.session_state.last_refresh_time > 300)  # 5 minutes
+
+    # Lade verfügbare Studies nur einmal oder bei Refresh
+    if st.session_state.cached_available_studies is None or force_reload:
+        available_studies = get_available_studies(studies_dir=studies_dir)
+        st.session_state.cached_available_studies = available_studies
+    else:
+        available_studies = st.session_state.cached_available_studies
 
     if not available_studies:
-        st.sidebar.error(f"Keine Study-Dateien in {studies_dir} gefunden!")
-        st.error(f"Keine Study-Dateien gefunden! Stelle sicher, dass sich .db Dateien in {studies_dir} befinden.")
+        st.sidebar.error(f"No study files found in {studies_dir}!")
+        st.error(f"No study files found! Make sure .db files are in {studies_dir}.")
         st.stop()
 
-    # Study Selector
-    study_options = [study['name'] for study in available_studies]
+    # Lade Study-Daten nur bei Bedarf (einmal pro Session oder bei Refresh)
+    if st.session_state.cached_studies_data is None or force_reload:
+        if force_reload:
+            st.session_state.last_refresh_time = current_time
+
+        # Show loading status
+        with st.spinner('Loading Optuna Studies...'):
+            all_results_dict, all_studies_dict = load_all_optuna_studies(studies_dir)
+
+        # Store in Session State for all tabs
+        st.session_state.cached_studies_data = (all_results_dict, all_studies_dict)
+
+        if not all_results_dict:
+            st.error("No Optuna Studies found or error loading!")
+            st.stop()
+    else:
+        # Use cached data (instant!)
+        all_results_dict, all_studies_dict = st.session_state.cached_studies_data    # Study Selector
+    study_options = list(all_results_dict.keys())
     selected_study_name = st.sidebar.selectbox(
         "📊 Select Study:",
         options=study_options,
         index=0
     )
 
-    # Finde die ausgewählte Study
+    # Aktuelle Study-Daten abrufen (bereits geladen!)
+    results_df = all_results_dict[selected_study_name]
+    studies = all_studies_dict[selected_study_name]
+
+    # Info über ausgewählte Study und Cache-Status
     selected_study = next(study for study in available_studies if study['name'] == selected_study_name)
-    study_file_path = selected_study['file_path']
+    st.sidebar.info(f"📁 File: {selected_study['filename']}")
 
-    # Info über ausgewählte Study
-    st.sidebar.info(f"📁 Datei: {selected_study['filename']}")
-
-    auto_refresh = st.sidebar.checkbox("Auto Refresh (30s)", value=True)
-    refresh_button = st.sidebar.button("🔄 Manuell Aktualisieren")    # Info Box
-
-    # Daten laden
-    if refresh_button or auto_refresh:
-        results_df, studies = load_optuna_data(study_file_path)
-    else:
-        results_df, studies = load_optuna_data(study_file_path)
-
-    if results_df is None:
-        st.error(f"Keine Optuna Studies in {selected_study['filename']} gefunden oder Fehler beim Laden!")
-        st.stop()    # Header Metriken
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric("📊 Aktive Studies", len(results_df))
+        st.metric("📊 Active Studies", len(results_df))
 
     with col2:
         total_trials = results_df['n_trials'].sum()
@@ -524,22 +715,42 @@ def main():
         best_overall = results_df['best_value'].min() if not results_df['best_value'].isna().all() else "N/A"
         st.metric("🏆 Best Overall Value", f"{best_overall:.4f}" if best_overall != "N/A" else "N/A")
 
-    # Tabs for different views - mit Session State Key für Persistenz
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Study Overview", "🔄 Progress Tracking", "🏆 Best Trials", "📊 Comparison"])
+    # Custom Tab Navigation mit Session State
+    tab_names = ["📈 Study Overview", "🔄 Progress Tracking", "🏆 Best Trials", "📊 Comparison"]
 
-    with tab1:
+    # Tab-Navigation Buttons
+    col1, col2, col3, col4 = st.columns(4)
+    tab_columns = [col1, col2, col3, col4]
+
+    for i, (col, tab_name) in enumerate(zip(tab_columns, tab_names)):
+        with col:
+            if st.button(tab_name, key=f"tab_{i}",
+                        type="primary" if st.session_state.active_tab == i else "secondary",
+                        use_container_width=True):
+                st.session_state.active_tab = i
+                # Update URL parameter
+                st.query_params.tab = str(i)
+                st.rerun()
+
+    st.markdown("---")
+
+    # Tab Content basierend auf active_tab
+    if st.session_state.active_tab == 0:
+        # Tab 1: Study Overview
         st.subheader("Study Overview")
 
-        # Filter
+        # Filter - verwende unique keys
         col1, col2 = st.columns(2)
         with col1:
             model_filter = st.multiselect("Filter by Model:",
                                         options=results_df['model'].unique(),
-                                        default=results_df['model'].unique())
+                                        default=results_df['model'].unique(),
+                                        key="model_filter_tab1")
         with col2:
             setting_filter = st.multiselect("Filter by Setting:",
                                           options=results_df['setting'].unique(),
-                                          default=results_df['setting'].unique())
+                                          default=results_df['setting'].unique(),
+                                          key="setting_filter_tab1")
 
         # Filtered data
         filtered_df = results_df[
@@ -547,12 +758,15 @@ def main():
             (results_df['setting'].isin(setting_filter))
         ]
 
-        # Display table
+        # Display table (fully expanded, no scrolling)
         display_columns = ['study_name', 'model', 'setting', 'n_trials', 'n_completed_trials',
                           'n_pruned_trials', 'best_value']
-        st.dataframe(filtered_df[display_columns])
 
-    with tab2:
+        # Use st.table for compact display without scrolling
+        st.table(filtered_df[display_columns])
+
+    elif st.session_state.active_tab == 1:
+        # Tab 2: Progress Tracking
         st.subheader("Progress Tracking")
 
         if studies:
@@ -562,30 +776,31 @@ def main():
             with col1:
                 study_names = [study.study_name for study in studies]
 
+                # Initialize selected_studies BEFORE the conditionals
+                selected_studies = []
+
                 # Use container for vertical display with improved presentation
                 with st.container():
                     if len(study_names) <= 5:
                         # For few studies: Checkboxes for better visibility
-                        selected_studies = []
                         for study_name in study_names:
                             # Use full names without truncation
                             if st.checkbox(
                                 study_name,
                                 value=True,
-                                key=f"study_{study_name}"
+                                key=f"study_{study_name}_tab2"
                             ):
                                 selected_studies.append(study_name)
                     else:
                         # For many studies: Use expandable section for full name display
                         with st.expander("📋 Study Selection (click to expand)", expanded=False):
-                            selected_studies = []
                             for i, study_name in enumerate(study_names):
                                 col_left, col_right = st.columns([0.1, 0.9])
                                 with col_left:
                                     selected = st.checkbox(
                                         "Select study",
                                         value=i < 3,  # Default first 3 selected
-                                        key=f"select_{study_name}",
+                                        key=f"select_{study_name}_tab2",
                                         label_visibility="collapsed"
                                     )
                                 with col_right:
@@ -607,33 +822,35 @@ def main():
                 # Filter Session State parameters to keep only available ones
                 valid_cached_params = [param for param in st.session_state.selected_params if param in all_params]
 
+                # Initialize selected_params BEFORE the conditionals
+                selected_params = []
+
                 # Use container for consistent styling
                 with st.container():
-
                     if len(all_params) <= 8:
                         # For few parameters: Direct checkboxes
-                        selected_params = []
                         for param in all_params:
                             if st.checkbox(
                                 param,
                                 value=param in valid_cached_params,
-                                key=f"param_{param}"
+                                key=f"param_{param}_tab2"
                             ):
                                 selected_params.append(param)
                     else:
                         # For many parameters: Use expandable section
                         with st.expander("⚙️ Parameter Selection (click to expand)", expanded=False):
-                            selected_params = []
                             for param in all_params:
                                 if st.checkbox(
                                     param,
                                     value=param in valid_cached_params,
-                                    key=f"param_exp_{param}"
+                                    key=f"param_exp_{param}_tab2"
                                 ):
                                     selected_params.append(param)
 
                 # Update Session State with valid parameters
-                st.session_state.selected_params = selected_params            # Show parameter info
+                st.session_state.selected_params = selected_params
+
+            # Show parameter info
             if selected_params:
                 if len(selected_params) == 1:
                     st.info(f"📊 Showing {selected_params[0]} on secondary y-axis")
@@ -656,29 +873,64 @@ def main():
                             if improvement:
                                 st.info(f"💡 Improvement per trial: {improvement:.6f}")
 
-    with tab3:
+    elif st.session_state.active_tab == 2:
+        # Tab 3: Best Trials Analysis
         st.subheader("Best Trials Analysis")
 
-        for i, study in enumerate(studies):
-            with st.expander(f"🎯 {study.study_name}"):
-                try:
-                    if study.best_trial:
-                        col1, col2 = st.columns(2)
+        # Prüfe ob studies verfügbar ist
+        if studies is None or len(studies) == 0:
+            st.warning("⚠️ No studies available. Please select a study file first.")
+        else:
+            for i, study in enumerate(studies):
+                with st.expander(f"🎯 {study.study_name}"):
+                    try:
+                        # Prüfe ob die Study Trials hat
+                        if not hasattr(study, 'trials') or len(study.trials) == 0:
+                            st.info("ℹ️ No trials found in this study.")
+                            continue
 
-                        with col1:
-                            st.write("**Best Value:**")
-                            st.write(f"{study.best_trial.value:.6f}")
+                        # Prüfe ob es completed trials gibt
+                        completed_trials = [trial for trial in study.trials
+                                          if trial.value is not None and trial.state == optuna.trial.TrialState.COMPLETE]
 
-                        with col2:
-                            st.write("**Best Parameters:**")
-                            for key, value in study.best_trial.params.items():
-                                st.write(f"• {key}: {value}")
-                    else:
-                        st.write("No best trial available yet.")
-                except:
-                    st.write("Error loading best trial.")
+                        if len(completed_trials) == 0:
+                            st.info("ℹ️ No completed trials in this study yet.")
+                            continue
 
-    with tab4:
+                        # Versuche best_trial zu laden
+                        best_trial = None
+                        try:
+                            best_trial = study.best_trial
+                        except (ValueError, AttributeError) as e:
+                            st.warning(f"⚠️ Could not load best_trial: {str(e)}")
+
+                        if best_trial:
+                            col1, col2 = st.columns(2)
+
+                            with col1:
+                                st.write("**Best Value:**")
+                                if hasattr(best_trial, 'value') and best_trial.value is not None:
+                                    st.write(f"{best_trial.value:.6f}")
+                                else:
+                                    st.write("N/A")
+
+                            with col2:
+                                st.write("**Best Parameters:**")
+                                if hasattr(best_trial, 'params') and best_trial.params:
+                                    for key, value in best_trial.params.items():
+                                        st.write(f"• {key}: {value}")
+                                else:
+                                    st.write("No parameters available")
+                        else:
+                            st.info("ℹ️ No best_trial available - possibly all trials are still in progress.")
+
+                    except Exception as e:
+                        st.error(f"❌ Error loading study {study.study_name}: {str(e)}")
+                        st.write("Details:")
+                        st.code(f"Error type: {type(e).__name__}\nError message: {str(e)}")
+
+    elif st.session_state.active_tab == 3:
+        # Tab 4: Study Comparison
         st.subheader("Study Comparison")
 
         # Scatter Plot
@@ -691,14 +943,20 @@ def main():
         if performance_fig:
             st.plotly_chart(performance_fig, width='stretch')
 
-    # Auto Refresh
-    if auto_refresh:
-        time.sleep(30)
+    # Auto Refresh - only when needed
+    if auto_refresh and current_time - st.session_state.last_refresh_time > 300:  # 5 minutes
+        time.sleep(5)  # Short pause before refresh
         st.rerun()
 
     # Footer
     st.markdown("---")
-    st.markdown(f"**Last Update:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Last Update:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    with col2:
+        next_refresh = 300 - (current_time - st.session_state.last_refresh_time)  # 5 minutes
+        if auto_refresh and next_refresh > 0:
+            st.markdown(f"**Next Refresh:** {int(next_refresh/60)}min {int(next_refresh%60)}s")
 
 if __name__ == "__main__":
     main()
