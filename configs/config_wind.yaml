@@ -1,10 +1,19 @@
 data:
   path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
-  files: ['00164', '03362', '03631', '07370',
-          '02638', '02932', '06163', '07374']  # Specific client files to load (without .csv extension)
+  files: ['03086' , '03631', '03158', '05100', '01048'] #,
+          # '05930', '02171', '04336', '15813', '07412',
+          # '00460', '03987', '03761', '01346', '01612',
+          # '03513', '02044', '02564', '01759', '00282',
+          # '04104', '07396', '07393', '00342', '01078',
+          # '00232', '04642', '00164', '03093', '01544',
+          # '05705', '04745', '01766', '07370', '02023',
+          # '00183', '05792', '15207', '05490', '03196',
+          # '05397', '02928', '00198', '03268', '00303',
+          # '05404', '01691', '03015', '03362', '02961']  # Specific client files to load (without .csv extension)
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
-  nwp_path: '/mnt/nas/open-meteo/wind'
+  nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
   synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  stations_master: '/home/viktorwalter/Work/DWD/data/stations_list.csv'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
@@ -25,54 +34,41 @@ params:
              'Vestas V80-1.8'
             ]
   known_features: [
-                   #'wind_speed_t1', #'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
-                    #'density_t1',
-                   'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
-                   #'temperature_2m', 'relative_humidity_2m', 'surface_pressure',
-                   'density_10m', 'density_80m', 'density_120m', 'density_180m'
-                   #'relhum_nwp',
-                   #'density_nwp'
+                   'wind_speed_nwp',    # Will match wind_speed_h247_1, wind_speed_h184_2, etc.
+                   #'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
+                   #'temperature',       # Will match temperature_h247_1, temperature_h184_2, etc.
+                   #'pressure',          # Will match pressure_h247_1, pressure_h184_2, etc.
+                   #'relative_humidity', # Will match relative_humidity_h247_1, etc.
+                   # 'density_10m', 'density_80m', 'density_120m', 'density_180m'        # Will match density_h247_1, etc. (if get_density: True)
                    ]
   observed_features: [
-                      #'wind_speed_10m', 'wind_speed_80m', 'wind_speed_120m','wind_speed_180m',
-                      #'wind_speed_10m',
-                      #'wind_speed',
-                      #'wind_speed_t1', 'wind_speed_t2', 'wind_speed_t3', 'wind_speed_t4', 'wind_speed_t5', 'wind_speed_t6',
                       'power'
                       ] # lag features
   static_features: [
-    #'park_id',
-    #'rated_power',
+    #'park_age',
+    #'cut_in',
+    #'cut_out',
+    #'rated_wind_speed',
     #'hub_height',
     #'rotor_diameter',
-    'cut_in',
-    'cut_out',
-    'rated_wind_speed',
-    'park_age',
-    #'installed_capacity'
   ]
-  aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
-  features_to_pivot: [
-                      'wind_speed_nwp',
-                      #'density_nwp',
-                      #'temperature_nwp',
-                      #'pressure_nwp',
-                      #'relhum_nwp',
-                      ]
+  aggregate_nwp_layers: 'not' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True
   openmeteo:
     nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
   turbines_per_park: 1
-  random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
+  #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
+  random_seed: 42
+  next_n_grid_points: 1  # Number of nearest grid points to include
 
 model:
   output_dim: 48
   lookback: 48
   horizon: 48
   step_size: 3
-  batch_size: 512
+  batch_size: 32
   epochs: 10
-  lr: 0.0005
+  lr: 0.0004
   optimizer: 'adam'
   loss: 'mse'
   metrics: ['mae', 'rmse', 'r^2']
@@ -80,25 +76,28 @@ model:
     units: 128
     n_layers: 2
   cnn:
-    filters: 64
+    filters: 128
     kernel_size: 3
-    n_cnn_layers: 5
+    n_cnn_layers: 10
     increase_filters: False
   rnn:
-    n_rnn_layers: 1
+    n_rnn_layers: 2
     units: 64
-    dropout: 0.2
+    dropout: 0.01
   attention_heads: 32 # if attention is used in hybrid models
   tft:
     n_heads: 6
     hidden_dim: 120
-    dropout: 0.1
+    dropout: 0.2
+    n_lstm_layers: 1
+    num_quantiles: 1
+    clipnorm: 1.0
   callbacks: False
   save_model: True
   shuffle: True
   force_retrain: True
   parallelize: False
-  lookup_hpo: True
+  lookup_hpo: False
   verbose: 1
 
 
@@ -115,27 +114,29 @@ hpo:
     n_warmup_steps: 2
     interval_steps: 1
     disable_pruning: False
-  batch_size: [32, 512]
+  batch_size: [128, 2048]
   epochs: [1, 150]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
-  n_rnn_layers: [1, 10]
+  n_rnn_layers: [1, 7]
   learning_rate: [0.0001, 0.01]
   attention_heads: [1,64] # if attention is used in hybrid models
   fnn:
     units: [32, 256]
   cnn:
-    filters: [16, 150]
-    kernel_size: [2, 7]
+    filters: [16, 128]
+    kernel_size: [2, 5]
     increase_filters: False
   rnn:
-    units: [16, 128]
-    dropout: [0.0, 0.2]
+    units: [16, 100]
+    dropout: [0.0, 0.8]
   tft:
     lookback: [48, 96, 144, 192]
-    n_heads: [1, 16]
-    hidden_dim: [16, 256]
-    dropout: [0.0, 0.5]
+    n_heads: [2, 16]
+    hidden_dim: [16, 512]
+    dropout: [0.0, 0.9]
+    n_lstm_layers: [1, 3]
+    clipnorm: [0.1, 5.0]
   fl:
     strategy: 'fedavg'
     personalize: False

@@ -531,6 +531,9 @@ def get_hyperparameters(config: dict,
     n_heads = config['hpo']['tft']['n_heads']
     hidden_dim = config['hpo']['tft']['hidden_dim']
     dropout_tft = config['hpo']['tft']['dropout']
+    n_lstm_layers_tft = config['hpo']['tft']['n_lstm_layers']
+    num_quantiles = config['model']['tft']['num_quantiles']
+    clipnorm =config['hpo']['tft']['clipnorm']
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
     # fl specific hyperparameters
@@ -583,6 +586,8 @@ def get_hyperparameters(config: dict,
                 step=n_heads_hpo
             )
             hyperparameters['dropout'] = trial.suggest_float('dropout', dropout_tft[0], dropout_tft[1])
+            hyperparameters['n_lstm_layers'] = trial.suggest_int('n_lstm_layers', n_lstm_layers_tft[0], n_lstm_layers_tft[1])
+            hyperparameters['clipnorm'] = clipnorm
         if 'attn' in model_name:
             hyperparameters['attention_heads'] = trial.suggest_int('attention_heads', attention_heads[0], attention_heads[1])
     else:
@@ -624,6 +629,9 @@ def get_hyperparameters(config: dict,
                 hyperparameters['n_heads'] = config['model']['tft']['n_heads']
                 hyperparameters['hidden_dim'] = config['model']['tft']['hidden_dim']
                 hyperparameters['dropout'] = config['model']['tft']['dropout']
+                hyperparameters['n_lstm_layers'] = config['model']['tft']['n_lstm_layers']
+                hyperparameters['num_quantiles'] = config['model']['tft']['num_quantiles']
+                hyperparameters['clipnorm'] = config['model']['tft']['clipnorm']
     return hyperparameters
 
 def load_hyperparams(study_name: str,

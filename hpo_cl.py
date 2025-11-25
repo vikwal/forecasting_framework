@@ -90,7 +90,7 @@ def main() -> None:
     base_dir = os.path.basename(data_dir)
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    study_name_suffix = '_'.join(args.config.split('_')[1:3])
+    study_name_suffix = '_'.join(args.config.split('_')[1:])
     study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
     config['model']['name'] = args.model
 

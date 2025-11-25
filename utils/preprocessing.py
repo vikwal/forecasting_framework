@@ -1,8 +1,14 @@
 import os
 import random
 import gc
+import math
 import pandas as pd
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import multiprocessing as mp
+from geopy.distance import geodesic
+import metpy.calc as mpcalc
+from metpy.units import units
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
@@ -75,10 +81,10 @@ def _get_data_from_config_files(config: dict,
                                                        features=features.copy() if features else None,
                                                        target_col=target_col)
                 elif 'icon-d2' in config.get('data', {}).get('nwp_path', '') or 'icon_d2' in config.get('data', {}).get('nwp_path', ''):
-                    df = preprocess_synth_wind(path=file_path,
-                                             config=config,
-                                             freq=freq,
-                                             features=features.copy() if features else None)
+                    df = preprocess_synth_wind_icond2(path=file_path,
+                                                        config=config,
+                                                        freq=freq,
+                                                        features=features.copy() if features else None)
                 else:
                     raise ValueError('NWP model source is not known for wind data')
 
@@ -172,7 +178,7 @@ def get_data(data_dir: str,
             preprocess_func = preprocess_synth_wind_openmeteo
             preprocess_kwargs = {'path': None, 'config': config, 'freq': freq, 'features': features.copy(), 'target_col': target_col}
         elif 'icon-d2' in config['data']['nwp_path']:
-            preprocess_func = preprocess_synth_wind
+            preprocess_func = preprocess_synth_wind_icond2
             preprocess_kwargs = {'path': None, 'config': config, 'freq': freq, 'features': features.copy()}
         else:
             raise ValueError('NWP model source is not known')
@@ -606,195 +612,428 @@ def get_A_weights(turbines: pd.DataFrame, layers: list) -> np.ndarray:
         logging.warning("Total rotor area is zero, cannot compute weights.")
         return total_A_slices
 
-def preprocess_synth_wind(path: str,
+def _process_csv_file(args):
+    """
+    Process a single CSV file for Icon-D2 data.
+    This function is designed to be called in parallel.
+    """
+    csv_file, distance, grid_lat, grid_lon, csv_path, config, i = args
+
+    try:
+        # Load CSV file
+        df_grid = pd.read_csv(csv_path)
+
+        # Convert timestamp
+        df_grid['starttime'] = pd.to_datetime(df_grid['starttime'], utc=True)
+        df_grid['timestamp'] = df_grid['starttime'] + pd.to_timedelta(df_grid['forecasttime'], unit='h')
+
+        # Calculate wind speed from u and v components
+        df_grid['wind_speed'] = np.sqrt(df_grid['u_wind']**2 + df_grid['v_wind']**2)
+
+        # Calculate height as middle between top and bottom level
+        df_grid['height'] = ((df_grid['toplevel'] + df_grid['bottomlevel']) / 2).round().astype(int)
+
+        # Calculate relative humidity from specific humidity
+        specific_humidity = df_grid['qs'].values * units.dimensionless
+        temp = df_grid['temperature'].values * units.kelvin
+        press = df_grid['pressure'].values * units.pascal
+
+        rel_humidity = mpcalc.relative_humidity_from_specific_humidity(
+            press, temp, specific_humidity
+        ).magnitude
+        df_grid['relative_humidity'] = rel_humidity * 100  # Convert to percentage
+
+        # Get density if required
+        if config['params'].get('get_density', False):
+            # Calculate saturated vapor pressure
+            sat_vap_ps = get_saturated_vapor_pressure(temperature=df_grid['temperature'],
+                                                     model='huang')
+            # Calculate density using your method
+            df_grid['density'] = get_density(temperature=df_grid['temperature'],
+                                           pressure=df_grid['pressure'],
+                                           relhum=df_grid['relative_humidity'],
+                                           sat_vap_ps=sat_vap_ps)
+
+        # Select relevant weather variables for pivoting
+        weather_vars = ['wind_speed', 'temperature', 'pressure', 'qs', 'relative_humidity']
+        if 'density' in df_grid.columns:
+            weather_vars.append('density')
+
+        # Pivot by height levels
+        df_pivoted_list = []
+        for var in weather_vars:
+            if var in df_grid.columns:
+                pivot_df = df_grid.pivot_table(
+                    index=['timestamp', 'starttime', 'forecasttime'],
+                    columns='height',
+                    values=var,
+                    aggfunc='mean'
+                ).reset_index()
+                # Rename columns with height suffix
+                new_cols = ['timestamp', 'starttime', 'forecasttime']
+                for col in pivot_df.columns[3:]:  # Skip timestamp columns
+                    new_cols.append(f"{var}_h{col}")
+                pivot_df.columns = new_cols
+                df_pivoted_list.append(pivot_df)
+
+        # Merge all pivoted variables for this grid point
+        df_grid_final = df_pivoted_list[0]
+        for df_pivot in df_pivoted_list[1:]:
+            df_grid_final = df_grid_final.merge(
+                df_pivot,
+                on=['timestamp', 'starttime', 'forecasttime'],
+                how='outer'
+            )
+
+        # Add distance suffix to all feature columns (except timestamp columns)
+        feature_cols = [col for col in df_grid_final.columns if col not in ['timestamp', 'starttime', 'forecasttime']]
+        rename_dict = {col: f"{col}_{i}" for col in feature_cols}
+        df_grid_final.rename(columns=rename_dict, inplace=True)
+
+        return df_grid_final, i, csv_file
+
+    except Exception as e:
+        logging.error(f"Error processing CSV file {csv_file}: {str(e)}")
+        return None, i, csv_file
+
+
+def _process_forecast_hour(args):
+    """
+    Process a single forecast hour for Icon-D2 data.
+    This function is designed to be called in parallel.
+    """
+    forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points = args
+
+    try:
+        icon_d2_base_path = f"{config['data']['nwp_path']}/ML/{forecast_hour}/{station_id}"
+
+        if not os.path.exists(icon_d2_base_path):
+            logging.warning(f"Icon-D2 data path not found: {icon_d2_base_path}")
+            return None, forecast_hour
+
+        # Get all CSV files for this station
+        csv_files = [f for f in os.listdir(icon_d2_base_path) if f.endswith('_ML.csv')]
+
+        # Extract coordinates from filenames and calculate distances
+        file_distances = []
+        for csv_file in csv_files:
+            # Extract coordinates from filename: lat_lon_lat_lon_ML.csv
+            parts = csv_file.replace('_ML.csv', '').split('_')
+            if len(parts) >= 4:
+                try:
+                    grid_lat = float(f"{parts[0]}.{parts[1]}")
+                    grid_lon = float(f"{parts[2]}.{parts[3]}")
+
+                    # Calculate distance to station
+                    #distance = geodesic((station_lat, station_lon), (grid_lat, grid_lon)).kilometers
+                    distance = math.sqrt((grid_lat - station_lat) ** 2 + (grid_lon - station_lon) ** 2)
+                    file_distances.append((csv_file, distance, grid_lat, grid_lon))
+                except (ValueError, IndexError):
+                    continue
+
+        # Sort by distance and take the nearest n points
+        file_distances.sort(key=lambda x: x[1])
+        nearest_files = file_distances[:next_n_grid_points]
+
+        if not nearest_files:
+            logging.warning(f"No valid files found for forecast hour {forecast_hour}")
+            return None, forecast_hour
+
+        # Prepare arguments for parallel CSV processing
+        csv_args = []
+        for i, (csv_file, distance, grid_lat, grid_lon) in enumerate(nearest_files, 1):
+            csv_path = os.path.join(icon_d2_base_path, csv_file)
+            csv_args.append((csv_file, distance, grid_lat, grid_lon, csv_path, config, i))
+
+        # Process CSV files in parallel using ThreadPoolExecutor (I/O bound)
+        dfs_list = []
+        with ThreadPoolExecutor(max_workers=min(len(csv_args), 4)) as executor:
+            future_to_csv = {executor.submit(_process_csv_file, arg): arg for arg in csv_args}
+
+            for future in as_completed(future_to_csv):
+                result = future.result()
+                if result[0] is not None:
+                    dfs_list.append((result[0], result[1]))  # (dataframe, index)
+
+        # Sort by index to maintain order
+        dfs_list.sort(key=lambda x: x[1])
+        dfs_list = [df for df, _ in dfs_list]
+
+        # Merge all grid point dataframes for this forecast hour
+        if dfs_list:
+            df_forecast_hour = dfs_list[0]
+            for df_grid in dfs_list[1:]:
+                df_forecast_hour = df_forecast_hour.merge(
+                    df_grid,
+                    on=['timestamp', 'starttime', 'forecasttime'],
+                    how='outer'
+                )
+
+            return df_forecast_hour, forecast_hour
+        else:
+            return None, forecast_hour
+
+    except Exception as e:
+        logging.error(f"Error processing forecast hour {forecast_hour}: {str(e)}")
+        return None, forecast_hour
+
+
+def preprocess_synth_wind_icond2(path: str,
                           config: dict,
                           freq: str = '1H',
                           features: dict = None) -> pd.DataFrame:
+    """
+    Preprocess synthetic wind data from Icon-D2 model.
 
-    timestamp_col = 'timestamp'
-    park_id = path.split('_')[-1].split('.')[0]
-    wind_parameter_path = path.replace(os.path.basename(path), 'wind_parameter.csv')
-    turbine_parameter_path = path.replace(os.path.basename(path), 'turbine_parameter.csv')
+    Args:
+        path: Path to synthetic wind data (not used, station_id extracted from config)
+        config: Configuration dictionary
+        freq: Frequency for resampling
+        features: Dictionary with 'known' and 'observed' features
+
+    Returns:
+        Preprocessed DataFrame
+    """
+
+    # Extract station_id from the files in config
+    station_id = config['data']['files'][0] if 'files' in config['data'] else path.split('_')[-1].split('.')[0]
+
+    # Load synthetic wind data and turbine parameters (analog zu openmeteo)
+    synth_path = os.path.join(config['data']['path'], f'synth_{station_id}.csv')
+    wind_parameter_path = os.path.join(config['data']['path'], 'wind_parameter.csv')
+    turbine_parameter_path = os.path.join(config['data']['path'], 'turbine_parameter.csv')
     power_curves_path = os.path.join(config['data']['power_curves_path'], 'turbine_power.csv')
-    nwp_path = os.path.join(config['data']['nwp_path'], f'ML_Station_{park_id}.csv')
-    rel_features = list(set(features['known'] + features['observed']))
-    if 'turbines' in config['params']:
-        turbines_list = config['params']['turbines']
-    else:
-        turbines_list = None
+
+    # Load synthetic wind data and parameters
+    df_synth = pd.read_csv(synth_path, sep=';')
+    df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
+    df_synth.set_index('timestamp', inplace=True)
+
     wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
     turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
     power_curves = pd.read_csv(power_curves_path, sep=';', decimal=',')
-    df = pd.read_csv(path, sep=';')
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
-    df.set_index(timestamp_col, inplace=True)
+
+    # Handle commissioning date and park age
+    commissioning_date = wind_parameter.loc[wind_parameter.park_id == station_id]['commissioning_date'].values[0]
+    if 'random_seeds' not in config['params']:
+        random.seed(config['params']['random_seed'])
+    else:
+        iterator = config['params'].get('iterator', 0)
+        config['params']['iterator'] = iterator
+        random_seed = config['params']['random_seeds'][iterator]
+        config['params']['random_seed'] = random_seed
+        random.seed(random_seed)
+        config['params']['iterator'] = iterator + 1
+
+    if commissioning_date != '-':
+        park_age_years = (pd.Timestamp.now() - pd.to_datetime(commissioning_date)).days // 365
+    else:
+        park_age_years = 0
+
+    # Turbine handling (analog zu openmeteo)
+    static_features = features.get('static', [])
+    static_data = {}
     heights = []
-    if turbines_list:
+
+    if 'turbines' in config['params']:
+        turbines_list = config['params']['turbines']
+        if 'turbines_per_park' in config['params']:
+            turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
+            config['params']['random_seed'] += 1
         power_curves = power_curves[turbines_list]
         installed_capacity = power_curves.sum(axis=1).max() * 1000 # in Watts
         turbines = turbine_parameter.loc[turbine_parameter.turbine_name.isin(turbines_list)]
         turbine_indices = turbines['turbine']
         heights = turbines['hub_height'].values
         power_cols = [f'power_{i}' for i in turbine_indices]
-        df['power'] = df[power_cols].sum(axis=1)
+        wind_cols = [f'wind_speed_{i}' for i in turbine_indices]
+        df_synth['power'] = df_synth[power_cols].sum(axis=1)
+
+        # Keep only selected turbine columns + power + generic wind_speed
+        keep_cols = power_cols + wind_cols + ['power']
+        if 'wind_speed' in df_synth.columns:
+            keep_cols.append('wind_speed')
+        df_synth = df_synth[keep_cols]
     else:
-        df['power'] = 0
-        for col in df.columns:
-            if 'power' in col: df['power'] += df[col]
-        installed_capacity = df['power'].max()
+        df_synth['power'] = 0
+        for col in df_synth.columns:
+            if 'power' in col:
+                df_synth['power'] += df_synth[col]
+        installed_capacity = df_synth['power'].max()
         heights = turbine_parameter['hub_height'].values
         turbines = turbine_parameter
-    df['power'] = df['power'] / installed_capacity # in Watts
-    df = df.resample(freq, closed='left', label='left', origin='start').mean()
-    # get nwp data if nwp is mentioned in the known features
-    nwp = pd.read_csv(nwp_path, sep=',')
-    nwp['starttime'] = pd.to_datetime(nwp['starttime'], utc=True)
-    nwp['timestamp'] = nwp['starttime'] + pd.to_timedelta(nwp['forecasttime'], unit='h')
-    # rename nwp data
-    for col in nwp.columns:
-        if col not in ['timestamp', 'starttime', 'forecasttime', 'toplevel', 'bottomlevel']:
-            nwp.rename(columns={col: f'{col}_nwp'}, inplace=True)
-    nwp['wind_speed_nwp'] = np.sqrt(nwp['u_wind_nwp']**2 + nwp['v_wind_nwp']**2)
-    nwp.set_index('timestamp', inplace=True)
-    # get density if required
-    if config['params']['get_density']:
-        nwp['sat_vap_ps'] = get_saturated_vapor_pressure(temperature=nwp['temperature_nwp'],
-                                                         model='huang')
-        nwp['density_nwp'] = get_density(temperature=nwp['temperature_nwp'],
-                                         pressure=nwp['pressure_nwp'],
-                                         relhum=nwp['relhum_nwp'],
-                                         sat_vap_ps=nwp['sat_vap_ps'])
-    nwp_features = rel_features.copy()
-    for col in rel_features:
-        if 'nwp' not in col:
-            nwp_features.remove(col)
-    nwp_features += ['forecasttime', 'toplevel', 'bottomlevel']
-    nwp = nwp[nwp_features].copy()
-    # aggregate multilevels
-    if config['params']['aggregate_nwp_layers'] == 'pivot':
-        mapping = {20.0: 10,
-                   55.212: 37.606,
-                   100.277: 77.745,
-                   153.438: 126.858,
-                   213.746: 183.592,
-                   280.598: 247.172}
-        #features_not_to_pivot = [col in nwp.columns if '_nwp' in col]
-        features_to_pivot = config['params']['features_to_pivot']
-        for col in features_to_pivot:
-            rel_features.remove(col)
-        features_not_to_pivot = [col for col in nwp.columns if col not in features_to_pivot]
-        weights = get_A_weights(turbines=turbines, nwp=nwp)
-        # pivot features
-        nwp_pivot = nwp[features_to_pivot + ['forecasttime', 'toplevel']].copy()
-        nwp_pivot.reset_index(inplace=True)
-        nwp_pivot['level'] = nwp_pivot['toplevel'].map(mapping)
-        nwp_pivot = nwp_pivot.pivot(index=['timestamp', 'forecasttime'],
-                                    columns=['level'],
-                                    values=features_to_pivot)
-        nwp_pivot.reset_index(inplace=True)
-        column_names = []
-        for col in nwp_pivot.columns:
-            if 'nwp' in col[0]:
-                new_col_name = f'{col[0]}_{col[1]}'
-                column_names.append(new_col_name)
-                rel_features.append(new_col_name)
-            else:
-                column_names.append(col[0])
-        nwp_pivot.columns = column_names
-        nwp_pivot.set_index('timestamp', inplace=True)
-        # get weighted averages of features not to pivot
-        layers_idx = nwp.groupby(['toplevel','bottomlevel']).size().index
-        layers = pd.DataFrame({
-            'toplevel': [t for (t, b) in layers_idx],
-            'bottomlevel': [b for (t, b) in layers_idx],
-            'weight': weights
-        })
-        nwp = nwp.reset_index()
-        nwp = nwp.merge(layers, on=['toplevel','bottomlevel'], how='left', validate='m:1')
-        weighted_cols = []
-        for col in features_not_to_pivot:
-            if '_nwp' in col:
-                nwp[f'{col}_w'] = nwp[col] * nwp['weight']
-                weighted_cols.append(f'{col}_w')
-        cols_to_group = weighted_cols + ['weight']
-        agg = (
-            nwp.groupby(['timestamp','forecasttime'], sort=False)[
-                cols_to_group
-            ].sum()
-            .reset_index()
-        )
-        wsum = agg['weight']
-        agg[weighted_cols] = (
-            agg[weighted_cols].div(wsum, axis=0)
-        )
-        nwp = (
-            agg.drop(columns='weight')
-            .rename(columns=lambda c: c.replace('_w',''))
-            .set_index('timestamp')
-        )
-        # merge pivoted and aggregated features
-        nwp.reset_index(inplace=True)
-        nwp_pivot.reset_index(inplace=True)
-        nwp = nwp.merge(nwp_pivot, on=['timestamp', 'forecasttime'], how='left')
-        nwp.set_index('timestamp', inplace=True)
-    elif config['params']['aggregate_nwp_layers'] == 'weighted_mean':
-        weights = get_A_weights(turbines=turbines, nwp=nwp)
-        layers_idx = nwp.groupby(['toplevel','bottomlevel']).size().index
-        layers = pd.DataFrame({
-            'toplevel': [t for (t, b) in layers_idx],
-            'bottomlevel': [b for (t, b) in layers_idx],
-            'weight': weights
-        })
-        nwp = nwp.reset_index()  # timestamp zurück als Spalte
-        nwp = nwp.merge(layers, on=['toplevel','bottomlevel'], how='left', validate='m:1')
-        weighted_cols = []
-        for col in nwp.columns:
-            if '_nwp' in col and col != 'wind_speed_nwp':
-                nwp[f'{col}_w'] = nwp[col] * nwp['weight']
-                weighted_cols.append(f'{col}_w')
-        nwp['wind_speed_nwp_w']  = nwp['weight'] * (nwp['wind_speed_nwp']**3)
-        cols_to_group = weighted_cols + ['wind_speed_nwp_w','weight']
-        agg = (
-            nwp.groupby(['timestamp','forecasttime'], sort=False)[
-                cols_to_group
-            ].sum()
-            .reset_index()
-        )
-        wsum = agg['weight']
-        agg[weighted_cols] = (
-            agg[weighted_cols].div(wsum, axis=0)
-        )
-        agg['wind_speed_nwp_w'] = (agg['wind_speed_nwp_w']/wsum)**(1/3)
-        nwp = (
-            agg.drop(columns='weight')
-            .rename(columns=lambda c: c.replace('_w',''))
-            .set_index('timestamp')
-        )
-    elif config['params']['aggregate_nwp_layers'] == 'mean':
-        logging.warning('Mean aggregation of NWP layers not implemented yet')
-        #nwp = nwp.groupby(['level']).mean()
-        #nwp.drop(['level'], axis=1, inplace=True)
-    elif config['params']['aggregate_nwp_layers'] == 'not':
-        rel_features += ['level']
-    else:
-        raise ValueError(f"Unknown option for 'aggregate_nwp_layers': {config['params']['aggregate_nwp_layers']}. Please choose from 'to_pivot', 'weighted_mean', 'mean', or 'not'.")
-    # merge nwp data and wind park data
-    df = nwp.merge(df, left_index=True, right_index=True, how='left')
-    rel_features.append('forecasttime')
-    df = df[rel_features]
-    df.reset_index(inplace=True)
-    df['starttime'] = df['timestamp'] - pd.to_timedelta(df['forecasttime'], unit='h')
-    df.sort_values(['starttime', 'forecasttime'], ascending=True, inplace=True)
-    # drop all rows with forecasttime = 0
-    df.drop(df[df.forecasttime == 0].index, inplace=True)
-    df.set_index(['starttime', 'forecasttime', 'timestamp'], inplace=True)
-    #df.drop('timestamp', axis=1, inplace=True)
-    # drop forecast runs with < 48 forecasted hours
-    df.dropna(inplace=True)
-    df = df.groupby(level='starttime').filter(
-        lambda g: g.index.get_level_values('forecasttime').nunique() == 48
-    )
-    return df
+
+    # Static features handling
+    if static_features:
+        static_data['park_id'] = station_id
+        static_data['park_age'] = park_age_years
+        static_data['installed_capacity'] = installed_capacity
+        for index, turbine in turbines.iterrows():
+            turbine_name = turbine['turbine_name']
+            turbine_id = turbine['turbine']
+            static_data[f'hub_height'] = turbine['hub_height']
+            static_data[f'rotor_diameter'] = turbine['diameter']
+            static_data[f'rated_power'] = power_curves[turbine_name].max() * 1000
+            static_data[f'cut_in'] = turbine['cut_in']
+            static_data[f'cut_out'] = turbine['cut_out']
+            static_data[f'rated_wind_speed'] = turbine['rated']
+
+    # Normalize power
+    df_synth['power'] = df_synth['power'] / installed_capacity
+    df_synth = df_synth.resample('1H', closed='left', label='left', origin='start').mean()
+
+    # Load station coordinates
+    stations_path = config['data']['stations_master']
+    stations_df = pd.read_csv(stations_path)
+    station_info = stations_df[stations_df['Stations_id'] == int(station_id)]
+
+    if station_info.empty:
+        raise ValueError(f"Station {station_id} not found in stations list")
+
+    station_lat = station_info['geoBreite'].iloc[0]
+    station_lon = station_info['geoLaenge'].iloc[0]
+
+    # Parameters from config
+    next_n_grid_points = config['params'].get('next_n_grid_points', 12)
+    forecast_hours = ['06', '09', '12', '15']  # Available forecast hours
+    rel_features = list(set(features['known'] + features['observed'])) if features else []
+
+    # Prepare arguments for parallel forecast hour processing
+    forecast_args = []
+    for forecast_hour in forecast_hours:
+        forecast_args.append((forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points))
+
+    # Process forecast hours in parallel using ProcessPoolExecutor (CPU bound)
+    all_forecast_dfs = []
+    max_workers = min(len(forecast_hours), mp.cpu_count())
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_hour = {executor.submit(_process_forecast_hour, arg): arg[0] for arg in forecast_args}
+
+        for future in as_completed(future_to_hour):
+            hour = future_to_hour[future]
+            result = future.result()
+            if result[0] is not None:
+                all_forecast_dfs.append((result[0], hour))
+
+    # Sort by forecast hour to maintain consistent order
+    hour_order = {'06': 0, '09': 1, '12': 2, '15': 3}
+    all_forecast_dfs.sort(key=lambda x: hour_order.get(x[1], 99))
+    all_forecast_dfs = [df for df, _ in all_forecast_dfs]
+
+    if not all_forecast_dfs:
+        raise ValueError("No data could be loaded from any forecast hour")
+
+    # Combine all forecast hours
+    df_final = pd.concat(all_forecast_dfs, ignore_index=True)
+
+    # Merge with synthetic wind power data
+    df_final.set_index('timestamp', inplace=True)
+    df_merged = df_final.merge(df_synth, left_index=True, right_index=True, how='left')
+
+    # Filter relevant features if specified
+    rel_features = list(set(features['known'] + features['observed'])) if features else []
+
+    # Handle turbine-specific features
+    new_rel_features = []
+
+    # Expand generic turbine features to specific turbine columns ONLY if in rel_features
+    if 'wind_speed_t' in rel_features:
+        rel_features.remove('wind_speed_t')
+        for index, turbine in turbines.iterrows():
+            turbine_id = turbine['turbine']
+            turbine_col = f'wind_speed_{turbine_id}'
+            if turbine_col in df_merged.columns:
+                new_rel_features.append(turbine_col)
+
+    if 'density_t' in rel_features:
+        rel_features.remove('density_t')
+        for index, turbine in turbines.iterrows():
+            turbine_id = turbine['turbine']
+            turbine_col = f'density_{turbine_id}'
+            if turbine_col in df_merged.columns:
+                new_rel_features.append(turbine_col)
+
+    # Drop unwanted columns
+    cols_to_drop = []
+
+    # Always drop power_t* columns (we only keep the sum 'power')
+    for col in df_merged.columns:
+        if col.startswith('power_t'):
+            cols_to_drop.append(col)
+
+    # Drop wind_speed_t* columns if not explicitly requested in rel_features
+    if 'wind_speed_t' not in features.get('known', []) and 'wind_speed_t' not in features.get('observed', []):
+        for col in df_merged.columns:
+            if col.startswith('wind_speed_t'):
+                cols_to_drop.append(col)
+
+    # Always drop generic wind_speed (without suffix)
+    if 'wind_speed' in df_merged.columns and 'wind_speed' not in rel_features:
+        cols_to_drop.append('wind_speed')
+
+    # Drop the unwanted columns
+    if cols_to_drop:
+        df_merged.drop(columns=cols_to_drop, inplace=True)
+
+    # Add Icon-D2 features
+    if rel_features:
+        # Create list of all possible feature combinations with suffixes
+        available_cols = []
+        for col in df_merged.columns:
+            if col in ['power']:  # Keep power and other important columns
+                available_cols.append(col)
+                continue
+            # Check if any base feature (without height/grid suffixes) matches
+            for feat in rel_features:
+                # Handle wind_speed_nwp mapping to wind_speed_h* columns
+                if feat == 'wind_speed_nwp' and 'wind_speed_h' in col:
+                    if col not in available_cols:  # Avoid duplicates
+                        available_cols.append(col)
+                    break
+                elif feat in col:  # Simple substring match for other Icon-D2 features
+                    if col not in available_cols:  # Avoid duplicates
+                        available_cols.append(col)
+                    break
+
+        # Add turbine features and target
+        available_cols.extend(new_rel_features)
+        if config['data']['target_col'] not in available_cols:
+            available_cols.append(config['data']['target_col'])
+        available_cols.extend(static_features)
+
+        # Add static features
+        for static_feature in static_features:
+            if any(static_feature in key for key in static_data.keys()):
+                matching_key = next(key for key in static_data.keys() if static_feature in key)
+                df_merged[static_feature] = static_data[matching_key]
+
+        # Remove duplicates and filter
+        available_cols = list(dict.fromkeys(available_cols))
+        available_cols = [col for col in available_cols if col in df_merged.columns]
+        df_merged = df_merged[available_cols]
+
+    # Resample if needed
+    if freq != '1H':
+        df_merged = df_merged.resample(freq, closed='left', label='left', origin='start').mean()
+
+    # Final cleanup
+    df_merged.dropna(inplace=True)
+    df_merged.sort_index(inplace=True)
+
+    # Ensure time series starts at hour divisible by 3 (analog zu openmeteo)
+    first_timestamp = df_merged.index[0]
+    first_hour = first_timestamp.hour
+    if first_hour % 3 != 0:
+        next_valid_hour = ((first_hour // 3) + 1) * 3
+        if next_valid_hour >= 24:
+            start_timestamp = first_timestamp.replace(hour=0, minute=0, second=0, microsecond=0) + pd.Timedelta(days=1)
+        else:
+            start_timestamp = first_timestamp.replace(hour=next_valid_hour, minute=0, second=0, microsecond=0)
+        df_merged = df_merged[df_merged.index >= start_timestamp]
+
+    return df_merged
+
 
 def get_density_at_height(h2: float,
                           rho1: pd.Series,
@@ -1221,19 +1460,35 @@ def prepare_data_for_tft(data: pd.DataFrame,
 def prepare_features_for_tft(cols: list,
                              known_future_cols: list,
                              observed_past_cols: list):
-    new_known_cols = [
-        col for col in cols
-        if any(known in col for known in known_future_cols)
-    ]
-    new_observed_cols = [
-        col for col in cols
-        if any(observed in col for observed in observed_past_cols)
-    ]
+    new_known_cols = []
+    new_observed_cols = []
+
+    # Handle specific feature mappings for Icon-D2 data
+    for known_feat in known_future_cols:
+        if known_feat == 'wind_speed_nwp':
+            # Map wind_speed_nwp to all wind_speed_h* columns
+            matching_cols = [col for col in cols if 'wind_speed_h' in col]
+            new_known_cols.extend(matching_cols)
+        else:
+            # Standard substring matching
+            matching_cols = [col for col in cols if known_feat in col]
+            new_known_cols.extend(matching_cols)
+
+    for observed_feat in observed_past_cols:
+        matching_cols = [col for col in cols if observed_feat in col]
+        new_observed_cols.extend(matching_cols)
+
+    # Add special NWP aggregated features if present
     for col in cols:
         if 'wind_speed_rotor_eq' in col and col not in new_known_cols:
             new_known_cols.append(col)
         if 'wind_speed_mean_height' in col and col not in new_known_cols:
             new_known_cols.append(col)
+
+    # Remove duplicates while preserving order
+    new_known_cols = list(dict.fromkeys(new_known_cols))
+    new_observed_cols = list(dict.fromkeys(new_observed_cols))
+
     return new_known_cols, new_observed_cols
 
 def get_static_features(data: pd.DataFrame,

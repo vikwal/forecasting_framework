@@ -62,10 +62,8 @@ def main() -> None:
     base_dir = os.path.basename(data_dir)
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    study_name_suffix = ''
-    if len(config['data']['files']) == 1:
-        study_name_suffix = f'_{config["data"]["files"][0]}'
-    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}{study_name_suffix}'
+    study_name_suffix = '_'.join(args.config.split('_')[1:])
+    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
     config['model']['name'] = args.model
     # load and prepare training and test data - MEMORY OPTIMIZED
     dfs = preprocessing.get_data(data_dir=data_dir,
@@ -178,7 +176,8 @@ def main() -> None:
     # save evaluation
     # include last row as column wise average
     evaluation.loc['mean'] = evaluation.mean(numeric_only=True)
-    print(evaluation)
+    evaluation.loc['std'] = evaluation.std(numeric_only=True)
+    logging.info(evaluation)
     results['evaluation'] = evaluation
     results['config'] = config
     # save results
