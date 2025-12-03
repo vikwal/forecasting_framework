@@ -1,5 +1,8 @@
+
 import os
 import random
+import warnings
+import re
 import gc
 import math
 import pandas as pd
@@ -14,6 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
 import logging
 from typing import List, Tuple, Dict, Any
+from sklearn.decomposition import PCA
 
 from . import meteo
 
@@ -194,6 +198,57 @@ def get_data(data_dir: str,
     else:
         raise ValueError(f'Unknown data dir: {data_dir}. Please check the data directory or add a new preprocessing function.')
 
+def split_data(data: pd.DataFrame,
+               train_frac: float = 0.75,
+               test_start: pd.Timestamp = None,
+               test_end: pd.Timestamp = None,
+               t_0: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Splits data into train and test sets.
+    """
+    df = data.copy()
+    index = data.index
+
+    # Split data into train and test sets with a 75/25 ratio, ensuring full days
+    if test_start:
+        train_end = test_start - pd.Timedelta(hours=0.25)
+    else:
+        train_periods = int(len(df) * train_frac)-1
+        train_end = index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
+        train_end = pd.Timestamp(train_end)
+        test_start = train_end + pd.Timedelta(hours=0.25)
+        test_start = pd.Timestamp(test_start)
+
+    # handel MultiIndex if needed
+    if type(data.index) == pd.core.indexes.multi.MultiIndex:
+        # Ensure timestamps are timezone-aware (UTC) for comparison
+        ts_test_start = pd.to_datetime(test_start).tz_convert('UTC') if pd.to_datetime(test_start).tzinfo else pd.to_datetime(test_start).tz_localize('UTC')
+        ts_train_end = pd.to_datetime(train_end).tz_convert('UTC') if pd.to_datetime(train_end).tzinfo else pd.to_datetime(train_end).tz_localize('UTC')
+
+        # For test_end, we want to include the full day if it's just a date, or up to the specific time
+        # If test_end is passed as a string like '2025-10-21', pd.to_datetime will make it 00:00:00
+        # If we want inclusive, we should probably ensure we cover the day.
+        # However, the user logic in train_cl.py handles test_end time setting.
+        # Here we just convert and use it.
+        ts_test_end = pd.to_datetime(test_end).tz_convert('UTC') if pd.to_datetime(test_end).tzinfo else pd.to_datetime(test_end).tz_localize('UTC')
+
+        df_train = df[df.index.get_level_values('starttime') < ts_test_start]
+        df_test = df[(df.index.get_level_values('starttime') > ts_train_end) &
+                     (df.index.get_level_values('starttime') <= ts_test_end)]
+    else:
+        df_train = df[:train_end]
+        df_test = df[test_start:test_end]
+
+    #print(df_train.index)
+    #print(df_test.index)
+    #logging.info(f'TRAIN START: {df_train.index.min()}')
+    #logging.info(f'TRAIN END: {df_train.index.max()}')
+    #logging.info(f'TEST START: {df_test.index.min()}')
+    #logging.info(f'TEST END: {df_test.index.max()}')
+
+    return df_train, df_test
+
+
 def pipeline(data: pd.DataFrame,
              config: Dict[str, Any],
              known_cols: List[str] = None,
@@ -210,7 +265,7 @@ def pipeline(data: pd.DataFrame,
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
 
     if config['model']['name'] == 'tft':
-        logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
+        #logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
         prepared_data = prepare_data_for_tft(data=df,
                                              history_length=config['model']['lookback'], # e.g., 72 (for 3 days history)
                                              future_horizon=config['model']['horizon'], # e.g., 24 (for 24 hours forecast)
@@ -221,12 +276,26 @@ def pipeline(data: pd.DataFrame,
                                              train_frac=config['data']['train_frac'],
                                              test_start=pd.Timestamp(config['data']['test_start']),
                                              test_end=pd.Timestamp(config['data']['test_end']),
-                                             t_0=t_0)
+                                             t_0=t_0,
+                                             scaler_x=config.get('scaler_x', None))
+    elif config['model']['name'] == 'stemgnn':
+        n_nodes = config['params'].get('next_n_grid_points', 12)
+        prepared_data = prepare_data_for_stemgnn(data=df,
+                                                 n_nodes=n_nodes,
+                                                 history_length=config['model']['lookback'],
+                                                 future_horizon=config['model']['horizon'],
+                                                 step_size=config['model']['step_size'],
+                                                 train_frac=config['data']['train_frac'],
+                                                 target_col=target_col,
+                                                 test_start=pd.Timestamp(config['data']['test_start']),
+                                                 test_end=pd.Timestamp(config['data']['test_end']),
+                                                 t_0=t_0,
+                                                 scale_target=config['data'].get('scale_y', False),
+                                                 scaler_x=config.get('scaler_x', None))
     else:
-        # create new known cols
-        for col in known_cols:
-            all_known_cols = [new_col for new_col in df.columns if col in new_col]
+        # create lag features for observed columns
         for col in observed_cols:
+            all_known_cols = [new_col for new_col in df.columns if col in new_col]
             all_observed_cols = [new_col for new_col in df.columns if col in new_col]
             for new_col in all_observed_cols:
                 df = lag_features(data=df,
@@ -239,7 +308,7 @@ def pipeline(data: pd.DataFrame,
                     # MEMORY CLEANUP: Garbage collect after dropping columns
                     gc.collect()
 
-        logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
+        #logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
         prepared_data = prepare_data(data=df,
                                      output_dim=config['model']['output_dim'],
                                      step_size=config['model']['step_size'],
@@ -248,7 +317,8 @@ def pipeline(data: pd.DataFrame,
                                      t_0=t_0,
                                      test_start=pd.Timestamp(config['data']['test_start'], tz='UTC'),
                                      test_end=pd.Timestamp(config['data']['test_end'], tz='UTC'),
-                                     target_col=target_col)
+                                     target_col=target_col,
+                                     scaler_x=config.get('scaler_x', None))
 
     # MEMORY CLEANUP: Force garbage collection after processing
     gc.collect()
@@ -409,17 +479,27 @@ def make_windows(data: np.ndarray,
 
 def apply_scaling(df_train,
                   df_test,
-                  scaler_type=StandardScaler):
-    scaler = scaler_type()
+                  scaler_type=StandardScaler,
+                  fit=True):
+    if callable(scaler_type):
+        scaler = scaler_type()
+    else:
+        scaler = scaler_type
+
     if len(df_train.shape) == 1:
         df_train = df_train.values.reshape(-1, 1)
     if len(df_test.shape) == 1:
         df_test = df_test.values.reshape(-1, 1)
-    scaled_train = scaler.fit_transform(df_train)
+
+    if fit:
+        scaled_train = scaler.fit_transform(df_train.values if hasattr(df_train, 'values') else df_train)
+    else:
+        scaled_train = scaler.transform(df_train.values if hasattr(df_train, 'values') else df_train)
+
     if len(df_test) == 0:
         scaled_test = df_test
     else:
-        scaled_test = scaler.transform(df_test)
+        scaled_test = scaler.transform(df_test.values if hasattr(df_test, 'values') else df_test)
     return scaled_train, scaled_test, scaler
 
 def prepare_data(data: pd.DataFrame,
@@ -432,7 +512,8 @@ def prepare_data(data: pd.DataFrame,
                  t_0: int = 0,
                  test_start: pd.Timestamp = None,
                  test_end: pd.Timestamp = None,
-                 seq2seq: bool = False):
+                 seq2seq: bool = False,
+                 scaler_x: StandardScaler = None):
     df = data.copy()
     df.dropna(inplace=True)
     index = data.index
@@ -444,26 +525,10 @@ def prepare_data(data: pd.DataFrame,
         )
     target = df[[target_col]]
     df.drop(target_col, axis=1, inplace=True)
-    # Split data into train and test sets with a 75/25 ratio, ensuring full days
-    if test_start:
-        train_end = test_start - pd.Timedelta(hours=0.25)
-    else:
-        train_periods = int(len(df) * train_frac)-1
-        train_end = index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
-        train_end = pd.Timestamp(train_end)
-        test_start = train_end + pd.Timedelta(hours=0.25)
-        test_start = pd.Timestamp(test_start)
-    # handel MultiIndex if needed
-    if type(data.index) == pd.core.indexes.multi.MultiIndex:
-        df_train = df[df.index.get_level_values('starttime') < pd.Timestamp(test_start, tz='UTC')]
-        df_test = df[df.index.get_level_values('starttime') > pd.Timestamp(train_end, tz='UTC')]
-        target_train = target[target.index.get_level_values('starttime') < pd.Timestamp(test_start, tz='UTC')]
-        target_test = target[target.index.get_level_values('starttime') > pd.Timestamp(train_end, tz='UTC')]
-    else:
-        df_train = df[:train_end]
-        df_test = df[test_start:test_end]
-        target_train = target[:train_end]
-        target_test = target[test_start:test_end]
+
+    # Use helper function for splitting
+    df_train, df_test = split_data(df, train_frac, test_start, test_end, t_0)
+    target_train, target_test = split_data(target, train_frac, test_start, test_end, t_0)
 
     #logging.info(f"Training data range: {df_train.index.min()} to {df_train.index.max()} ({len(df_train)} rows)")
     #logging.info(f"Test data range:     {df_test.index.min()} to {df_test.index.max()} ({len(df_test)} rows)")
@@ -471,9 +536,20 @@ def prepare_data(data: pd.DataFrame,
     scalers['x'] = None
     scalers['y'] = None
     if scale_x:
-        X_train, X_test, scaler_x = apply_scaling(df_train,
-                                                  df_test,
-                                                  StandardScaler)
+        if scaler_x:
+            # Use provided global scaler
+            X_train, X_test, scaler_x = apply_scaling(df_train,
+                                                      df_test,
+                                                      scaler_type=scaler_x,
+                                                      fit=False)
+            # Override the fitted scaler with the global one to be sure
+            scaler_x = scaler_x
+        else:
+            # Fit new scaler
+            X_train, X_test, scaler_x = apply_scaling(df_train,
+                                                      df_test,
+                                                      StandardScaler,
+                                                      fit=True)
         scalers['x'] = scaler_x
     else:
         X_train = df_train.values
@@ -486,12 +562,14 @@ def prepare_data(data: pd.DataFrame,
     else:
         Y_train = target_train
         Y_test = target_test
-    index_train = np.array([df_train.index[i] for i in range(0,
-                                                             X_train.shape[0]-output_dim+1,
-                                                             step_size)])
-    index_test = np.array([df_test.index[i] for i in range(0,
-                                                           X_test.shape[0]-output_dim+1,
-                                                           step_size)])
+    # Keep indices as DatetimeIndex/MultiIndex instead of converting to numpy array
+    # This is important for min_train_date filtering in HPO
+    index_positions = range(0, X_train.shape[0]-output_dim+1, step_size)
+    index_train = df_train.index[list(index_positions)]
+
+    index_positions_test = range(0, X_test.shape[0]-output_dim+1, step_size)
+    index_test = df_test.index[list(index_positions_test)]
+
 
     X_train = make_windows(data=X_train, seq_len=output_dim, step_size=step_size)
     X_test = make_windows(data=X_test, seq_len=output_dim, step_size=step_size)
@@ -518,10 +596,20 @@ def preprocess_synth_pv(path: str,
                         features: dict = None) -> pd.DataFrame:
     timestamp_col = 'timestamp'
     target_col = 'power'
-    park_id = path.split('_')[-1].split('.')[0]
+    # Extract station_id from the path
+    # We use os.path.basename to get the filename, then split to get the ID
+    # Assumes filename format like 'synth_ID.csv' or 'ID.csv'
+    filename = os.path.basename(path)
+    # Remove extension
+    filename_no_ext = os.path.splitext(filename)[0]
+    # If it starts with 'synth_', remove it
+    if filename_no_ext.startswith('synth_'):
+        station_id = filename_no_ext.split('_')[-1]
+    else:
+        station_id = filename_no_ext
     parameter_file = path.replace(os.path.basename(path), 'pv_parameter.csv')
     metadata = pd.read_csv(parameter_file, sep=';')
-    installed_capacity = metadata.loc[metadata.park_id == int(park_id)]['installed_capacity'].values[0]
+    installed_capacity = metadata.loc[metadata.park_id == int(station_id)]['installed_capacity'].values[0]
     df = pd.read_csv(path, sep=';')
     df.drop('park_id', axis=1, inplace=True) # remove if not needed
     df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
@@ -617,7 +705,7 @@ def _process_csv_file(args):
     Process a single CSV file for Icon-D2 data.
     This function is designed to be called in parallel.
     """
-    csv_file, distance, grid_lat, grid_lon, csv_path, config, i = args
+    csv_file, distance, grid_lat, grid_lon, csv_path, config, i, turbines = args
 
     try:
         # Load CSV file
@@ -685,6 +773,58 @@ def _process_csv_file(args):
                 how='outer'
             )
 
+        # Calculate rotor equivalent wind speed if requested
+        if config['params'].get('aggregate_nwp_layers') == 'weighted_mean':
+            # Identify available wind speed columns and heights
+            wind_cols = [col for col in df_grid_final.columns if col.startswith('wind_speed_h')]
+            if wind_cols:
+                # Extract heights from column names
+                heights = sorted([int(col.split('_h')[1]) for col in wind_cols])
+
+                # Construct layers for get_A_weights
+                if len(heights) > 1:
+                    midpoints = [(heights[j] + heights[j + 1]) / 2 for j in range(len(heights) - 1)]
+                    layers = []
+                    layers.append((0.0, midpoints[0], heights[0]))
+                    for j in range(len(midpoints) - 1):
+                        layers.append((midpoints[j], midpoints[j+1], heights[j+1]))
+                    layers.append((midpoints[-1], np.inf, heights[-1]))
+
+                    area_weights = get_A_weights(turbines, layers)
+                    weighted_speed_cubed_series = pd.Series(0.0, index=df_grid_final.index, dtype=float)
+
+                    for j, (lower_bound, upper_bound, level_name) in enumerate(layers):
+                        wind_col = f'wind_speed_h{level_name}'
+                        if wind_col in df_grid_final.columns and area_weights[j] > 0:
+                            weighted_speed_cubed_series += area_weights[j] * (df_grid_final[wind_col] ** 3)
+
+                    df_grid_final['wind_speed_rotor_eq'] = (weighted_speed_cubed_series) ** (1/3)
+
+            # Identify available density columns and heights
+            density_cols = [col for col in df_grid_final.columns if col.startswith('density_h')]
+            if density_cols:
+                # Extract heights from column names
+                heights = sorted([int(col.split('_h')[1]) for col in density_cols])
+
+                # Construct layers for get_A_weights
+                if len(heights) > 1:
+                    midpoints = [(heights[j] + heights[j + 1]) / 2 for j in range(len(heights) - 1)]
+                    layers = []
+                    layers.append((0.0, midpoints[0], heights[0]))
+                    for j in range(len(midpoints) - 1):
+                        layers.append((midpoints[j], midpoints[j+1], heights[j+1]))
+                    layers.append((midpoints[-1], np.inf, heights[-1]))
+
+                    area_weights = get_A_weights(turbines, layers)
+                    weighted_density_series = pd.Series(0.0, index=df_grid_final.index, dtype=float)
+
+                    for j, (lower_bound, upper_bound, level_name) in enumerate(layers):
+                        density_col = f'density_h{level_name}'
+                        if density_col in df_grid_final.columns and area_weights[j] > 0:
+                            weighted_density_series += area_weights[j] * df_grid_final[density_col]
+
+                    df_grid_final['density_rotor_eq'] = weighted_density_series
+
         # Add distance suffix to all feature columns (except timestamp columns)
         feature_cols = [col for col in df_grid_final.columns if col not in ['timestamp', 'starttime', 'forecasttime']]
         rename_dict = {col: f"{col}_{i}" for col in feature_cols}
@@ -702,7 +842,7 @@ def _process_forecast_hour(args):
     Process a single forecast hour for Icon-D2 data.
     This function is designed to be called in parallel.
     """
-    forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points = args
+    forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points, turbines = args
 
     try:
         icon_d2_base_path = f"{config['data']['nwp_path']}/ML/{forecast_hour}/{station_id}"
@@ -725,8 +865,8 @@ def _process_forecast_hour(args):
                     grid_lon = float(f"{parts[2]}.{parts[3]}")
 
                     # Calculate distance to station
-                    #distance = geodesic((station_lat, station_lon), (grid_lat, grid_lon)).kilometers
-                    distance = math.sqrt((grid_lat - station_lat) ** 2 + (grid_lon - station_lon) ** 2)
+                    distance = geodesic((station_lat, station_lon), (grid_lat, grid_lon)).kilometers
+                    # distance = math.sqrt((grid_lat - station_lat) ** 2 + (grid_lon - station_lon) ** 2)
                     file_distances.append((csv_file, distance, grid_lat, grid_lon))
                 except (ValueError, IndexError):
                     continue
@@ -743,7 +883,7 @@ def _process_forecast_hour(args):
         csv_args = []
         for i, (csv_file, distance, grid_lat, grid_lon) in enumerate(nearest_files, 1):
             csv_path = os.path.join(icon_d2_base_path, csv_file)
-            csv_args.append((csv_file, distance, grid_lat, grid_lon, csv_path, config, i))
+            csv_args.append((csv_file, distance, grid_lat, grid_lon, csv_path, config, i, turbines))
 
         # Process CSV files in parallel using ThreadPoolExecutor (I/O bound)
         dfs_list = []
@@ -768,6 +908,67 @@ def _process_forecast_hour(args):
                     on=['timestamp', 'starttime', 'forecasttime'],
                     how='outer'
                 )
+
+            # --- Aggregation Logic ---
+            if config['params'].get('aggregate_grid_points', False):
+                # 1. Calculate weights (Inverse Distance Weighting)
+                # distances are in nearest_files: [(csv_file, distance, lat, lon), ...]
+                # The dfs_list is sorted by index (1 to N), which corresponds to nearest_files sorted by distance.
+
+                # Extract distances in order
+                distances = [nf[1] for nf in nearest_files]
+
+                # Handle zero distance (if station is exactly on a grid point)
+                weights = []
+                if any(d == 0 for d in distances):
+                    for d in distances:
+                        weights.append(1.0 if d == 0 else 0.0)
+                else:
+                    weights = [1.0 / d for d in distances]
+
+                # Normalize weights
+                total_weight = sum(weights)
+                weights = [w / total_weight for w in weights]
+
+                # 2. Identify base features and aggregate
+                # Columns are like 'wind_speed_h120_1', 'wind_speed_h120_2', etc.
+                # We want to produce 'wind_speed_h120' = w1*..._1 + w2*..._2 + ...
+
+                # Get all columns except timestamps
+                all_cols = df_forecast_hour.columns
+                timestamp_cols = ['timestamp', 'starttime', 'forecasttime']
+                feature_cols = [c for c in all_cols if c not in timestamp_cols]
+
+                # Find unique base feature names (remove suffix _\d+)
+                # We assume suffix is always _<index> where index corresponds to the grid point rank (1-based)
+                base_features = set()
+                for col in feature_cols:
+                    # Match suffix _<digit> at the end
+                    match = re.search(r'_(\d+)$', col)
+                    if match:
+                        base_name = col[:match.start()]
+                        base_features.add(base_name)
+
+                # Compute weighted sums
+                for base_feat in base_features:
+                    weighted_sum = 0
+                    found_any = False
+                    for i, weight in enumerate(weights):
+                        # Grid point index is i+1
+                        col_name = f"{base_feat}_{i+1}"
+                        if col_name in df_forecast_hour.columns:
+                            weighted_sum += df_forecast_hour[col_name] * weight
+                            found_any = True
+
+                    if found_any:
+                        # Assign to new column without suffix
+                        df_forecast_hour[base_feat] = weighted_sum
+
+                # 3. Keep only aggregated columns and timestamps
+                cols_to_keep = timestamp_cols + list(base_features)
+                # Filter to keep only columns that actually exist
+                cols_to_keep = [c for c in cols_to_keep if c in df_forecast_hour.columns]
+                df_forecast_hour = df_forecast_hour[cols_to_keep]
 
             return df_forecast_hour, forecast_hour
         else:
@@ -795,8 +996,17 @@ def preprocess_synth_wind_icond2(path: str,
         Preprocessed DataFrame
     """
 
-    # Extract station_id from the files in config
-    station_id = config['data']['files'][0] if 'files' in config['data'] else path.split('_')[-1].split('.')[0]
+    # Extract station_id from the path
+    # We use os.path.basename to get the filename, then split to get the ID
+    # Assumes filename format like 'synth_ID.csv' or 'ID.csv'
+    filename = os.path.basename(path)
+    # Remove extension
+    filename_no_ext = os.path.splitext(filename)[0]
+    # If it starts with 'synth_', remove it
+    if filename_no_ext.startswith('synth_'):
+        station_id = filename_no_ext.split('_')[-1]
+    else:
+        station_id = filename_no_ext
 
     # Load synthetic wind data and turbine parameters (analog zu openmeteo)
     synth_path = os.path.join(config['data']['path'], f'synth_{station_id}.csv')
@@ -812,7 +1022,7 @@ def preprocess_synth_wind_icond2(path: str,
     wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
     turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
     power_curves = pd.read_csv(power_curves_path, sep=';', decimal=',')
-
+    altitude = wind_parameter.loc[wind_parameter.park_id == station_id]['altitude'].values[0]
     # Handle commissioning date and park age
     commissioning_date = wind_parameter.loc[wind_parameter.park_id == station_id]['commissioning_date'].values[0]
     if 'random_seeds' not in config['params']:
@@ -868,6 +1078,7 @@ def preprocess_synth_wind_icond2(path: str,
         static_data['park_id'] = station_id
         static_data['park_age'] = park_age_years
         static_data['installed_capacity'] = installed_capacity
+        static_data['altitude'] = altitude
         for index, turbine in turbines.iterrows():
             turbine_name = turbine['turbine_name']
             turbine_id = turbine['turbine']
@@ -877,6 +1088,7 @@ def preprocess_synth_wind_icond2(path: str,
             static_data[f'cut_in'] = turbine['cut_in']
             static_data[f'cut_out'] = turbine['cut_out']
             static_data[f'rated_wind_speed'] = turbine['rated']
+
 
     # Normalize power
     df_synth['power'] = df_synth['power'] / installed_capacity
@@ -901,7 +1113,7 @@ def preprocess_synth_wind_icond2(path: str,
     # Prepare arguments for parallel forecast hour processing
     forecast_args = []
     for forecast_hour in forecast_hours:
-        forecast_args.append((forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points))
+        forecast_args.append((forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points, turbines))
 
     # Process forecast hours in parallel using ProcessPoolExecutor (CPU bound)
     all_forecast_dfs = []
@@ -924,12 +1136,45 @@ def preprocess_synth_wind_icond2(path: str,
     if not all_forecast_dfs:
         raise ValueError("No data could be loaded from any forecast hour")
 
-    # Combine all forecast hours
-    df_final = pd.concat(all_forecast_dfs, ignore_index=True)
+    # Combine all forecast hours - keep all columns including starttime, forecasttime
+    df_final = pd.concat(all_forecast_dfs, ignore_index=False)
 
-    # Merge with synthetic wind power data
-    df_final.set_index('timestamp', inplace=True)
-    df_merged = df_final.merge(df_synth, left_index=True, right_index=True, how='left')
+    # 1. Filter out forecasttime=0 (analysis values)
+    if 'forecasttime' in df_final.columns:
+        logging.debug(f"Filtering forecasttime=0: Before: {len(df_final)} rows")
+        df_final = df_final[df_final['forecasttime'] != 0].copy()
+        logging.debug(f"After filtering forecasttime=0: {len(df_final)} rows")
+
+    # 2. Filter incomplete forecasts (must have exactly 48 steps)
+    if 'starttime' in df_final.columns:
+        logging.debug("Filtering incomplete forecasts (requiring 48 steps per starttime)...")
+        # Count rows per starttime
+        counts = df_final.groupby('starttime').size()
+        valid_starttimes = counts[counts == 48].index
+
+        # Filter
+        df_final = df_final[df_final['starttime'].isin(valid_starttimes)].copy()
+        logging.debug(f"After filtering incomplete forecasts: {len(df_final)} rows ({len(valid_starttimes)} unique starttimes)")
+
+    # 3. Merge with synthetic wind power data
+    # We use reset_index() before merging to ensure clean merge
+    if isinstance(df_final.index, pd.MultiIndex):
+        df_final.reset_index(inplace=True, drop=True) # drop=True because index was likely RangeIndex or garbage
+
+    # Merge on timestamp
+    # df_synth has timestamp as index
+    df_merged = df_final.merge(df_synth, left_on='timestamp', right_index=True, how='left')
+
+    # 4. Set MultiIndex strictly: ['starttime', 'forecasttime', 'timestamp']
+    if 'starttime' in df_merged.columns and 'forecasttime' in df_merged.columns and 'timestamp' in df_merged.columns:
+        df_merged.set_index(['starttime', 'forecasttime', 'timestamp'], inplace=True)
+        # Sort index to ensure order: starttime -> forecasttime
+        df_merged.sort_index(inplace=True)
+        logging.debug(f"Set and sorted MultiIndex: {df_merged.index.names}")
+    else:
+        # Should not happen given the requirements
+        logging.error("CRITICAL: Could not set MultiIndex - missing columns!")
+        df_merged.set_index('timestamp', inplace=True)
 
     # Filter relevant features if specified
     rel_features = list(set(features['known'] + features['observed'])) if features else []
@@ -980,19 +1225,20 @@ def preprocess_synth_wind_icond2(path: str,
     if rel_features:
         # Create list of all possible feature combinations with suffixes
         available_cols = []
+
+        # Create regex patterns for strict matching
+        # Matches exactly the feature name, optionally followed by _<digits> (for grid points)
+        patterns = [re.compile(f"^{re.escape(feat)}(_\d+)?$") for feat in rel_features]
+
         for col in df_merged.columns:
             if col in ['power']:  # Keep power and other important columns
                 available_cols.append(col)
                 continue
-            # Check if any base feature (without height/grid suffixes) matches
-            for feat in rel_features:
-                # Handle wind_speed_nwp mapping to wind_speed_h* columns
-                if feat == 'wind_speed_nwp' and 'wind_speed_h' in col:
-                    if col not in available_cols:  # Avoid duplicates
-                        available_cols.append(col)
-                    break
-                elif feat in col:  # Simple substring match for other Icon-D2 features
-                    if col not in available_cols:  # Avoid duplicates
+
+            # Check if column matches any of the requested features strictly
+            for pattern in patterns:
+                if pattern.match(col):
+                    if col not in available_cols:
                         available_cols.append(col)
                     break
 
@@ -1013,24 +1259,73 @@ def preprocess_synth_wind_icond2(path: str,
         available_cols = [col for col in available_cols if col in df_merged.columns]
         df_merged = df_merged[available_cols]
 
-    # Resample if needed
-    if freq != '1H':
-        df_merged = df_merged.resample(freq, closed='left', label='left', origin='start').mean()
+    # # Resample if needed
+    # if freq.upper() != '1H':
+    #     # Handle MultiIndex resampling
+    #     if isinstance(df_merged.index, pd.MultiIndex):
+    #          df_merged = df_merged.resample(freq, level='timestamp', closed='left', label='left', origin='start').mean()
+    #     else:
+    #          df_merged = df_merged.resample(freq, closed='left', label='left', origin='start').mean()
+
+    # --- PCA Analysis (Test) ---
+    if config['data']['use_pca']:
+        # Select features for PCA: only known_features
+        original_known_features = features.get('known', [])
+
+        # Create regex patterns for known features, including grid point suffixes
+        known_feature_patterns = [re.compile(f"^{re.escape(feat)}(_\d+)?$") for feat in original_known_features]
+
+        pca_known_cols = []
+        for col in df_merged.columns:
+            for pattern in known_feature_patterns:
+                if pattern.match(col):
+                    if pd.api.types.is_numeric_dtype(df_merged[col]):
+                        pca_known_cols.append(col)
+                    break
+
+        if len(pca_known_cols) > 0:
+            logging.debug(f'Station {station_id}: {len(pca_known_cols)} known features for PCA')
+
+            # Extract known features for PCA
+            x_pca_known = df_merged[pca_known_cols].values
+
+            # Standardize
+            scaler_pca_known = StandardScaler()
+            x_pca_known_scaled = scaler_pca_known.fit_transform(x_pca_known)
+
+            # PCA
+            n_components = min(config['data']['pca_components'], len(pca_known_cols))
+            pca_known = PCA(n_components=n_components)
+            principal_components_known = pca_known.fit_transform(x_pca_known_scaled)
+
+            logging.debug(f"Known features PCA - Explained variance ratio (first {n_components} components): {pca_known.explained_variance_ratio_}")
+            logging.debug(f"Known features PCA - Cumulative explained variance: {np.sum(pca_known.explained_variance_ratio_):.4f}")
+
+            # Create new column names for principal components
+            pca_component_names = [f'known_pca_{i}' for i in range(n_components)]
+
+            # Create a DataFrame for principal components
+            df_pca_known = pd.DataFrame(data=principal_components_known,
+                                        columns=pca_component_names,
+                                        index=df_merged.index)
+
+            # Drop original known features from df_merged
+            df_merged.drop(columns=pca_known_cols, inplace=True)
+
+            # Add new principal components to df_merged
+            df_merged = pd.concat([df_merged, df_pca_known], axis=1)
+        else:
+             logging.debug(f'Station {station_id}: No suitable known features for PCA found.')
+    # ---------------------------
 
     # Final cleanup
     df_merged.dropna(inplace=True)
+
+    # Ensure index is sorted (should already be, but safe is safe)
     df_merged.sort_index(inplace=True)
 
-    # Ensure time series starts at hour divisible by 3 (analog zu openmeteo)
-    first_timestamp = df_merged.index[0]
-    first_hour = first_timestamp.hour
-    if first_hour % 3 != 0:
-        next_valid_hour = ((first_hour // 3) + 1) * 3
-        if next_valid_hour >= 24:
-            start_timestamp = first_timestamp.replace(hour=0, minute=0, second=0, microsecond=0) + pd.Timedelta(days=1)
-        else:
-            start_timestamp = first_timestamp.replace(hour=next_valid_hour, minute=0, second=0, microsecond=0)
-        df_merged = df_merged[df_merged.index >= start_timestamp]
+    # We removed the manual timestamp filtering because we now strictly filter for complete 48h forecasts per starttime
+    # This is more robust and fits the MultiIndex structure better.
 
     return df_merged
 
@@ -1073,6 +1368,7 @@ def preprocess_synth_wind_openmeteo(path: str,
     df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
     df.set_index(timestamp_col, inplace=True)
     commissioning_date = wind_parameter.loc[wind_parameter.park_id == park_id]['commissioning_date'].values[0]
+    altitude = wind_parameter.loc[wind_parameter.park_id == park_id]['altitude'].values[0]
     if 'random_seeds' not in config['params']:
         random.seed(config['params']['random_seed'])
     else:
@@ -1110,6 +1406,7 @@ def preprocess_synth_wind_openmeteo(path: str,
         static_data['park_id'] = park_id
         static_data['park_age'] = park_age_years
         static_data['installed_capacity'] = installed_capacity
+        static_data['altitude'] = altitude
         for index, turbine in turbines.iterrows():
             turbine_name = turbine['turbine_name']
             turbine_id = turbine['turbine']
@@ -1132,7 +1429,7 @@ def preprocess_synth_wind_openmeteo(path: str,
         for index, turbine in turbines.iterrows():
             turbine_id = turbine['turbine']
             turbine_col = f'wind_speed_{turbine_id}'  # turbine_id is already 't1', 't2', etc.
-            logging.debug(f"Looking for turbine column: {turbine_col}")
+            #logging.debug(f"Looking for turbine column: {turbine_col}")
             if turbine_col in df.columns:
                 rel_features.append(turbine_col)
             else:
@@ -1198,7 +1495,7 @@ def preprocess_synth_wind_openmeteo(path: str,
                         nwp_features.append(model_specific_col)
                         new_rel_features.append(model_specific_col)
                     else:
-                        logging.debug(f"Column {model_specific_col} not found in NWP data for model {model}")
+                        logging.warning(f"Column {model_specific_col} not found in NWP data for model {model}")
             else:
                 if col not in new_rel_features:  # Avoid duplicates
                     new_rel_features.append(col)
@@ -1311,7 +1608,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          test_start: pd.Timestamp = None,
                          test_end: pd.Timestamp = None,
                          t_0: int = 0,
-                         scale_target: bool = False): # New flag to control lag feature
+                         scale_target: bool = False,
+                         scaler_x: StandardScaler = None): # New flag to control lag feature
     """
     Prepares data for a Temporal Fusion Transformer, creating a lagged target input.
     Args:
@@ -1339,25 +1637,15 @@ def prepare_data_for_tft(data: pd.DataFrame,
         known_future_cols=known_future_cols,
         observed_past_cols=observed_past_cols
     )
-    logging.debug(f"Known future columns for TFT: {known_future_cols}")
-    logging.debug(f"Observed past columns for TFT: {observed_past_cols}")
+    #logging.debug(f"Known future columns for TFT: {known_future_cols}")
+    #logging.debug(f"Observed past columns for TFT: {observed_past_cols}")
     # add target to observed_past_cols if not already included
     #if target_col not in observed_past_cols:
     #    observed_past_cols.append(target_col)
     df = data.copy()
     # --- Data Splitting ---
-    if test_start:
-        train_end = test_start - pd.Timedelta(hours=0.25)
-    else:
-        train_periods = int(len(df) * train_frac)
-        train_end = df.index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
-        test_start = train_end + pd.Timedelta(hours=0.25)
-
-    train_end = pd.Timestamp(train_end, tzinfo=data.index.tz)
-    test_start = pd.Timestamp(test_start, tzinfo=data.index.tz)
-    test_end = pd.Timestamp(test_end, tzinfo=data.index.tz)
-    train_df = df[:train_end]
-    test_df = df[test_start:test_end]
+    # Use helper function for splitting which handles MultiIndex correctly
+    train_df, test_df = split_data(df, train_frac, test_start, test_end, t_0)
 
     #logging.info(f"Training data range: {train_df.index.min()} to {train_df.index.max()} ({len(train_df)} rows)")
     #logging.info(f"Test data range:     {test_df.index.min()} to {test_df.index.max()} ({len(test_df)} rows)")
@@ -1367,18 +1655,103 @@ def prepare_data_for_tft(data: pd.DataFrame,
                                          static_cols=static_cols)
     X_static_test = get_static_features(data=test_df,
                                         static_cols=static_cols)
+
+    # Scale Static Features if scaler_x is provided and static features exist
+    # CRITICAL: Static features must be scaled with the same scaler as dynamic features!
+    if scaler_x and X_static_train.size > 0 and static_cols:
+        try:
+            # Check if scaler knows about static features
+            if hasattr(scaler_x, 'feature_names_in_'):
+                scaler_features = list(scaler_x.feature_names_in_)
+                # Find which static features are in the scaler
+                static_features_in_scaler = [col for col in static_cols if col in scaler_features]
+
+                if static_features_in_scaler:
+                    # Create a dummy dataframe with just the static features for transformation
+                    # We need to create a row with all features the scaler expects
+                    dummy_row_train = pd.DataFrame(0.0, index=[0], columns=scaler_features)
+                    dummy_row_test = pd.DataFrame(0.0, index=[0], columns=scaler_features)
+
+                    # Fill in the static feature values
+                    for i, col in enumerate(static_cols):
+                        if col in static_features_in_scaler:
+                            dummy_row_train[col] = X_static_train[i]
+                            dummy_row_test[col] = X_static_test[i]
+
+                    # Transform
+                    scaled_train = scaler_x.transform(dummy_row_train)
+                    scaled_test = scaler_x.transform(dummy_row_test)
+
+                    # Extract only the static feature columns
+                    static_indices = [scaler_features.index(col) for col in static_features_in_scaler]
+                    X_static_train = scaled_train[0, static_indices]
+                    X_static_test = scaled_test[0, static_indices]
+
+                    logging.debug(f"Static features scaled using global scaler_x: {static_features_in_scaler}")
+                    logging.debug(f"Scaled static train: shape={X_static_train.shape}, values={X_static_train}")
+                    logging.debug(f"Scaled static test: shape={X_static_test.shape}, values={X_static_test}")
+
+                    # Ensure correct shape: should be (n_static_features,)
+                    assert X_static_train.shape == (len(static_features_in_scaler),), \
+                        f"X_static_train has wrong shape: {X_static_train.shape}, expected ({len(static_features_in_scaler)},)"
+                    assert X_static_test.shape == (len(static_features_in_scaler),), \
+                        f"X_static_test has wrong shape: {X_static_test.shape}, expected ({len(static_features_in_scaler)},)"
+
+                else:
+                    logging.warning(f"Static features {static_cols} not found in scaler_x feature names. "
+                                  f"Static features will NOT be scaled! This may cause poor model performance.")
+            else:
+                logging.warning("Scaler has no feature_names_in_. Cannot verify if static features are included. "
+                              "Static features will NOT be scaled! This may cause poor model performance.")
+        except Exception as e:
+            logging.error(f"Error scaling static features: {e}. "
+                        f"Static features will NOT be scaled! This may cause poor model performance.")
+
     # Scale Known Future Features
     known_train_data, known_test_data = None, None
-    if known_future_cols:
-        known_train_data, known_test_data, scalers['x_known'] = apply_scaling(train_df[known_future_cols].values,
-                                                                            test_df[known_future_cols].values,
-                                                                            StandardScaler)
+
     # Scale Observed Past Features (now includes lagged target if enabled)
     observed_train_data, observed_test_data = None, None
-    if observed_past_cols:
-        observed_train_data, observed_test_data, scalers['x_observed'] = apply_scaling(train_df[observed_past_cols].values,
-                                                                                    test_df[observed_past_cols].values,
-                                                                                    StandardScaler)
+
+    if scaler_x:
+        # GLOBAL SCALING STRATEGY
+        # We must scale the *entire* feature set because scaler_x was fitted on all features.
+        # We cannot scale subsets (known/observed) individually with the global scaler.
+
+        # Identify all feature columns (everything except target)
+        # Note: train_df/test_df might contain target_col
+        feature_cols = [c for c in train_df.columns if c != target_col]
+
+        # Create copies to avoid side effects
+        train_df_scaled = train_df.copy()
+        test_df_scaled = test_df.copy()
+
+        # Transform all features
+        # We use the DataFrame directly so sklearn can match feature names
+        train_df_scaled[feature_cols] = scaler_x.transform(train_df[feature_cols])
+        test_df_scaled[feature_cols] = scaler_x.transform(test_df[feature_cols])
+
+        # Now extract the specific columns from the scaled dataframes
+        if known_future_cols:
+            known_train_data = train_df_scaled[known_future_cols].values
+            known_test_data = test_df_scaled[known_future_cols].values
+            scalers['x_known'] = scaler_x
+
+        if observed_past_cols:
+            observed_train_data = train_df_scaled[observed_past_cols].values
+            observed_test_data = test_df_scaled[observed_past_cols].values
+            scalers['x_observed'] = scaler_x
+
+    else:
+        # LOCAL SCALING STRATEGY (Per Group)
+        if known_future_cols:
+            known_train_data, known_test_data, scalers['x_known'] = apply_scaling(train_df[known_future_cols].values,
+                                                                                test_df[known_future_cols].values,
+                                                                                StandardScaler)
+        if observed_past_cols:
+            observed_train_data, observed_test_data, scalers['x_observed'] = apply_scaling(train_df[observed_past_cols].values,
+                                                                                        test_df[observed_past_cols].values,
+                                                                                        StandardScaler)
     # Scale Target Variable (y) Separately
     target_train_raw = train_df[[target_col]].values
     target_test_raw = test_df[[target_col]].values
@@ -1422,16 +1795,16 @@ def prepare_data_for_tft(data: pd.DataFrame,
     if X_static_test.size > 0 and num_test_samples > 0:
         X_static_test = np.tile(X_static_test, (num_test_samples, 1))
 
-    logging.debug("Shapes of generated arrays (Train):")
+    #logging.debug("Shapes of generated arrays (Train):")
     # Expected shapes:
     # X_static: (num_samples, n_static_features)
     # X_known:  (num_samples, history_len + future_horizon, n_known_features)
     # X_observed:(num_samples, history_len, n_observed_input_features)
     # y:        (num_samples, future_horizon)
-    logging.debug(f"X_static_train:   {X_static_train.shape}")
-    logging.debug(f"X_known_train:    {X_known_train.shape}")
-    logging.debug(f"X_observed_train: {X_observed_train.shape}")
-    logging.debug(f"y_train:          {y_train.shape}")
+    #logging.debug(f"X_static_train:   {X_static_train.shape}")
+    #logging.debug(f"X_known_train:    {X_known_train.shape}")
+    #logging.debug(f"X_observed_train: {X_observed_train.shape}")
+    #logging.debug(f"y_train:          {y_train.shape}")
 
     # --- Return Results ---
     results = {}
@@ -1462,6 +1835,11 @@ def prepare_features_for_tft(cols: list,
                              observed_past_cols: list):
     new_known_cols = []
     new_observed_cols = []
+
+    # Check for PCA columns (if PCA was applied in preprocessing)
+    pca_cols = [c for c in cols if 'known_pca_' in c]
+    if pca_cols:
+        new_known_cols.extend(pca_cols)
 
     # Handle specific feature mappings for Icon-D2 data
     for known_feat in known_future_cols:
@@ -1509,7 +1887,7 @@ def create_tft_sequences(known_data: np.ndarray,
                          future_len: int,
                          step_size: int = 1):
         """Creates sequences for TFT inputs and outputs."""
-        X_known_list, X_observed_list, y_list, index_list = [], [], [], []
+        X_known_list, X_observed_list, y_list, index_positions = [], [], [], []
         total_len = history_len + future_len
         if observed_data is not None:
             len_data = len(observed_data)
@@ -1523,10 +1901,239 @@ def create_tft_sequences(known_data: np.ndarray,
                 known_future_window = known_data[i : i + total_len]
                 X_known_list.append(known_future_window)
             target_window = target_data[i + history_len : i + total_len].flatten() # Ensure shape (future_horizon,)
-            timestamp = indices[i + history_len]
             y_list.append(target_window)
-            index_list.append(timestamp)
+            index_positions.append(i + history_len)
+
+        # Preserve DatetimeIndex/MultiIndex type instead of converting to numpy array
+        index_list = indices[index_positions] if len(index_positions) > 0 else indices[[]]
+
         return (np.array(X_known_list),
                 np.array(X_observed_list),
                 np.array(y_list),
-                np.array(index_list))
+                index_list)  # Return pandas Index, not numpy array
+
+
+def prepare_data_for_stemgnn(data: pd.DataFrame,
+                             n_nodes: int,
+                             history_length: int,
+                             future_horizon: int,
+                             step_size: int = 1,
+                             train_frac: float = 0.75,
+                             target_col: str = 'power',
+                             test_start: pd.Timestamp = None,
+                             test_end: pd.Timestamp = None,
+                             t_0: int = 0,
+                             scale_target: bool = False,
+                             scaler_x: StandardScaler = None):
+    """
+    Prepares data for StemGNN.
+    Ensures columns are ordered by Node: [Node1_Feat1, Node1_Feat2, ..., Node2_Feat1, ...]
+    """
+    df = data.copy()
+
+    # Identify Node Columns
+    # Assuming columns have suffix _1, _2, ..., _n_nodes
+    # Or they are just features if n_nodes=1?
+    # In preprocess_synth_wind_icond2, we have _1, _2...
+
+    # We need to find all features that have node suffixes
+    # and group them.
+
+    # 1. Identify base features
+    # We look for columns ending with _1, _2, etc.
+    # But wait, some columns might not have suffixes (e.g. power, timestamp).
+    # Power is usually the target and might be single (for the park) or per turbine?
+    # Usually 'power' is the target for the whole park.
+    # StemGNN expects (Batch, Time, Nodes, Features).
+    # If we are forecasting 'power' for the park, is 'power' one of the nodes?
+    # Or is 'power' a separate target?
+    # The user's StemGNN implementation (and my port) outputs (Batch, Output_Dim).
+    # If Output_Dim = Horizon, it forecasts a single time series (or flattened).
+    # If we want to forecast power, we usually treat it as a separate task or include it.
+
+    # However, for the GNN input, we need the grid data.
+    # Let's assume we want to use the grid points as nodes.
+    # And maybe 'power' is just another feature or target?
+    # If the model predicts 'power', it comes from the final Dense layer.
+
+    # Reordering logic:
+    # Find all columns matching pattern `_{i}` where i in 1..n_nodes
+
+    node_cols = []
+    for i in range(1, n_nodes + 1):
+        # Find columns ending with _{i}
+        # Be careful not to match _{i}0 or similar.
+        # Regex: `_i$`
+        suffix = f'_{i}'
+        cols_for_node = [c for c in df.columns if c.endswith(suffix)]
+        # Sort them to ensure consistent feature order per node
+        cols_for_node.sort()
+        node_cols.extend(cols_for_node)
+
+    # Check if we found columns
+    if not node_cols:
+        logging.warning("No node-specific columns found (ending in _1, _2, ...). Using all columns as is.")
+        ordered_cols = df.columns.tolist()
+    else:
+        # Add non-node columns (like power?)
+        other_cols = [c for c in df.columns if c not in node_cols]
+        # If we want to include them, where do they go?
+        # StemGNN expects homogeneous nodes.
+        # If 'power' is the target, maybe it's not part of the GNN input grid?
+        # Or maybe we treat 'power' as a separate input?
+        # For now, let's assume the GNN input is ONLY the grid data.
+        # And 'power' is the target y.
+        # But wait, if we want to use past 'power' as input?
+        # We can append it. But it breaks the (Nodes, Features) structure if it's just 1 column.
+        # Unless we repeat it for all nodes?
+
+        # Let's stick to the grid points for the GNN part.
+        ordered_cols = node_cols
+
+    # Filter df to ordered columns for X
+    # BUT if we have a global scaler, we must scale BEFORE reordering/filtering
+    # because the scaler expects the original columns.
+
+    scalers = {} # Initialize scalers dictionary here
+    already_scaled_x = False
+
+    if scaler_x:
+        # We need to scale the features in df that match scaler's features.
+        # scaler_x was fitted on df_train (from train_cl.py), which had target dropped.
+        # df here has target.
+
+        # Identify feature columns (all except target)
+        feature_cols = [c for c in df.columns if c != target_col]
+
+        # Check if scaler feature names match
+        if hasattr(scaler_x, 'feature_names_in_'):
+            # Sklearn 1.0+ stores feature names
+            scaler_features = scaler_x.feature_names_in_
+            # Ensure we have these columns
+            missing = [c for c in scaler_features if c not in df.columns]
+            if missing:
+                logging.warning(f"Scaler expects features {missing} which are missing in data.")
+
+            # Select features in correct order for scaler
+            X_to_scale = df[scaler_features]
+
+            # Transform
+            X_scaled_values = scaler_x.transform(X_to_scale)
+
+            # Create DataFrame with scaled values and original feature names
+            X_scaled_df = pd.DataFrame(X_scaled_values, columns=scaler_features, index=df.index)
+
+            # Now we can select the ordered node columns from this scaled dataframe
+            # ordered_cols must be a subset of scaler_features
+            # (assuming node columns are features)
+
+            # Check if ordered_cols are in X_scaled_df
+            valid_ordered_cols = [c for c in ordered_cols if c in X_scaled_df.columns]
+            if len(valid_ordered_cols) < len(ordered_cols):
+                logging.warning("Some node columns were not found in the scaled data.")
+
+            X_df = X_scaled_df[valid_ordered_cols]
+
+            # We also need y_df
+            y_df = df[[target_col]]
+
+            # We have scaled X, so we don't need to scale X again later.
+            # We set a flag or handle it.
+            already_scaled_x = True
+            scalers['x'] = scaler_x
+
+        else:
+            # Fallback if no feature names (older sklearn or not fitted with DF)
+            # Assume df (minus target) matches scaler input
+            logging.warning("Scaler has no feature_names_in_. Assuming all non-target columns match scaler input.")
+            X_to_scale = df.drop(columns=[target_col], errors='ignore')
+            X_scaled_values = scaler_x.transform(X_to_scale)
+            X_scaled_df = pd.DataFrame(X_scaled_values, columns=X_to_scale.columns, index=df.index)
+            X_df = X_scaled_df[ordered_cols]
+            y_df = df[[target_col]]
+            already_scaled_x = True
+            scalers['x'] = scaler_x
+
+    else:
+        # Standard path: Filter first, then scale later
+        X_df = df[ordered_cols]
+        y_df = df[[target_col]]
+        already_scaled_x = False
+
+    # Split
+    if test_start:
+        train_end = test_start - pd.Timedelta(hours=0.25)
+    else:
+        train_periods = int(len(df) * train_frac)
+        train_end = df.index[train_periods].normalize() + pd.Timedelta(hours=(t_0-0.25))
+        test_start = train_end + pd.Timedelta(hours=0.25)
+
+    train_end = pd.Timestamp(train_end, tzinfo=data.index.tz)
+    test_start = pd.Timestamp(test_start, tzinfo=data.index.tz)
+    test_end = pd.Timestamp(test_end, tzinfo=data.index.tz)
+
+    X_train_df = X_df[:train_end]
+    X_test_df = X_df[test_start:test_end]
+    y_train_df = y_df[:train_end]
+    y_test_df = y_df[test_start:test_end]
+    # Scaling (if not already done)
+    if not already_scaled_x:
+        scaler_x = StandardScaler()
+        X_train_scaled = scaler_x.fit_transform(X_train_df)
+        X_test_scaled = scaler_x.transform(X_test_df)
+        scalers['x'] = scaler_x
+    else:
+        # Already scaled
+        X_train_scaled = X_train_df.values
+        X_test_scaled = X_test_df.values
+
+    scaler_y = StandardScaler()
+    if scale_target:
+        y_train_scaled = scaler_y.fit_transform(y_train_df)
+        y_test_scaled = scaler_y.transform(y_test_df)
+    else:
+        y_train_scaled = y_train_df.values
+        y_test_scaled = y_test_df.values
+
+    # Windowing
+    # We use make_windows (efficient)
+    # X: (Batch, Time, Flat)
+    # y: (Batch, Horizon)
+
+    # We need to align X and y.
+    # make_windows takes data and returns windows.
+    # We need X windows and y windows (targets).
+
+    def create_windows(X, y, indices, seq_len, horizon, step=1):
+        X_wins = []
+        y_wins = []
+        idx_wins = []
+        # Total length needed: seq_len + horizon
+        # We take X[i : i+seq_len] and y[i+seq_len : i+seq_len+horizon]
+        # But y is usually a single step or sequence.
+        # If horizon > 1, y is sequence.
+
+        start_idx = 0
+        max_idx = len(X) - seq_len - horizon + 1
+
+        for i in range(start_idx, max_idx, step):
+            X_wins.append(X[i : i+seq_len])
+            y_wins.append(y[i+seq_len : i+seq_len+horizon].flatten())
+            idx_wins.append(indices[i+seq_len]) # Timestamp at forecast start (t+1)
+
+        return np.array(X_wins), np.array(y_wins), np.array(idx_wins)
+
+    X_train, y_train, index_train = create_windows(X_train_scaled, y_train_scaled, X_train_df.index, history_length, future_horizon, step_size)
+    X_test, y_test, index_test = create_windows(X_test_scaled, y_test_scaled, X_test_df.index, history_length, future_horizon, step_size)
+
+    results = {
+        'X_train': X_train,
+        'y_train': y_train,
+        'X_test': X_test,
+        'y_test': y_test,
+        'index_train': index_train,
+        'index_test': index_test,
+        'scalers': {'x': scaler_x, 'y': scaler_y if scale_target else None}
+    }
+
+    return results

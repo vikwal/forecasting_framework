@@ -125,7 +125,7 @@ hpo:
   metric: 'rmse'
   trials: 1000
   kfolds: 12
-  min_train_len: 8760 # hours
+  min_train_date: '2024-07-31'
   val_split: 1
   pruning:
     use_median_pruner: True

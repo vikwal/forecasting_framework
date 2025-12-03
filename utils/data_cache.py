@@ -8,7 +8,7 @@ import hashlib
 import logging
 import numpy as np
 from typing import Dict, List, Any, Tuple, Optional
-from . import preprocessing, tools
+from . import preprocessing, tools, hpo
 
 
 class DataCache:
@@ -52,6 +52,10 @@ class DataCache:
                 'horizon': config['model']['horizon'],
                 'step_size': config['model'].get('step_size', 1),
                 'output_dim': config['model']['output_dim']
+            },
+            'hpo': {
+                'min_train_date': config['hpo'].get('min_train_date', None),
+                'kfolds': config['hpo'].get('kfolds', None)
             }
         }
 
@@ -451,15 +455,12 @@ def create_or_load_preprocessed_data(config: Dict,
             prepared_datasets.append(prepared_data)
 
         # Create k-folds
-        from . import hpo
-        min_train_len = config['hpo'].get('min_train_len', None)
-        step_size = config['model'].get('step_size', 1)
+        min_train_date = config['hpo'].get('min_train_date', None)
         combined_kfolds = hpo.kfolds_with_per_file_min_train_len(
             prepared_datasets=prepared_datasets,
             n_splits=config['hpo']['kfolds'],
             val_split=config['hpo']['val_split'],
-            min_train_len=min_train_len,
-            step_size=step_size
+            min_train_date=min_train_date
         )
 
         # Save to cache

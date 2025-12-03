@@ -39,8 +39,8 @@ params:
     #'cut_in',
     #'cut_out',
     #'rated_wind_speed',
-    'hub_height',
-    'rotor_diameter',
+    # 'hub_height',
+    # 'rotor_diameter',
   ]
   aggregate_nwp_layers: 'not' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True

@@ -5,6 +5,8 @@ import os
 import pickle
 import pandas as pd
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from collections import defaultdict
 
@@ -67,6 +69,161 @@ def read_sim(results_dir, sim):
     except:
         sim_results = None
     return sim_results
+
+def plot_interactive_history(history: dict, key_prefix: str = "cl"):
+    """
+    Erstellt einen interaktiven Plotly-Plot für die Training History.
+
+    Args:
+        history: Dictionary mit den History-Daten (z.B. {'loss': [...], 'val_loss': [...]})
+        key_prefix: Eindeutiger Prefix für Streamlit-Keys, um Konflikte zu vermeiden.
+    """
+    if not history:
+        st.info("Keine History-Daten verfügbar")
+        return
+
+    # 1. Metriken gruppieren (Base Name -> {'train': key, 'val': key})
+    metric_groups = {}
+    for key in history.keys():
+        if key.startswith('val_'):
+            base = key[4:]
+            type_ = 'val'
+        else:
+            base = key
+            type_ = 'train'
+
+        if base not in metric_groups:
+            metric_groups[base] = {}
+        metric_groups[base][type_] = key
+
+    available_base_metrics = list(metric_groups.keys())
+
+    # 2. Standardauswahl definieren
+    default_metrics = []
+    # Priorität: mse > loss > rmse > mae
+    priority_metrics = ['mse', 'loss', 'rmse', 'mae']
+    for m in priority_metrics:
+        if m in available_base_metrics:
+            default_metrics.append(m)
+            break # Nur eine Standard-Metrik für den Anfang, um Überladung zu vermeiden
+
+    # Filtere Defaults, die tatsächlich existieren
+    default_metrics = [m for m in default_metrics if m in available_base_metrics]
+
+    # 3. Multiselect für Basis-Metriken
+    selected_base_metrics = st.multiselect(
+        "Metriken auswählen:",
+        options=available_base_metrics,
+        default=default_metrics,
+        key=f"{key_prefix}_metrics_select"
+    )
+
+    if not selected_base_metrics:
+        st.warning("Bitte wählen Sie mindestens eine Metrik aus.")
+        return
+
+    # 4. Plot erstellen
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Farb-Mapping
+    # R^2 -> Orange
+    # Loss/Error -> Blau
+    # Andere -> Zyklisch
+
+    # Farben definieren (Plotly Standardfarben)
+    COLOR_BLUE = 'rgb(31, 119, 180)'
+    COLOR_ORANGE = 'rgb(255, 127, 14)'
+    COLOR_GREEN = 'rgb(44, 160, 44)'
+    COLOR_RED = 'rgb(214, 39, 40)'
+
+    for base_metric in selected_base_metrics:
+        group = metric_groups[base_metric]
+
+        # Bestimmen, ob rechte Achse verwendet werden soll (für R^2)
+        is_r2 = 'r2' in base_metric.lower() or 'r^2' in base_metric.lower()
+        use_secondary_y = is_r2
+
+        # Farbe bestimmen
+        if is_r2:
+            base_color = COLOR_ORANGE
+        elif base_metric in ['loss', 'mse', 'rmse', 'mae']:
+            base_color = COLOR_BLUE
+        else:
+            base_color = COLOR_GREEN # Fallback
+
+        # Train Plot
+        if 'train' in group:
+            key = group['train']
+            values = history[key]
+            epochs = list(range(1, len(values) + 1))
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs,
+                    y=values,
+                    name=f"{base_metric} (Train)",
+                    mode='lines',
+                    line=dict(color=base_color)
+                ),
+                secondary_y=use_secondary_y,
+            )
+
+        # Val Plot
+        if 'val' in group:
+            key = group['val']
+            values = history[key]
+            epochs = list(range(1, len(values) + 1))
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs,
+                    y=values,
+                    name=f"{base_metric} (Val)",
+                    mode='lines',
+                    line=dict(color=base_color, dash='dot') # Gestrichelt für Validation
+                ),
+                secondary_y=use_secondary_y,
+            )
+
+    # Layout anpassen
+    fig.update_layout(
+        title_text="Training History",
+        xaxis_title="Epochs",
+        hovermode="x unified",
+        font=dict(size=14), # Globale Schriftgröße
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=14) # Legende Schriftgröße
+        )
+    )
+
+    # Achsenbeschriftungen
+    fig.update_xaxes(
+        title_font=dict(size=16),
+        tickfont=dict(size=14)
+    )
+    fig.update_yaxes(
+        title_text="Loss / Error",
+        secondary_y=False,
+        title_font=dict(size=16),
+        tickfont=dict(size=14)
+    )
+    fig.update_yaxes(
+        title_text="R^2 Score",
+        secondary_y=True,
+        title_font=dict(size=16),
+        tickfont=dict(size=14)
+    )
+
+    # Fix für use_container_width Deprecation Warning
+    # User Request: For `use_container_width=True`, use `width='stretch'`.
+    try:
+        st.plotly_chart(fig, width="stretch")
+    except:
+         # Fallback für ältere Streamlit Versionen
+         st.plotly_chart(fig, use_container_width=True)
 
 # Haupttitel
 st.title("📊 Forecasting Evaluation Dashboard")
@@ -248,6 +405,9 @@ with tab2:
                     with col3:
                         st.write('**More Info:**')
                         st.write(f'- Next n grid points: {params.get("next_n_grid_points", "N/A")}')
+                        st.write(f'- Aggregate grid points: {params.get("aggregate_grid_points", "N/A")}')
+                        st.write(f'- NWP models: {params["openmeteo"].get("nwp_models", "N/A")}')
+                        st.write(f'- Turbines per park: {params.get("turbines_per_park", "N/A")}')
 
                 # Metriken anzeigen
                 st.subheader("📊 Evaluations-Metriken")
@@ -263,20 +423,21 @@ with tab2:
                 fontsize=11
                 st.subheader("📈 Training History")
                 if 'history' in cl_results and cl_results['history']:
-                    fig, ax = plt.subplots(figsize=(7, 3))
+                    plot_interactive_history(cl_results['history'], key_prefix=f"cl_{selected_sim_key}")
+                    # fig, ax = plt.subplots(figsize=(7, 3))
 
-                    if 'loss' in cl_results['history']:
-                        ax.plot(cl_results['history']['loss'], label='Train Loss')
-                    if 'val_loss' in cl_results['history']:
-                        ax.plot(cl_results['history']['val_loss'], label='Val Loss')
+                    # if 'loss' in cl_results['history']:
+                    #     ax.plot(cl_results['history']['loss'], label='Train Loss')
+                    # if 'val_loss' in cl_results['history']:
+                    #     ax.plot(cl_results['history']['val_loss'], label='Val Loss')
 
-                    ax.set_xlabel('Epochs', fontsize=fontsize)
-                    ax.set_ylabel('Loss', fontsize=fontsize)
-                    ax.legend(fontsize=fontsize)
-                    ax.grid(True, alpha=0.3)
+                    # ax.set_xlabel('Epochs', fontsize=fontsize)
+                    # ax.set_ylabel('Loss', fontsize=fontsize)
+                    # ax.legend(fontsize=fontsize)
+                    # ax.grid(True, alpha=0.3)
 
-                    st.pyplot(fig)
-                    plt.close()
+                    # st.pyplot(fig)
+                    # plt.close()
                 else:
                     st.info("Keine History-Daten verfügbar")
             else:
@@ -333,23 +494,11 @@ with tab2:
                 st.subheader("📈 Training History")
                 if 'history' in fl_results and fl_results['history']:
                     if 'metrics_aggregated' in fl_results['history']:
-                        fig, ax = plt.subplots(figsize=(9, 5))
-
                         metrics_agg = fl_results['history']['metrics_aggregated']
-                        if 'train_loss' in metrics_agg:
-                            ax.plot(metrics_agg['train_loss'], label='Train Loss')
-                        if 'eval_loss' in metrics_agg:
-                            ax.plot(metrics_agg['eval_loss'], label='Val Loss')
-
-                        ax.set_xlabel('Epochs', fontsize=fontsize)
-                        ax.set_ylabel('Loss', fontsize=fontsize)
-                        ax.legend(fontsize=fontsize)
-                        ax.grid(True, alpha=0.3)
-
-                        st.pyplot(fig)
-                        plt.close()
+                        plot_interactive_history(metrics_agg, key_prefix=f"fl_{selected_sim_key}")
                     else:
                         st.info("Keine aggregierten Metriken verfügbar")
+
                 else:
                     st.info("Keine History-Daten verfügbar")
             else:

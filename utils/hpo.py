@@ -4,7 +4,6 @@ import optuna
 import logging
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -12,30 +11,25 @@ from . import tools, models
 
 
 def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
-                                min_train_len: int = None,
-                                step_size: int = 1) -> Dict[str, Any]:
+                                min_train_date: str = None) -> Dict[str, Any]:
     """
-    Wendet min_train_len auf jede einzelne Datei an, bevor sie kombiniert werden.
+    Wendet min_train_date auf jede einzelne Datei an, bevor sie kombiniert werden.
 
     Args:
         prepared_datasets: Liste von prepared_data Dictionaries von jeder Datei
-        min_train_len: Mindestanzahl ursprünglicher Samples für Training pro Datei
-        step_size: Schrittweite beim Windowing im Preprocessing
+        min_train_date: End-Datum für minimum training block (z.B. '2024-07-31')
+                       Alle Daten mit starttime <= diesem Datum werden als min_block verwendet
 
     Returns:
         Dictionary mit 'min_blocks' (kombinierte minimum blocks) und 'remaining_datasets'
         (verbleibende Daten pro Datei nach Abzug der min blocks)
     """
-    if min_train_len is None:
-        # Wenn kein min_train_len, gib alle Daten als "remaining" zurück
+    if min_train_date is None:
+        # Wenn kein min_train_date, gib alle Daten als "remaining" zurück
         return {
             'min_blocks': None,
             'remaining_datasets': prepared_datasets
         }
-
-    # Berechne die tatsächliche minimum training length basierend auf step_size
-    actual_min_train_len = max(1, min_train_len // step_size)
-    logging.debug(f"Per-file min_train_len={min_train_len} with step_size={step_size} -> actual min_train_len={actual_min_train_len}")
 
     min_blocks = []
     remaining_datasets = []
@@ -43,10 +37,62 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
     for i, prepared_data in enumerate(prepared_datasets):
         X_train = prepared_data['X_train']
         y_train = prepared_data['y_train']
+        index_train = prepared_data.get('index_train')
 
-        if len(y_train) <= actual_min_train_len:
-            logging.debug(f"File {i}: Not enough data ({len(y_train)} samples) for min_train_len ({actual_min_train_len}). Using all data as minimum block.")
-            # Wenn die ganze Datei kleiner ist als min_train_len, verwende alles als min_block
+        if index_train is None:
+            raise ValueError(f"File {i}: 'index_train' not found in prepared_data. "
+                           "Cannot use min_train_date without index information.")
+
+        # Bestimme min_block_end basierend auf min_train_date
+        # Ensure min_train_date is a string first (YAML might load it as datetime object or number)
+        if not isinstance(min_train_date, str):
+            min_train_date = str(min_train_date)
+
+        min_date = pd.to_datetime(min_train_date, errors='coerce')
+
+        if pd.isna(min_date):
+            raise ValueError(f"File {i}: Could not parse min_train_date '{min_train_date}' as a valid date")
+
+        # Handle timezone
+        if min_date.tzinfo is None:
+            min_date = min_date.tz_localize('UTC')
+        else:
+            min_date = min_date.tz_convert('UTC')
+
+        if isinstance(index_train, pd.MultiIndex):
+            # MultiIndex: Filtere auf 'starttime' level
+            mask = index_train.get_level_values('starttime') <= min_date
+            min_block_end = mask.sum()
+            logging.debug(f"File {i}: MultiIndex detected, filtering on 'starttime' <= {min_date}")
+        else:
+            # Regular DatetimeIndex: Filtere direkt
+            mask = index_train <= min_date
+            min_block_end = mask.sum()
+            logging.debug(f"File {i}: Regular DatetimeIndex detected, filtering on index <= {min_date}")
+
+        if min_block_end == 0:
+            logging.warning(f"File {i}: No data found with dates <= {min_train_date}. "
+                          f"Skipping this file for min_blocks.")
+            # Erstelle leeres min_block
+            if isinstance(X_train, dict):
+                X_min_block = {key: np.array([]).reshape(0, *value.shape[1:]) for key, value in X_train.items() if len(value) > 0}
+            else:
+                X_min_block = np.array([]).reshape(0, *X_train.shape[1:])
+            y_min_block = np.array([])
+
+            min_blocks.append({
+                'X_train': X_min_block,
+                'y_train': y_min_block,
+                'X_test': prepared_data.get('X_test', None),
+                'y_test': prepared_data.get('y_test', None)
+            })
+            remaining_datasets.append(prepared_data)
+            continue
+
+        if len(y_train) <= min_block_end:
+            logging.debug(f"File {i}: All data ({len(y_train)} samples) is within min_train_date ({min_train_date}). "
+                        f"Using all data as minimum block.")
+            # Wenn die ganze Datei innerhalb des min_train_date liegt, verwende alles als min_block
             min_blocks.append(prepared_data)
             # Erstelle leeres "remaining" dataset
             if isinstance(X_train, dict):
@@ -63,8 +109,6 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
             })
         else:
             # Teile die Datei in minimum block + remaining
-            min_block_end = actual_min_train_len
-
             # Minimum block
             if isinstance(X_train, dict):
                 X_min_block = {key: value[:min_block_end] for key, value in X_train.items() if len(value) > 0}
@@ -90,7 +134,8 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
                 'y_test': prepared_data.get('y_test', None)
             })
 
-            logging.debug(f"File {i}: Split into min_block ({len(y_min_block)} samples) + remaining ({len(y_remaining)} samples)")
+            logging.debug(f"File {i}: Split into min_block ({len(y_min_block)} samples up to {min_train_date}) + "
+                        f"remaining ({len(y_remaining)} samples)")
 
     return {
         'min_blocks': min_blocks,
@@ -101,17 +146,15 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
 def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
                                       n_splits: int,
                                       val_split: float = None,
-                                      min_train_len: int = None,
-                                      step_size: int = 1) -> List:
+                                      min_train_date: str = None) -> List:
     """
-    Erstellt k-folds mit per-file minimum training length.
+    Erstellt k-folds mit per-file minimum training date.
 
     Args:
         prepared_datasets: Liste von prepared_data Dictionaries von jeder Datei
         n_splits: Anzahl der Splits
         val_split: Validation split ratio (nur für n_splits=1)
-        min_train_len: Mindestanzahl ursprünglicher Samples für Training pro Datei
-        step_size: Schrittweite beim Windowing im Preprocessing
+        min_train_date: End-Datum für minimum training block (z.B. '2024-07-31')
 
     Returns:
         Liste von ((X_train_combined, y_train_combined), (X_val_combined, y_val_combined)) Tupeln
@@ -132,13 +175,13 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
         X_train, y_train, X_val, y_val = split_val(X=X_train_all, y=y_train_all, val_split=val_split)
         return [((X_train, y_train), (X_val, y_val))]
 
-    # Wende min_train_len pro Datei an
-    split_result = apply_min_train_len_per_file(prepared_datasets, min_train_len, step_size)
+    # Wende min_train_date pro Datei an
+    split_result = apply_min_train_len_per_file(prepared_datasets, min_train_date)
     min_blocks = split_result['min_blocks']
     remaining_datasets = split_result['remaining_datasets']
 
     if min_blocks is None:
-        # Kein min_train_len spezifiziert, verwende normale Kombination + k-folds
+        # Kein min_train_date spezifiziert, verwende normale Kombination + k-folds
         X_train_all = None
         y_train_all = None
 
@@ -150,8 +193,7 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
                 X_train_all = tools.concatenate_data(old=X_train_all, new=prepared_data['X_train'])
                 y_train_all = np.concatenate((y_train_all, prepared_data['y_train']))
 
-        return kfolds(X=X_train_all, y=y_train_all, n_splits=n_splits, val_split=val_split,
-                     min_train_len=None, step_size=step_size)
+        return kfolds(X=X_train_all, y=y_train_all, n_splits=n_splits, val_split=val_split)
 
     # Kombiniere die minimum blocks effizienter
     X_min_combined = None
@@ -185,8 +227,7 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
     for prepared_data in remaining_datasets:
         if len(prepared_data['y_train']) > 0:  # Nur wenn noch Daten vorhanden sind
             fold_data = kfolds(X=prepared_data['X_train'], y=prepared_data['y_train'],
-                             n_splits=n_splits, val_split=val_split,
-                             min_train_len=None, step_size=step_size)
+                             n_splits=n_splits, val_split=val_split)
             remaining_kfolds.append(fold_data)
 
     # Kombiniere minimum block mit jedem fold - optimiert für bessere Performance
@@ -264,17 +305,101 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
     return combined_kfolds
 
 
-def create_or_load_study(path, study_name, direction, pruning_config=None):
+
+def get_objectives_from_config(config: dict) -> tuple:
+    """
+    Extract optimization objectives from config.
+
+    Supports both single-objective (backward compatible) and multi-objective optimization.
+
+    Args:
+        config: Configuration dictionary
+
+    Returns:
+        tuple: (objectives_list, is_multi_objective)
+
+        objectives_list format:
+        - Single: [{'metric': 'val_loss', 'direction': 'minimize'}]
+        - Multi: [{'metric': 'val_r2', 'direction': 'maximize'},
+                  {'metric': 'val_rmse', 'direction': 'minimize'}]
+        is_multi_objective: bool indicating if multi-objective mode
+
+    Examples:
+        # Single objective (backward compatible)
+        config = {'hpo': {'metric': 'val_loss'}}
+        >> [{'metric': 'val_loss', 'direction': 'minimize'}], False
+
+        # Multi-objective
+        config = {'hpo': {'objectives': [
+            {'metric': 'val_r2', 'direction': 'maximize'},
+            {'metric': 'val_rmse', 'direction': 'minimize'}
+        ]}}
+        >> [...], True
+    """
+    hpo_config = config.get('hpo', {})
+
+    # Check for multi-objective format (new)
+    if 'objectives' in hpo_config:
+        objectives = hpo_config['objectives']
+        if not isinstance(objectives, list) or len(objectives) == 0:
+            raise ValueError("'objectives' must be a non-empty list")
+
+        # Validate each objective
+        for obj in objectives:
+            if 'metric' not in obj or 'direction' not in obj:
+                raise ValueError("Each objective must have 'metric' and 'direction' keys")
+            if obj['direction'] not in ['maximize', 'minimize']:
+                raise ValueError(f"Direction must be 'maximize' or 'minimize', got: {obj['direction']}")
+
+        is_multi = len(objectives) > 1
+        return objectives, is_multi
+
+    # Single objective format (backward compatible)
+    elif 'metric' in hpo_config:
+        metric = hpo_config['metric']
+
+        # Infer direction from metric name
+        if 'loss' in metric.lower() or 'mse' in metric.lower() or 'mae' in metric.lower() or 'rmse' in metric.lower():
+            direction = 'minimize'
+        elif 'r2' in metric.lower() or 'accuracy' in metric.lower():
+            direction = 'maximize'
+        else:
+            # Default to minimize
+            direction = 'minimize'
+            logging.warning(f"Could not infer direction for metric '{metric}', using 'minimize'")
+
+        objectives = [{'metric': metric, 'direction': direction}]
+        return objectives, False
+
+    else:
+        raise ValueError("Config must contain either 'hpo.metric' (single) or 'hpo.objectives' (multi)")
+
+
+def create_or_load_study(path, study_name, direction=None, pruning_config=None, config=None):
+    """
+    Create or load an Optuna study with flexible single/multi-objective support.
+
+    Args:
+        path: Path to study database
+        study_name: Name of the study
+        direction: (Deprecated) Single objective direction - use config instead
+        pruning_config: Pruning configuration
+        config: Full config dict (required for multi-objective)
+
+    Returns:
+        optuna.Study object
+    """
     storage = f'sqlite:///{path}'
 
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=10,
-        n_ei_candidates=24,   # Mehr Kandidaten für Expected Improvement
-        gamma=lambda x: min(int(0.25 * x), 30),  # Kleinerer gamma (25% statt 15%)
-        multivariate=True,    # Berücksichtigt Korrelationen zwischen Parametern
-        group=True,           # Gruppiert ähnliche Parameter
+        n_ei_candidates=24,
+        gamma=lambda x: min(int(0.25 * x), 30),
+        multivariate=True,
+        group=True,
         warn_independent_sampling=False
     )
+
     pruner = None
     if pruning_config and pruning_config.get('use_median_pruner', False):
         pruner = optuna.pruners.MedianPruner(
@@ -288,6 +413,27 @@ def create_or_load_study(path, study_name, direction, pruning_config=None):
         pruner = optuna.pruners.NopPruner()
         logging.debug("Using NopPruner (no pruning)")
 
+    # Determine if multi-objective from config
+    if config is not None:
+        objectives, is_multi = get_objectives_from_config(config)
+
+        if is_multi:
+            # Multi-objective mode
+            directions = [obj['direction'] for obj in objectives]
+            objective_names = [obj['metric'] for obj in objectives]
+            logging.info(f"Multi-Objective HPO: {len(objectives)} objectives - {objective_names}")
+        else:
+            # Single objective mode (from config)
+            directions = objectives[0]['direction']
+            logging.info(f"Single-Objective HPO: {objectives[0]['metric']} ({directions})")
+    else:
+        # Backward compatibility: use direction parameter
+        if direction is None:
+            raise ValueError("Either 'config' or 'direction' must be provided")
+        directions = direction
+        is_multi = False
+        logging.warning("Using deprecated 'direction' parameter. Please provide 'config' instead.")
+
     try:
         existing_study = optuna.load_study(study_name=study_name, storage=storage)
         completed_trials = len([t for t in existing_study.trials if t.state == optuna.trial.TrialState.COMPLETE])
@@ -298,14 +444,28 @@ def create_or_load_study(path, study_name, direction, pruning_config=None):
         study = existing_study
     except:
         logging.info(f"Creating new study '{study_name}'.")
-        study = optuna.create_study(
-            storage=storage,
-            study_name=study_name,
-            direction=direction,
-            load_if_exists=False,
-            sampler=sampler,
-            pruner=pruner
-        )
+
+        if is_multi:
+            # Create multi-objective study
+            study = optuna.create_study(
+                storage=storage,
+                study_name=study_name,
+                directions=directions,  # List of directions
+                load_if_exists=False,
+                sampler=sampler,
+                pruner=pruner
+            )
+        else:
+            # Create single-objective study
+            study = optuna.create_study(
+                storage=storage,
+                study_name=study_name,
+                direction=directions,  # Single direction
+                load_if_exists=False,
+                sampler=sampler,
+                pruner=pruner
+            )
+
     return study
 
 def load_study(studies_path: str,
@@ -346,20 +506,15 @@ def split_val(X: Any,
 def kfolds(X: Any,
            y: np.ndarray,
            n_splits: int,
-           val_split: float = None,
-           min_train_len: int = None,
-           step_size: int = 1) -> List:
+           val_split: float = None) -> List:
     """
-    Erstellt k-folds für Zeitserien mit optionaler Mindesttrainingsmenge.
+    Erstellt k-folds für Zeitserien.
 
     Args:
         X: Features (numpy array oder dict für TFT)
         y: Target values
         n_splits: Anzahl der Splits
         val_split: Validation split ratio (nur für n_splits=1)
-        min_train_len: Mindestanzahl ursprünglicher Samples für Training (z.B. 8760 für 1 Jahr)
-                      Wird automatisch durch step_size geteilt für die tatsächliche Datenlänge
-        step_size: Schrittweite beim Windowing im Preprocessing (default: 1)
 
     Returns:
         Liste von ((X_train, y_train), (X_val, y_val)) Tupeln
@@ -369,85 +524,21 @@ def kfolds(X: Any,
         X_train, y_train, X_val, y_val = split_val(X=X, y=y, val_split=val_split)
         kfolds.append(((X_train, y_train), (X_val, y_val)))
         return kfolds
-    # Berechne die tatsächliche minimum training length basierend auf step_size
-    if min_train_len is not None:
-        actual_min_train_len = max(1, min_train_len // step_size)
-        logging.debug(f"min_train_len={min_train_len} with step_size={step_size} -> actual min_train_len={actual_min_train_len}")
 
-        # Stelle sicher, dass wir genug Daten haben
-        if actual_min_train_len >= len(y):
-            logging.debug(f"min_train_len ({actual_min_train_len}) >= data length ({len(y)}). Using normal TimeSeriesSplit.")
-            actual_min_train_len = None
-    else:
-        actual_min_train_len = None
-    if actual_min_train_len is not None:
-        # Neue Strategie: Fester minimum training block + k-folds auf dem Rest
-        # 1. Trenne den minimum training block ab
-        min_block_end = actual_min_train_len
-        # 2. Der Rest wird für k-folds verwendet
-        remaining_data_len = len(y) - min_block_end
-        if remaining_data_len <= 0:
-            logging.debug(f"Not enough data after minimum training block. Required: {actual_min_train_len}, available: {len(y)}")
-            # Fallback auf normale TimeSeriesSplit
-            tscv = TimeSeriesSplit(n_splits=n_splits)
-            for train_index, val_index in tscv.split(y):
-                if type(X) == dict:
-                    X_train, X_val = {}, {}
-                    for key, value in X.items():
-                        if len(value) == 0:
-                            continue
-                        X_train[key] = value[train_index]
-                        X_val[key] = value[val_index]
-                else:
-                    X_train, X_val = X[train_index], X[val_index]
-                y_train, y_val = y[train_index], y[val_index]
-                kfolds.append(((X_train, y_train), (X_val, y_val)))
-            return kfolds
-        # 3. Erstelle TimeSeriesSplit für den verbleibenden Teil
-        remaining_y = y[min_block_end:]
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        remaining_splits = list(tscv.split(remaining_y))
-        logging.debug(f"Minimum training block: 0-{min_block_end-1} ({min_block_end} samples)")
-        logging.debug(f"Remaining data for k-folds: {min_block_end}-{len(y)-1} ({remaining_data_len} samples)")
-        # 4. Kombiniere minimum block mit jedem fold
-        for i, (rel_train_index, rel_val_index) in enumerate(remaining_splits):
-            # Konvertiere relative Indizes zu absoluten Indizes
-            abs_train_index = rel_train_index + min_block_end
-            abs_val_index = rel_val_index + min_block_end
-            # Kombiniere minimum block mit dem aktuellen training teil
-            combined_train_index = np.concatenate([
-                np.arange(0, min_block_end),  # Minimum block
-                abs_train_index               # Aktueller training teil
-            ])
-            train_len = len(combined_train_index)
-            val_len = len(abs_val_index)
-            logging.debug(f"Fold {i+1}: {train_len} samples training (min_block: {min_block_end} + fold: {len(abs_train_index)}), {val_len} samples validation")
-            # Erstelle die Daten-Splits
-            if type(X) == dict:
-                X_train, X_val = {}, {}
-                for key, value in X.items():
-                    if len(value) == 0:
-                        continue
-                    X_train[key] = value[combined_train_index]
-                    X_val[key] = value[abs_val_index]
-            else:
-                X_train, X_val = X[combined_train_index], X[abs_val_index]
-            y_train, y_val = y[combined_train_index], y[abs_val_index]
-            kfolds.append(((X_train, y_train), (X_val, y_val)))
-    else:
-        tscv = TimeSeriesSplit(n_splits=n_splits)
-        for train_index, val_index in tscv.split(y):
-            if type(X) == dict:
-                X_train, X_val = {}, {}
-                for key, value in X.items():
-                    if len(value) == 0:
-                        continue
-                    X_train[key] = value[train_index]
-                    X_val[key] = value[val_index]
-            else:
-                X_train, X_val = X[train_index], X[val_index]
-            y_train, y_val = y[train_index], y[val_index]
-            kfolds.append(((X_train, y_train), (X_val, y_val)))
+    # Standard TimeSeriesSplit ohne minimum training length
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    for train_index, val_index in tscv.split(y):
+        if type(X) == dict:
+            X_train, X_val = {}, {}
+            for key, value in X.items():
+                if len(value) == 0:
+                    continue
+                X_train[key] = value[train_index]
+                X_val[key] = value[val_index]
+        else:
+            X_train, X_val = X[train_index], X[val_index]
+        y_train, y_val = y[train_index], y[val_index]
+        kfolds.append(((X_train, y_train), (X_val, y_val)))
     return kfolds
 
 def concatenate_processed_data(data_parts: List) -> Any:
@@ -531,9 +622,10 @@ def get_hyperparameters(config: dict,
     n_heads = config['hpo']['tft']['n_heads']
     hidden_dim = config['hpo']['tft']['hidden_dim']
     dropout_tft = config['hpo']['tft']['dropout']
-    n_lstm_layers_tft = config['hpo']['tft']['n_lstm_layers']
-    num_quantiles = config['model']['tft']['num_quantiles']
-    clipnorm =config['hpo']['tft']['clipnorm']
+    n_lstm_layers = config['hpo']['tft'].get('n_lstm_layers', [1, 3])
+    static_embedding_dim = config['hpo']['tft'].get('static_embedding_dim')
+    num_quantiles = config['model']['tft'].get('num_quantiles')
+    clipnorm = config['hpo']['tft'].get('clipnorm')
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
     # fl specific hyperparameters
@@ -548,9 +640,11 @@ def get_hyperparameters(config: dict,
     is_rnn_type = 'lstm' in model_name or 'gru' in model_name
     is_fnn_type = model_name == 'fnn'
     is_tft_type = model_name == 'tft'
+    is_gnn_type = 'gnn' in model_name
+
     if hpo:
         hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
-        hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
+        #hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
         if config['model']['fl']:
             hyperparameters['n_rounds'] = trial.suggest_int('n_rounds', n_rounds[0], n_rounds[1])
@@ -566,7 +660,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['kernel_size'] = trial.suggest_int('kernel_size', kernel_size[0], kernel_size[1])
             hyperparameters['n_cnn_layers'] = trial.suggest_int('n_cnn_layers', n_cnn_layers[0], n_cnn_layers[1])
             hyperparameters['increase_filters'] = increase_filters
-        if is_rnn_type:
+        if is_rnn_type or is_gnn_type:
             hyperparameters['dropout'] = trial.suggest_float('dropout', dropout_rnn[0], dropout_rnn[1])
             hyperparameters['units'] = trial.suggest_int('units', rnn_units[0], rnn_units[1])
             hyperparameters['n_rnn_layers'] = trial.suggest_int('n_rnn_layers', n_rnn_layers[0], n_rnn_layers[1])
@@ -586,10 +680,30 @@ def get_hyperparameters(config: dict,
                 step=n_heads_hpo
             )
             hyperparameters['dropout'] = trial.suggest_float('dropout', dropout_tft[0], dropout_tft[1])
-            hyperparameters['n_lstm_layers'] = trial.suggest_int('n_lstm_layers', n_lstm_layers_tft[0], n_lstm_layers_tft[1])
-            hyperparameters['clipnorm'] = clipnorm
+            hyperparameters['num_lstm_layers'] = trial.suggest_int('num_lstm_layers', n_lstm_layers[0], n_lstm_layers[1])
+
+            # Static embedding dimension (can be None for auto-sizing)
+            if static_embedding_dim is not None and isinstance(static_embedding_dim, list):
+                hyperparameters['static_embedding_dim'] = trial.suggest_int('static_embedding_dim', static_embedding_dim[0], static_embedding_dim[1])
+            else:
+                hyperparameters['static_embedding_dim'] = static_embedding_dim
+
+            # Clipnorm: can be None, a scalar, or a range for HPO
+            if clipnorm is not None and isinstance(clipnorm, list):
+                hyperparameters['clipnorm'] = trial.suggest_float('clipnorm', clipnorm[0], clipnorm[1])
+            else:
+                hyperparameters['clipnorm'] = clipnorm
         if 'attn' in model_name:
             hyperparameters['attention_heads'] = trial.suggest_int('attention_heads', attention_heads[0], attention_heads[1])
+
+        # StemGNN HPO
+        if is_gnn_type:
+             hyperparameters['n_nodes'] = config['params'].get('next_n_grid_points', 12)
+             hyperparameters['units'] = trial.suggest_int('units', rnn_units[0], rnn_units[1])
+             hyperparameters['stack_cnt'] = config['model']['stemgnn']['stack_cnt']
+             hyperparameters['multi_layer'] = config['model']['stemgnn']['multi_layer']
+             hyperparameters['dropout'] = trial.suggest_float('dropout', dropout_rnn[0], dropout_rnn[1])
+
     else:
         if study and study.best_trial:
             hyperparameters.update(study.best_trial.params)
@@ -597,7 +711,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['horizon'] = horizon
         else:
             hyperparameters['batch_size'] = config['model']['batch_size']
-            hyperparameters['epochs'] = config['model']['epochs']
+            #hyperparameters['epochs'] = config['model']['epochs']
             hyperparameters['lr'] = config['model']['lr']
             if 'attn' in model_name:
                 hyperparameters['attention_heads'] = config['model']['attention_heads']
@@ -629,9 +743,17 @@ def get_hyperparameters(config: dict,
                 hyperparameters['n_heads'] = config['model']['tft']['n_heads']
                 hyperparameters['hidden_dim'] = config['model']['tft']['hidden_dim']
                 hyperparameters['dropout'] = config['model']['tft']['dropout']
-                hyperparameters['n_lstm_layers'] = config['model']['tft']['n_lstm_layers']
+                hyperparameters['num_lstm_layers'] = config['model']['tft'].get('n_lstm_layers', 1)
+                hyperparameters['static_embedding_dim'] = config['model']['tft'].get('static_embedding_dim')
                 hyperparameters['num_quantiles'] = config['model']['tft']['num_quantiles']
                 hyperparameters['clipnorm'] = config['model']['tft']['clipnorm']
+            if is_gnn_type:
+                hyperparameters['n_nodes'] = config['params'].get('next_n_grid_points', 12)
+                hyperparameters['units'] = config['model']['stemgnn']['units']
+                hyperparameters['stack_cnt'] = config['model']['stemgnn']['stack_cnt']
+                hyperparameters['multi_layer'] = config['model']['stemgnn']['multi_layer']
+                hyperparameters['dropout'] = config['model']['stemgnn']['dropout']
+
     return hyperparameters
 
 def load_hyperparams(study_name: str,

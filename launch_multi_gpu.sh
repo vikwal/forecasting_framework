@@ -277,7 +277,7 @@ while [ ${#RUNNING_PROCESSES[@]} -gt 0 ]; do
         for i in "${!GPU_ARRAY[@]}"; do
             GPU_ID="${GPU_ARRAY[$i]}"
             INDEX="gpu${GPU_ID}"
-            LOG_FILE="logs/hpo_cl_m-${MODEL_NAME}_${INDEX}.log"
+            LOG_FILE="logs/hpo_cl_m-${MODEL_NAME}_c-${CONFIG_NAME}_${INDEX}.log"
 
             if [ -f "$LOG_FILE" ]; then
                 LAST_LINE=$(tail -1 "$LOG_FILE" 2>/dev/null | cut -c1-100)
@@ -295,6 +295,6 @@ echo "Check individual log files for detailed results:"
 for i in "${!GPU_ARRAY[@]}"; do
     GPU_ID="${GPU_ARRAY[$i]}"
     INDEX="gpu${GPU_ID}"
-    echo "  GPU $GPU_ID: logs/hpo_cl_m-${MODEL_NAME}_${INDEX}.log"
+    echo "  GPU $GPU_ID: logs/hpo_cl_m-${MODEL_NAME}_c-${CONFIG_NAME}_${INDEX}.log"
 done
 echo "=================================================="

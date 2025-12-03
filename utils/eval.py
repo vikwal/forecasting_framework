@@ -1,7 +1,12 @@
+"""
+utilities for model evaluation.
+"""
+
 import os
 import numpy as np
 import pandas as pd
-from tensorflow import keras
+import torch
+import torch.nn as nn
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
@@ -9,12 +14,13 @@ from sklearn.linear_model import LinearRegression
 from . import tools
 from . import preprocessing
 
+
+# Framework-agnostic functions (identical to eval.py)
+
 def persistence(y: pd.Series,
                 horizon: int,
                 from_date=None) -> pd.Series:
-    '''
-    Persistence model which takes the realized scenario from past.
-    '''
+    """Persistence model - framework agnostic"""
     shifted = y.shift(horizon)
     y_pers = pd.Series(data=shifted, index=y.index)
     if type(y.index) == pd.core.indexes.multi.MultiIndex:
@@ -28,9 +34,7 @@ def lin_reg(data: pd.DataFrame,
             train_end: str,
             test_start: str,
             target_col: str):
-    '''
-    Persistence model which uses linear regression.
-    '''
+    """Linear regression persistence - framework agnostic"""
     df = data.copy()
     df.dropna(inplace=True)
     y_train = df[:train_end][target_col].values
@@ -42,11 +46,13 @@ def lin_reg(data: pd.DataFrame,
     y_pers = model.predict(X_test)
     return y_pers
 
+
 def get_synth_wind(synth_dir: str,
                    park_id: str,
                    from_date: str = None,
                    to_date: str = None,
                    params: dict = None):
+    """Get synthetic wind data - framework agnostic"""
     file_path = os.path.join(synth_dir, f'synth_{park_id}.csv')
     df = pd.read_csv(file_path, sep=';')
     df['date'] = pd.to_datetime(df['date'], utc=True)
@@ -66,9 +72,11 @@ def get_synth_wind(synth_dir: str,
         y_synth = y_synth[from_date:to_date]
     return y_synth
 
+
 def get_synth_pv(synth_dir: str,
-                   park_id: str,
-                   from_date: str = None):
+                 park_id: str,
+                 from_date: str = None):
+    """Get synthetic PV data - framework agnostic"""
     file_path = os.path.join(synth_dir, f'synth_{park_id}.csv')
     df = pd.read_csv(file_path, sep=';')
     df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
@@ -78,6 +86,7 @@ def get_synth_pv(synth_dir: str,
         y_synth = y_synth[from_date:]
     return y_synth
 
+
 def benchmark_models(data: pd.DataFrame,
                      horizon: int,
                      train_end: str,
@@ -86,9 +95,7 @@ def benchmark_models(data: pd.DataFrame,
                      index_test: np.ndarray,
                      target_col='power',
                      t_0=None):
-    '''
-    Pipeline for applying different benchmark models.
-    '''
+    """Pipeline for applying benchmark models - framework agnostic"""
     results = {}
     # Persistence
     y_pers = persistence(y=data[target_col],
@@ -117,11 +124,13 @@ def benchmark_models(data: pd.DataFrame,
     results['LinearRegression'] = df_pers
     return results
 
+
 def evaluate_models(pred: pd.DataFrame,
                     true: pd.DataFrame,
                     persistence: dict,
                     main_model_name='Main',
                     drop_except_main=False) -> pd.DataFrame:
+    """Evaluate models against benchmarks - framework agnostic"""
     evaluation = get_metrics(y_pred=pred.values,
                              y_true=true.values)
     evaluation['Models'] = [main_model_name]
@@ -135,17 +144,17 @@ def evaluate_models(pred: pd.DataFrame,
     results.set_index('Models', inplace=True)
     # skill factor
     results['Skill'] = 0.0
-    #RMSE_p = results.loc['Persistence'].RMSE
     for model in evaluation['Models']:
         results.loc[model, 'Skill'] = 1 - results.loc[model].RMSE / results.loc['Persistence'].RMSE
     # drop all models except main model
     if drop_except_main:
         results = results.loc[[main_model_name]]
-    #results['RMSE_p'] = RMSE_p
     return results
+
 
 def get_metrics(y_pred: np.ndarray,
                 y_true: np.ndarray) -> dict:
+    """Calculate metrics - framework agnostic"""
     error = y_pred - y_true
     r2 = r2_score(y_true.flatten(), y_pred.flatten())
     rmse = np.sqrt(np.square(error).mean())
@@ -155,8 +164,9 @@ def get_metrics(y_pred: np.ndarray,
                'MAE': [mae]}
     return metrics
 
+
 def evaluation_pipeline(data: pd.DataFrame,
-                        model: keras.Model,
+                        model: nn.Module,
                         model_name: str,
                         X_test: np.ndarray,
                         y_test: np.ndarray,
@@ -171,11 +181,19 @@ def evaluation_pipeline(data: pd.DataFrame,
                         get_physical_persistence: bool = False,
                         timestamp_col: str ='timestamp',
                         target_col: str ='power',
-                        evaluate_on_all_test_data: bool = True) -> pd.DataFrame:
+                        evaluate_on_all_test_data: bool = True,
+                        device: str = 'cpu') -> pd.DataFrame:
+    """
+    PyTorch evaluation pipeline.
+    Main difference: uses PyTorch model instead of Keras model.
+    """
+    # Get predictions using PyTorch
     y_true, y_pred = tools.get_y(X_test=X_test,
                                  y_test=y_test,
                                  scaler_y=scaler_y,
-                                 model=model)
+                                 model=model,
+                                 device=device)
+
     df_pred = tools.y_to_df(y=y_pred,
                             output_dim=output_dim,
                             horizon=horizon,
@@ -201,7 +219,11 @@ def evaluation_pipeline(data: pd.DataFrame,
         test_indices = index_test
 
     pers = {}
-    test_start_ts = pd.Timestamp(test_start, tz=data.index.tz)
+    if isinstance(data.index, pd.MultiIndex):
+        tz = data.index.get_level_values('timestamp').tz
+    else:
+        tz = data.index.tz
+    test_start_ts = pd.Timestamp(test_start, tz=tz)
     y_pers = persistence(y=data[target_col],
                         horizon=horizon,
                         from_date=test_start_ts)
@@ -216,6 +238,7 @@ def evaluation_pipeline(data: pd.DataFrame,
                             index=index_test,
                             t_0=None if evaluate_on_all_test_data else t_0)
     pers['Persistence'] = df_pers
+
     # get physical persistence
     if get_physical_persistence:
         if 'wind' in synth_dir:
@@ -230,7 +253,7 @@ def evaluation_pipeline(data: pd.DataFrame,
                                     to_date=data.index[-1])
         y_synth = preprocessing.make_windows(data=y_synth,
                                              seq_len=y_pred.shape[-1],
-                                             step_size=1, # has to be 1 filtering goes over t_0 in df_synth
+                                             step_size=1,
                                              indices=test_indices)
         df_synth = tools.y_to_df(y=y_pers,
                                 output_dim=output_dim,
@@ -238,12 +261,14 @@ def evaluation_pipeline(data: pd.DataFrame,
                                 index=index_test,
                                 t_0=None if evaluate_on_all_test_data else t_0)
         pers['Synth'] = df_synth
+
     evaluation = evaluate_models(pred=df_pred,
                                  true=df_true,
                                  persistence=pers,
                                  main_model_name=model_name,
                                  drop_except_main=True)
     return evaluation
+
 
 def evaluate_retrain(config,
                      data,
@@ -252,27 +277,38 @@ def evaluate_retrain(config,
                      hyperparameters,
                      cols,
                      scaler_y=None,
-                     target_col='power'):
+                     target_col='power',
+                     device='cpu'):
+    """
+    PyTorch retraining evaluation.
+    Main difference: uses PyTorch training instead of Keras fit().
+    """
     t_0 = None if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
     retrain_interval = config['eval']['retrain_interval']
     output_dim = config['model']['output_dim']
     horizon = config['model']['horizon']
     freq = config['data']['freq']
     known, observed, static = cols
+
     if freq == '15min':
         retrain_interval /= 4
+
     full_days = len(index_test) // retrain_interval - 1
     y_true, y_pred, y_pers, index = None, None, None, None
+
+    # Setup optimizer and loss
+    optimizer = torch.optim.Adam(model.parameters(), lr=hyperparameters.get('lr', 0.001))
+    criterion = nn.MSELoss()
+
     for day in range(full_days):
         from_index = day * retrain_interval
         if output_dim == 1:
-            # here horizon is determined via the index
             adj_horizon = horizon
             to_index = day * retrain_interval + horizon
         else:
-            # here horizon is already fixed by the output_dim
             adj_horizon = retrain_interval
             to_index = retrain_interval * (1 + day)
+
         index_day = index_test[from_index:to_index]
         prepared_data, df = preprocessing.pipeline(data=data,
                                                    config=config,
@@ -280,18 +316,23 @@ def evaluate_retrain(config,
                                                    observed_cols=observed,
                                                    static_cols=static,
                                                    test_start=index_day[0])
+
         X_train, y_train = prepared_data['X_train'], prepared_data['y_train']
         X_test, y_test = prepared_data['X_test'], prepared_data['y_test']
         X_test, y_test = X_test[:adj_horizon], y_test[:adj_horizon]
+
         y_true_new, y_pred_new = tools.get_y(X_test=X_test,
                                              y_test=y_test,
                                              model=model,
-                                             scaler_y=scaler_y)
+                                             scaler_y=scaler_y,
+                                             device=device)
+
         y_pers_raw = persistence(y=df[target_col],
                                  horizon=horizon,
                                  from_date=str(index_test[0].date()))
         y_pers_new = preprocessing.make_windows(y_pers_raw, y_pred_new.shape[-1], step_size=1)
         y_pers_new = y_pers_new[from_index:to_index]
+
         if y_pred is None:
             y_true, y_pred, y_pers, index = y_true_new, y_pred_new, y_pers_new, index_day
         else:
@@ -299,14 +340,35 @@ def evaluate_retrain(config,
             y_pred = np.concatenate((y_pred, y_pred_new))
             y_pers = np.concatenate((y_pers, y_pers_new))
             index = np.concatenate((index, index_day))
-        model.fit(
-            x = X_train,
-            y = y_train,
-            batch_size = hyperparameters['batch_size'],
-            epochs = 2,#hyperparameters['epochs'],
-            verbose = config['model']['verbose'],
-            shuffle = config['model']['shuffle']
+
+        # PyTorch retraining
+        model.train()
+        train_loader = tools.create_pytorch_dataloader(
+            X_train, y_train,
+            batch_size=hyperparameters['batch_size'],
+            shuffle=config['model']['shuffle'],
+            device=device
         )
+
+        for epoch in range(2):  # Quick retrain
+            for batch in train_loader:
+                if isinstance(X_train, dict):
+                    # TFT case
+                    if len(batch) == 4:
+                        obs, known, static, targets = [b.to(device) for b in batch]
+                    else:
+                        obs, known, targets = [b.to(device) for b in batch]
+                        static = None
+                    predictions = model(obs, known, static)
+                else:
+                    inputs, targets = [b.to(device) for b in batch]
+                    predictions = model(inputs)
+
+                loss = criterion(predictions, targets)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
     df_pred = tools.y_to_df(y_pred, output_dim, horizon, index, t_0)
     df_pers = tools.y_to_df(y_pers, output_dim, horizon, index, t_0)
     df_true = tools.y_to_df(y_true, output_dim, horizon, index, t_0)
