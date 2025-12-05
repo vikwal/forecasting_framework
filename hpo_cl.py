@@ -33,7 +33,11 @@ def main() -> None:
     index = ''
     if args.index:
         index = f'_{args.index}'
-    log_file = f'logs/hpo_cl_m-{args.model}_c-{args.config}{index}.log'
+    if '/' in args.config:
+        config_name = args.config.split('/')[-1]
+    else:
+        config_name = args.config
+    log_file = f'logs/hpo_cl_m-{args.model}_c-{config_name}{index}.log'
 
     # Configure logging
     logging.getLogger().handlers.clear()
@@ -60,7 +64,7 @@ def main() -> None:
     # Load config
     if '.yaml' in args.config:
         args.config = args.config.split('.')[0]
-    config = tools.load_config(f'configs/{args.config}.yaml')
+    config = tools.load_config(f'{args.config}.yaml')
 
     # Override verbose setting
     config['model']['verbose'] = 0

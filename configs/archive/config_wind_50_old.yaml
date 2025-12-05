@@ -1,44 +1,21 @@
 data:
   path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
-  files: ['00298', '02907', '02564', '05930', '15813',
-          '02932', '01759', '07403', '05404', '00662',
-          '00596', '03098', '04642', '03366', '03158',
-          '03362', '03032', '00591', '02812', '03946',
-          '00303', '00891', '04336', '15000', '01694',
-          '05490', '01605', '04271', '00656', '00691',
-          '03761', '00198', '01443', '06163', '04464',
-          '03513', '01975', '00427', '01691', '07394',
-          '07370', '05906', '03093', '03268', '15444',
-          '00282', '05440', '05779', '00460', '00856',
-          '00963', '00704', '04745', '00342', '01766',
-          '01544', '05516', '04466', '01200', '02171',
-          '00880', '02794', '04393', '07369', '03126',
-          '00232', '00164', '02261', '07393', '05158',
-          '07412', '03379', '05349', '07341', '03028',
-          '13674', '01684', '02925', '04177', '07368',
-          '01303', '07395', '03015', '04280', '01262',
-          '00183', '05546', '01587', '07410', '03631',
-          '00433', '02712', '05029', '06197', '07374',
-          '03660', '02597', '05800', '03196', '00867'] # Specific client files to lo
+  #files: ['03086', '03631']
+  files: ['03086' , '03631', '03158', '05100', '01048',
+          '05930', '02171', '04336', '15813', '07412',
+          '00460', '03987', '03761', '01346', '01612',
+          '03513', '02044', '02564', '01759', '00282',
+          '04104', '07396', '07393', '00342', '01078',
+          '00232', '04642', '00164', '03093', '01544',
+          '05705', '04745', '01766', '07370', '02023',
+          '00183', '05792', '15207', '05490', '03196',
+          '05397', '02928', '00198', '03268', '00303',
+          '05404', '01691', '03015', '03362', '02961']  # Specific client files to load (without .csv extension)
+  # files: ['00164', '03362', '03631', '07370',
+  #         '02638', '02932', '06163', '07374']
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
-  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
-  stations_master: 'data/stations_master.csv'
-  freq: '1h'
-  train_frac: 1
-  val_frac: 0.25 # abs from train_frac
-  test_start: '2025-08-01'
-  test_end: '2025-10-21'
-  target_col: 'power'
-  scale_x: True
-  scale_y: False
-  use_pca: False
-  pca_components: 3
-  lag_in_col: False
-  n_neighbors: 5
-  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
-  nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
-  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
@@ -68,12 +45,12 @@ params:
     # 'temperature_h10', 'temperature_h38', 'temperature_h78', 'temperature_h127', 'temperature_h184', 'temperature_h247',
     # 'pressure_h10', 'pressure_h38', 'pressure_h78', 'pressure_h127', 'pressure_h184', 'pressure_h247',
     # 'relative_humidity_h10', 'relative_humidity_h38', 'relative_humidity_h78', 'relative_humidity_h127', 'relative_humidity_h184', 'relative_humidity_h247'
-    'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184',
+    'wind_speed_h78', 'wind_speed_h127', #'wind_speed_h184',
     #'density_h78', 'density_h127', 'density_h184',
     #'wind_speed_h127', 'temperature_h127', 'pressure_h127', 'relative_humidity_h127',
     #'wind_speed_h184', 'temperature_h184', 'pressure_h184', 'relative_humidity_h184',
     #'wind_speed_h127', 'density_h127'
-    'density_rotor_eq', # 'wind_speed_rotor_eq',
+    #'density_rotor_eq', # 'wind_speed_rotor_eq',
     #'wind_speed_80m', 'wind_speed_120m','wind_speed_180m', # 'wind_speed_10m',
     #'density_80m', 'density_120m', 'density_180m', # 'density_10m'
                    ]
@@ -89,7 +66,7 @@ params:
     'rotor_diameter',
     'altitude'
   ]
-  aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
+  aggregate_nwp_layers: 'not' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True
   # openmeteo:
   #   nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
@@ -105,9 +82,9 @@ model:
   lookback: 48
   horizon: 48
   step_size: 48
-  batch_size: 64
+  batch_size: 32
   epochs: 10
-  lr: 0.0004
+  lr: 0.0002
   optimizer: 'adam'
   loss: 'mse'
   metrics: ['mae', 'rmse', 'r^2']

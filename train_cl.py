@@ -40,7 +40,7 @@ def main() -> None:
     index = ''
     if args.index:
         index = f'_{args.index}'
-    log_file = f'logs/train_cl_m-{args.model}{index}.log'
+    log_file = f'logs/train_cl_m-{args.model}_{("_").join(args.config.split("_")[1:])}{index}.log'
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',

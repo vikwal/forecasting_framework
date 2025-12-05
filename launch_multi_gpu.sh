@@ -220,10 +220,8 @@ for i in "${!GPU_ARRAY[@]}"; do
     echo "Starting training on GPU $GPU_ID (index: $INDEX)..."
 
     # Set environment and start training in background
-    # Extract just the config filename without path for hpo_cl.py
     # Prepare command arguments
-    CONFIG_NAME=$(basename "$CONFIG_FILE" .yaml)
-    CMD_ARGS="--model $MODEL_NAME --config $CONFIG_NAME --index $INDEX"
+    CMD_ARGS="--model $MODEL_NAME --config $CONFIG_FILE --index $INDEX"
 
     # Add no-cache flag if caching is disabled
     if [ "$USE_CACHE" = false ]; then

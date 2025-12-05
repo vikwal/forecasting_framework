@@ -1096,14 +1096,14 @@ def preprocess_synth_wind_icond2(path: str,
 
     # Load station coordinates
     stations_path = config['data']['stations_master']
-    stations_df = pd.read_csv(stations_path)
-    station_info = stations_df[stations_df['Stations_id'] == int(station_id)]
+    stations_df = pd.read_csv(stations_path, sep=',', dtype={'station_id': str})
+    station_info = stations_df[stations_df['station_id'] == station_id]
 
     if station_info.empty:
         raise ValueError(f"Station {station_id} not found in stations list")
 
-    station_lat = station_info['geoBreite'].iloc[0]
-    station_lon = station_info['geoLaenge'].iloc[0]
+    station_lat = station_info['latitude'].iloc[0]
+    station_lon = station_info['longitude'].iloc[0]
 
     # Parameters from config
     next_n_grid_points = config['params'].get('next_n_grid_points', 12)
@@ -1643,7 +1643,22 @@ def prepare_data_for_tft(data: pd.DataFrame,
     #if target_col not in observed_past_cols:
     #    observed_past_cols.append(target_col)
     df = data.copy()
+
     # --- Data Splitting ---
+    # For NWP data with forecast runs, we need to extend test_start backwards
+    # to include historical forecasts required for creating the first test windows
+    is_nwp_data = isinstance(df.index, pd.MultiIndex) and 'starttime' in df.index.names
+
+    if is_nwp_data and test_start is not None:
+        # Extend test_start by step_size to include required historical forecasts
+        # Example: If test_start='2025-08-01' and step_size=48h,
+        # we need forecasts from '2025-07-30' to build windows for predictions starting '2025-08-01'
+        original_test_start = test_start
+        test_start_adjusted = pd.Timestamp(test_start) - pd.Timedelta(hours=step_size)
+        logging.debug(f"NWP data detected: Extending test data start from {original_test_start} "
+                    f"to {test_start_adjusted} (step_size={step_size}h) to include required historical forecasts")
+        test_start = test_start_adjusted
+
     # Use helper function for splitting which handles MultiIndex correctly
     train_df, test_df = split_data(df, train_frac, test_start, test_end, t_0)
 
@@ -1886,31 +1901,173 @@ def create_tft_sequences(known_data: np.ndarray,
                          history_len: int,
                          future_len: int,
                          step_size: int = 1):
-        """Creates sequences for TFT inputs and outputs."""
-        X_known_list, X_observed_list, y_list, index_positions = [], [], [], []
-        total_len = history_len + future_len
-        if observed_data is not None:
-            len_data = len(observed_data)
-        if known_data is not None:
-            len_data = len(known_data)
-        for i in range(0, len_data - total_len + 1, step_size):
-            if observed_data is not None:
-                observed_past_window = observed_data[i : i + history_len]
-                X_observed_list.append(observed_past_window)
-            if known_data is not None:
-                known_future_window = known_data[i : i + total_len]
-                X_known_list.append(known_future_window)
-            target_window = target_data[i + history_len : i + total_len].flatten() # Ensure shape (future_horizon,)
-            y_list.append(target_window)
-            index_positions.append(i + history_len)
+        """
+        Creates sequences for TFT inputs and outputs.
 
-        # Preserve DatetimeIndex/MultiIndex type instead of converting to numpy array
-        index_list = indices[index_positions] if len(index_positions) > 0 else indices[[]]
+        For NWP data with MultiIndex ['starttime', 'forecasttime', 'timestamp']:
+        - Each unique starttime represents one forecast run with future_len timesteps
+        - For each current forecast, we combine:
+          * Past data from a forecast that occurred step_size hours earlier
+          * Future data from the current forecast
+
+        For regular time series data:
+        - Uses standard linear windowing
+        """
+        X_known_list, X_observed_list, y_list, index_positions = [], [], [], []
+
+        # Detect if this is NWP data with forecast runs
+        is_nwp_data = isinstance(indices, pd.MultiIndex) and 'starttime' in indices.names
+
+        if is_nwp_data:
+            # NWP-aware windowing: one window per forecast run
+            logging.debug("Using NWP-aware windowing for MultiIndex data with starttime")
+
+            # PRE-EXTRACT index levels once (expensive operation)
+            starttimes_all = indices.get_level_values('starttime')
+            timestamps_all = indices.get_level_values('timestamp')
+
+            # Get unique starttimes and sort
+            unique_starttimes = starttimes_all.unique().sort_values()
+            n_forecasts = len(unique_starttimes)
+            logging.debug(f"Found {n_forecasts} unique forecast runs (starttimes)")
+
+            # Pre-compute starttime to indices mapping for O(1) lookup
+            starttime_to_indices = {}
+            for st in unique_starttimes:
+                starttime_to_indices[st] = np.where(starttimes_all == st)[0]
+
+            # Pre-compute timestamp to indices mapping for observed features
+            if observed_data is not None:
+                timestamp_to_first_idx = {}
+                for ts in timestamps_all.unique():
+                    # Store first occurrence of each timestamp
+                    timestamp_to_first_idx[ts] = np.where(timestamps_all == ts)[0][0]
+
+            # Process each forecast run
+            for current_start in unique_starttimes:
+                # Calculate the starttime we need for past data
+                previous_start = current_start - pd.Timedelta(hours=step_size)
+
+                # Quick check if previous forecast exists
+                if previous_start not in starttime_to_indices:
+                    continue
+
+                # Get indices using pre-computed mapping (O(1) instead of O(n))
+                current_indices = starttime_to_indices[current_start]
+                previous_indices = starttime_to_indices[previous_start]
+
+                # Validate data availability
+                if len(current_indices) == 0 or len(previous_indices) == 0:
+                    continue
+
+                # Known features: combine past (from previous run) + future (from current run)
+                if known_data is not None:
+                    # Verify we have the expected number of timesteps
+                    if len(previous_indices) != future_len or len(current_indices) != future_len:
+                        logging.warning(f"Unexpected known data length at {current_start}: "
+                                      f"past={len(previous_indices)}, future={len(current_indices)}, expected={future_len}")
+                        continue
+
+                    # Direct indexing without intermediate copies
+                    known_window = np.vstack([known_data[previous_indices], known_data[current_indices]])
+                    X_known_list.append(known_window)
+
+                # Observed features: select by timestamp (power is measured, not forecasted)
+                if observed_data is not None:
+                    # Get the timestamp range we need
+                    forecast_start_time = timestamps_all[current_indices[0]]  # First timestamp of current forecast
+                    observed_end_time = forecast_start_time
+                    observed_start_time = observed_end_time - pd.Timedelta(hours=history_len)
+
+                    # Find timestamps in range using pre-computed mapping
+                    # Generate hourly timestamps for the range
+                    expected_timestamps = pd.date_range(
+                        start=observed_start_time,
+                        end=observed_end_time,
+                        freq='1H',
+                        inclusive='left'  # Exclude end
+                    )
+
+                    if len(expected_timestamps) != history_len:
+                        logging.warning(f"Unexpected timestamp range at {current_start}: "
+                                      f"got {len(expected_timestamps)}, expected {history_len}")
+                        if known_data is not None and len(X_known_list) > 0:
+                            X_known_list.pop()
+                        continue
+
+                    # Collect observed data for these timestamps
+                    obs_data_list = []
+                    missing_timestamps = []
+                    for ts in expected_timestamps:
+                        if ts in timestamp_to_first_idx:
+                            idx = timestamp_to_first_idx[ts]
+                            obs_data_list.append(observed_data[idx])
+                        else:
+                            missing_timestamps.append(ts)
+
+                    if len(obs_data_list) == history_len:
+                        observed_window = np.array(obs_data_list)
+                        X_observed_list.append(observed_window)
+                    else:
+                        logging.warning(f"Missing {len(missing_timestamps)} timestamps at {current_start}: "
+                                      f"found {len(obs_data_list)}, expected {history_len}")
+                        # Remove the known window we just added
+                        if known_data is not None and len(X_known_list) > 0:
+                            X_known_list.pop()
+                        continue
+
+                # Target: from current forecast
+                if len(current_indices) != future_len:
+                    logging.warning(f"Unexpected target length at {current_start}: {len(current_indices)}, expected {future_len}")
+                    # Remove windows we just added
+                    if known_data is not None and len(X_known_list) > 0:
+                        X_known_list.pop()
+                    if observed_data is not None and len(X_observed_list) > 0:
+                        X_observed_list.pop()
+                    continue
+
+                target_window = target_data[current_indices].flatten()
+                y_list.append(target_window)
+
+                # Use current starttime as the index
+                index_positions.append(current_start)
+
+            # Convert index_positions to Index type
+            if len(index_positions) > 0:
+                index_list = pd.Index(index_positions)
+            else:
+                index_list = pd.Index([])
+
+            logging.debug(f"Created {len(y_list)} windows from NWP data")
+
+        else:
+            # Original linear windowing for non-NWP data
+            logging.debug("Using standard linear windowing for non-MultiIndex data")
+
+            total_len = history_len + future_len
+            if observed_data is not None:
+                len_data = len(observed_data)
+            if known_data is not None:
+                len_data = len(known_data)
+
+            for i in range(0, len_data - total_len + 1, step_size):
+                if observed_data is not None:
+                    observed_past_window = observed_data[i : i + history_len]
+                    X_observed_list.append(observed_past_window)
+                if known_data is not None:
+                    known_future_window = known_data[i : i + total_len]
+                    X_known_list.append(known_future_window)
+                target_window = target_data[i + history_len : i + total_len].flatten()
+                y_list.append(target_window)
+                index_positions.append(i + history_len)
+
+            # Preserve DatetimeIndex/MultiIndex type
+            index_list = indices[index_positions] if len(index_positions) > 0 else indices[[]]
 
         return (np.array(X_known_list),
                 np.array(X_observed_list),
                 np.array(y_list),
-                index_list)  # Return pandas Index, not numpy array
+                index_list)
 
 
 def prepare_data_for_stemgnn(data: pd.DataFrame,

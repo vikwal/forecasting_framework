@@ -1,10 +1,26 @@
 data:
   path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
-  files: ['03362']
+  files: ['00591'] # Specific client files to lo
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
-  synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
-  stations_master: '/home/viktorwalter/Work/DWD/data/stations_list.csv'
+  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  stations_master: 'data/stations_master.csv'
+  freq: '1h'
+  train_frac: 1
+  val_frac: 0.25 # abs from train_frac
+  test_start: '2025-08-01'
+  test_end: '2025-10-21'
+  target_col: 'power'
+  scale_x: True
+  scale_y: False
+  use_pca: False
+  pca_components: 3
+  lag_in_col: False
+  n_neighbors: 5
+  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
+  nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
+  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
@@ -20,12 +36,12 @@ data:
 
 params:
   turbines: [
-            #  'Enercon E-70 E4 2.300',
+             'Enercon E-70 E4 2.300',
              'Enercon E-82 E2 2.000',
-            #  'Enercon E-115 2.500',
-            #  'Vestas V90',
-            #  'Vestas V112-3.45',
-            #  'Vestas V80-1.8'
+             'Enercon E-115 2.500',
+             'Vestas V90',
+             'Vestas V112-3.45',
+             'Vestas V80-1.8'
             ]
   known_features: [
     #'wind_speed_h10', 'wind_speed_h38', 'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184', 'wind_speed_h247',
@@ -38,7 +54,7 @@ params:
     #'wind_speed_h127', 'temperature_h127', 'pressure_h127', 'relative_humidity_h127',
     #'wind_speed_h184', 'temperature_h184', 'pressure_h184', 'relative_humidity_h184',
     #'wind_speed_h127', 'density_h127'
-    #'density_rotor_eq', # 'wind_speed_rotor_eq',
+    'density_rotor_eq', # 'wind_speed_rotor_eq',
     #'wind_speed_80m', 'wind_speed_120m','wind_speed_180m', # 'wind_speed_10m',
     #'density_80m', 'density_120m', 'density_180m', # 'density_10m'
                    ]
@@ -54,24 +70,25 @@ params:
     # 'rotor_diameter',
     # 'altitude'
   ]
-  aggregate_nwp_layers: 'not' # options: 'not', 'pivot', 'weighted_mean', 'mean'
+  aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True
-  openmeteo:
-    nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
+  # openmeteo:
+  #   nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
   turbines_per_park: 1
   #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
-  random_seed: 42
+  random_seed: 59
   next_n_grid_points: 1 # Number of nearest grid points to include
   aggregate_grid_points: False
 
 model:
+  num_workers: 0 # 'auto' for all physical cores
   output_dim: 48
   lookback: 48
   horizon: 48
   step_size: 48
-  batch_size: 32
+  batch_size: 64
   epochs: 10
-  lr: 0.0002
+  lr: 0.0004
   optimizer: 'adam'
   loss: 'mse'
   metrics: ['mae', 'rmse', 'r^2']
@@ -124,9 +141,9 @@ hpo:
     #   direction: 'maximize'
     - metric: 'val_rmse'
       direction: 'minimize'
-  trials: 1000
+  trials: 100
   kfolds: 12
-  min_train_date: '2024-07-31'
+  min_train_date: '2024-06-30'
   val_split: 1
   pruning:
     use_median_pruner: True
@@ -134,18 +151,18 @@ hpo:
     n_warmup_steps: 2
     interval_steps: 1
     disable_pruning: False
-  batch_size: [32, 256]
+  batch_size: [32, 1024]
   epochs: [1, 150]
   n_layers: [1, 4]
   n_cnn_layers: [1, 10]
-  n_rnn_layers: [1, 10]
+  n_rnn_layers: [1, 7]
   learning_rate: [0.0001, 0.01]
   attention_heads: [1,64] # if attention is used in hybrid models
   fnn:
     units: [32, 256]
   cnn:
     filters: [16, 128]
-    kernel_size: [2, 7]
+    kernel_size: [2, 5]
     increase_filters: False
   rnn:
     units: [16, 100]
@@ -153,11 +170,11 @@ hpo:
   tft:
     n_heads: [1, 8]
     hidden_dim: [16, 256]
-    dropout: [0.01, 0.4]
-    n_lstm_layers: [1, 3]  # Same for both encoder and decoder
+    dropout: [0.01, 0.8]
+    n_lstm_layers: [1, 5]  # Same for both encoder and decoder
     static_embedding_dim: [8, 128]  # Separate dimension for static feature embeddings (null = use hidden_dim)
     num_quantiles: [1]
-    clipnorm: [0.1, 5.0]
+    clipnorm: [0.1, 10.0]
   fl:
     strategy: 'fedavg'
     personalize: False
@@ -184,7 +201,7 @@ eval:
     annual_degradation: 0.0063
     apply_ageing: True
     hourly_resolution: True
-    random_seed: 42
+    random_seed: 59
     turbine_dir: "/mnt/nas/synthetic/wind/power_curves"
     turbine_power: 'turbine_power.csv'
     turbine_specs: "turbine_specs.csv"

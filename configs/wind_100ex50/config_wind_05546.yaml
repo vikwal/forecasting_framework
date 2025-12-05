@@ -1,25 +1,6 @@
 data:
   path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
-  files: ['00298', '02907', '02564', '05930', '15813',
-          '02932', '01759', '07403', '05404', '00662',
-          '00596', '03098', '04642', '03366', '03158',
-          '03362', '03032', '00591', '02812', '03946',
-          '00303', '00891', '04336', '15000', '01694',
-          '05490', '01605', '04271', '00656', '00691',
-          '03761', '00198', '01443', '06163', '04464',
-          '03513', '01975', '00427', '01691', '07394',
-          '07370', '05906', '03093', '03268', '15444',
-          '00282', '05440', '05779', '00460', '00856',
-          '00963', '00704', '04745', '00342', '01766',
-          '01544', '05516', '04466', '01200', '02171',
-          '00880', '02794', '04393', '07369', '03126',
-          '00232', '00164', '02261', '07393', '05158',
-          '07412', '03379', '05349', '07341', '03028',
-          '13674', '01684', '02925', '04177', '07368',
-          '01303', '07395', '03015', '04280', '01262',
-          '00183', '05546', '01587', '07410', '03631',
-          '00433', '02712', '05029', '06197', '07374',
-          '03660', '02597', '05800', '03196', '00867'] # Specific client files to lo
+  files: ['05546'] # Specific client files to lo
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
   #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
@@ -81,13 +62,13 @@ params:
                       'power'
                       ] # lag features
   static_features: [
-    'park_age',
-    'cut_in',
-    'cut_out',
-    'rated_wind_speed',
-    'hub_height',
-    'rotor_diameter',
-    'altitude'
+    # 'park_age',
+    # 'cut_in',
+    # 'cut_out',
+    # 'rated_wind_speed',
+    # 'hub_height',
+    # 'rotor_diameter',
+    # 'altitude'
   ]
   aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True
@@ -95,7 +76,7 @@ params:
   #   nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
   turbines_per_park: 1
   #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
-  random_seed: 42
+  random_seed: 128
   next_n_grid_points: 1 # Number of nearest grid points to include
   aggregate_grid_points: False
 
@@ -160,7 +141,7 @@ hpo:
     #   direction: 'maximize'
     - metric: 'val_rmse'
       direction: 'minimize'
-  trials: 1000
+  trials: 100
   kfolds: 12
   min_train_date: '2024-06-30'
   val_split: 1
@@ -220,7 +201,7 @@ eval:
     annual_degradation: 0.0063
     apply_ageing: True
     hourly_resolution: True
-    random_seed: 42
+    random_seed: 128
     turbine_dir: "/mnt/nas/synthetic/wind/power_curves"
     turbine_power: 'turbine_power.csv'
     turbine_specs: "turbine_specs.csv"

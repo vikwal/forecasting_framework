@@ -136,13 +136,6 @@ def create_pytorch_dataloader(X, y, batch_size, shuffle=True, num_workers=0, dev
         num_workers = max(1, cpu_count // 2)
         logging.debug(f"Auto-detected num_workers={num_workers} (CPU count: {cpu_count})")
 
-    # Warn if using single-threaded loading with GPU
-    if num_workers == 0 and device == 'cuda':
-        logging.warning(
-            "DataLoader using num_workers=0 with CUDA device. "
-            "This will likely cause GPU underutilization. Consider setting num_workers='auto' or num_workers=4."
-        )
-
     logging.debug(f"Creating PyTorch DataLoader with batch_size={batch_size}, shuffle={shuffle}, num_workers={num_workers}, drop_last={drop_last}")
 
     if isinstance(X, dict):
@@ -237,7 +230,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     criterion = nn.MSELoss()
 
     # Training loop
-    epochs = hyperparameters.get('epochs', 100)
+    epochs = hyperparameters.get('epochs', 200)
     history = {
         'train_loss': [], 'val_loss': [],
         'train_rmse': [], 'val_rmse': [],
@@ -392,11 +385,8 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                     epochs_without_improvement = 0
                     if restore_best_weights:
                         best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                    logging.debug(f"Epoch {epoch+1}: {monitor_metric} improved to {current_value:.6f}")
                 else:
                     epochs_without_improvement += 1
-                    logging.debug(f"Epoch {epoch+1}: {monitor_metric} did not improve ({epochs_without_improvement}/{patience})")
-
                 # Stop if patience exceeded
                 if epochs_without_improvement >= patience:
                     logging.info(f"Early stopping triggered after {epoch+1} epochs")
