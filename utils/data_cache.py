@@ -46,6 +46,7 @@ class DataCache:
             'freq': config['data']['freq'],
             'target_col': config['data']['target_col'],
             'features': features,
+            'next_n_grid_points': config['params']['next_n_grid_points'], # newly added 15.12.25
             'model': {
                 'name': model_name,
                 'lookback': config['model']['lookback'],

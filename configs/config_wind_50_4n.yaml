@@ -74,11 +74,11 @@ params:
   turbines_per_park: 1
   #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
   random_seed: 42
-  next_n_grid_points: 1 # Number of nearest grid points to include
+  next_n_grid_points: 12 # Number of nearest grid points to include
   aggregate_grid_points: False
 
 model:
-  num_workers: 4 # 'auto' for all physical cores
+  num_workers: 0 # 'auto' for all physical cores
   output_dim: 48
   lookback: 48
   horizon: 48
@@ -116,6 +116,7 @@ model:
     num_quantiles: 1
     clipnorm: 1.0
   callbacks: False
+  save_model: True
   shuffle: True
   force_retrain: True
   early_stopping:
@@ -138,8 +139,8 @@ hpo:
     - metric: 'val_rmse'
       direction: 'minimize'
   trials: 1000
-  kfolds: 12
-  min_train_date: '2024-06-30'
+  kfolds: 4
+  min_train_date: '2024-04-30'
   val_split: 1
   pruning:
     use_median_pruner: True

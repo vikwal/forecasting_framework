@@ -710,6 +710,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['lookback'] = lookback
             hyperparameters['horizon'] = horizon
         else:
+            logging.info('Falling back to config hyperparameters.')
             hyperparameters['batch_size'] = config['model']['batch_size']
             #hyperparameters['epochs'] = config['model']['epochs']
             hyperparameters['lr'] = config['model']['lr']

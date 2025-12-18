@@ -59,13 +59,13 @@ params:
                       'power'
                       ] # lag features
   static_features: [
-    'park_age',
-    'cut_in',
-    'cut_out',
-    'rated_wind_speed',
-    'hub_height',
-    'rotor_diameter',
-    'altitude'
+    # 'park_age',
+    # 'cut_in',
+    # 'cut_out',
+    # 'rated_wind_speed',
+    # 'hub_height',
+    # 'rotor_diameter',
+    # 'altitude'
   ]
   aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True
@@ -78,7 +78,7 @@ params:
   aggregate_grid_points: False
 
 model:
-  num_workers: 4 # 'auto' for all physical cores
+  num_workers: 0 # 'auto' for all physical cores
   output_dim: 48
   lookback: 48
   horizon: 48
@@ -116,6 +116,7 @@ model:
     num_quantiles: 1
     clipnorm: 1.0
   callbacks: False
+  save_model: True
   shuffle: True
   force_retrain: True
   early_stopping:

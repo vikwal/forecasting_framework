@@ -4,6 +4,7 @@ Training Script
 """
 
 import os
+import copy
 import json
 import argparse
 import pandas as pd
@@ -40,7 +41,13 @@ def main() -> None:
     index = ''
     if args.index:
         index = f'_{args.index}'
-    log_file = f'logs/train_cl_m-{args.model}_{("_").join(args.config.split("_")[1:])}{index}.log'
+    if '.yaml' in args.config:
+        args.config = args.config.split('.')[0]
+    if '/' in args.config:
+        config_name = args.config.split('/')[-1]
+    else:
+        config_name = args.config
+    log_file = f'logs/train_cl_m-{args.model}_{("_").join(config_name.split("_")[1:])}{index}.log'
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -60,10 +67,7 @@ def main() -> None:
     os.makedirs('results', exist_ok=True)
     os.makedirs('models', exist_ok=True)
 
-    # Load config
-    if '.yaml' in args.config:
-        args.config = args.config.split('.')[0]
-    config = tools.load_config(f'configs/{args.config}.yaml')
+    config = tools.load_config(f'{args.config}.yaml')
     freq = config['data']['freq']
     params = config['params']
     config = tools.handle_freq(config=config)
@@ -78,8 +82,22 @@ def main() -> None:
     config['model']['name'] = args.model
 
     # Extract retrain settings with defaults
-    retrain_enabled = config['data'].get('retrain', False)
-    retrain_interval = config['data'].get('retrain_interval', 1) if retrain_enabled else 1
+    retrain_interval = config['data'].get('retrain_interval', 1)
+    eval_interval = config['data'].get('eval_interval', retrain_interval)
+
+    # Validate eval_interval configuration
+    if retrain_interval > 1 and eval_interval != retrain_interval:
+        logging.warning(
+            f"Invalid configuration: retrain_interval={retrain_interval} and eval_interval={eval_interval}. "
+            f"eval_interval can only differ from retrain_interval when retrain_interval=1. "
+            f"Setting eval_interval to {retrain_interval}."
+        )
+        eval_interval = retrain_interval
+    elif retrain_interval == 1 and eval_interval < 1:
+        logging.warning(f"Invalid eval_interval={eval_interval}. Setting to 1.")
+        eval_interval = 1
+
+    logging.info(f"Retrain interval: {retrain_interval}, Eval interval: {eval_interval}")
 
     # Get features
     data_dir = config['data']['path']
@@ -89,8 +107,8 @@ def main() -> None:
     base_dir = os.path.basename(data_dir)
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    study_name_suffix = '_'.join(args.config.split('_')[1:])
-    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
+    study_name_suffix = '_'.join(config_name.split('_')[1:])
+    study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}' # .yaml delete later when renamed the hpo studies
 
     # Load data - REUSE EXISTING PREPROCESSING
     dfs = preprocessing.get_data(
@@ -101,7 +119,7 @@ def main() -> None:
     )
     logging.info(f'Config: {json.dumps(params, indent=2)}')
 
-    # Calculate test periods for retraining
+    # Calculate test periods for evaluation
     test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
     test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
 
@@ -109,7 +127,7 @@ def main() -> None:
     if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
         test_end = test_end.replace(hour=23, minute=0, second=0)
 
-    if retrain_enabled and retrain_interval > 1:
+    if eval_interval > 1:
         # Custom date-based splitting logic for MultiIndex data
         # 1. Extract unique dates from the data
         all_starttimes = set()
@@ -137,34 +155,27 @@ def main() -> None:
 
         if not test_dates:
             logging.warning("No data found within test range! Fallback to standard calculation.")
-            test_periods = tools.calculate_retrain_periods(test_start, test_end, retrain_interval, freq)
+            test_periods = tools.calculate_retrain_periods(test_start, test_end, eval_interval, freq)
         else:
             # 3. Split into chunks
-            chunks = np.array_split(test_dates, retrain_interval)
+            chunks = np.array_split(test_dates, eval_interval)
             test_periods = []
             for chunk in chunks:
                 if len(chunk) > 0:
-                    # Start is the first date
                     p_start = chunk[0]
-                    # End is the last date (we want to include all runs on this day)
-                    # split_data logic now handles inclusive upper bound for starttime
                     p_end = chunk[-1]
-                    # Ensure p_end covers the full day (23:59:59) if needed,
-                    # but since we compare starttime <= p_end, and p_end is 00:00:00 of the last day,
-                    # we might miss runs later in that day if we don't adjust.
-                    # Actually, if p_end is 2025-10-21 00:00:00, and we have a run at 2025-10-21 06:00:00,
-                    # starttime <= p_end would be False for that run!
-                    # So we MUST set p_end to end of day.
                     p_end = p_end + pd.Timedelta(hours=23, minutes=59, seconds=59)
-
                     test_periods.append((p_start, p_end))
 
-        logging.info(f"Retrain enabled: {retrain_enabled}, Test periods (Date-based): {len(test_periods)}")
+        if retrain_interval > 1:
+            logging.info(f"Test periods (Date-based, with retraining): {len(test_periods)}")
+        else:
+            logging.info(f"Test periods (Date-based, evaluation only): {len(test_periods)}")
         for i, (start, end) in enumerate(test_periods):
             logging.info(f"  Period {i+1}: {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}")
     else:
         test_periods = [(test_start, test_end)]
-        logging.info(f"Retrain enabled: {retrain_enabled}, Single test period: {test_start.strftime('%Y-%m-%d')} to {test_end.strftime('%Y-%m-%d')}")
+        logging.info(f"Single test period: {test_start.strftime('%Y-%m-%d')} to {test_end.strftime('%Y-%m-%d')}")
 
     # Storage for multiple retraining results
     all_evaluations = []
@@ -185,26 +196,53 @@ def main() -> None:
                                                 study=study)
     logging.info(f"Hyperparameters: {json.dumps(hyperparameters, indent=2)}")
 
-    # Loop over test periods (retraining)
+    # Determine if we need to train in this loop or just evaluate
+    # Train model once when retrain_interval=1, or for each period when retrain_interval>1
+    train_once_eval_multiple = (retrain_interval == 1 and eval_interval > 1)
+    trained_model = None  # Store model when training once
+
+    # Loop over test periods (training and/or evaluation)
     for period_idx, (current_test_start, current_test_end) in enumerate(test_periods):
         logging.info(f"\n{'='*80}")
-        logging.info(f"Training cycle {period_idx + 1}/{len(test_periods)}")
+        if train_once_eval_multiple:
+            if period_idx == 0:
+                logging.info(f"Training cycle 1/1 (will evaluate on {len(test_periods)} periods)")
+            else:
+                logging.info(f"Evaluation cycle {period_idx + 1}/{len(test_periods)}")
+        else:
+            logging.info(f"Training cycle {period_idx + 1}/{len(test_periods)}")
         logging.info(f"Test period: {current_test_start.strftime('%Y-%m-%d')} to {current_test_end.strftime('%Y-%m-%d')}")
         logging.info(f"{'='*80}\n")
 
-        # Create period-specific config
-        period_config = config.copy()
-        # Use full timestamp format to preserve hours (e.g., 23:00 for period ends)
-        period_config['data']['test_start'] = current_test_start.strftime('%Y-%m-%d %H:%M')
-        period_config['data']['test_end'] = current_test_end.strftime('%Y-%m-%d %H:%M')
+        # Create period-specific config (deep copy to avoid modifying original)
+        period_config = copy.deepcopy(config)
 
-        # Fit global scaler for each period when retraining, or once if no retraining
-        if period_idx == 0 or retrain_enabled:
+        # For train_once_eval_multiple: use original test_start for training,
+        # but period-specific test_start/end for evaluation
+        if train_once_eval_multiple:
+            # Keep original test_start for training, use period boundaries for evaluation
+            training_test_start = test_start.strftime('%Y-%m-%d %H:%M')
+            eval_test_start = current_test_start.strftime('%Y-%m-%d %H:%M')
+            eval_test_end = current_test_end.strftime('%Y-%m-%d %H:%M')
+        else:
+            # For retraining: use period-specific boundaries for both training and evaluation
+            training_test_start = current_test_start.strftime('%Y-%m-%d %H:%M')
+            eval_test_start = current_test_start.strftime('%Y-%m-%d %H:%M')
+            eval_test_end = current_test_end.strftime('%Y-%m-%d %H:%M')
+
+        # Set test boundaries
+        period_config['data']['test_start'] = training_test_start
+        period_config['data']['test_end'] = eval_test_end
+
+        # Determine if we need to train in this iteration
+        should_train = (period_idx == 0) if train_once_eval_multiple else True
+
+        # Fit global scaler when training
+        if should_train:
             logging.debug(f"Fitting global scaler for period {period_idx + 1}...")
 
             # Reset scaler for each period when retraining (fresh start each time)
-            if retrain_enabled:
-                global_scaler_x = StandardScaler()
+            global_scaler_x = StandardScaler()
 
             for key, df in tqdm(dfs.items(), desc="Fitting Global Scaler"):
                 df_temp = df.copy()
@@ -246,44 +284,73 @@ def main() -> None:
 
             logging.debug("Global scaler fitted.")
 
-        # Use memory-efficient data processing (REUSE existing functions)
-        logging.debug("Starting memory-efficient data processing...")
-        data_generator = tools.create_data_generator(dfs, period_config, features, scaler_x=global_scaler_x)
-        X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+        # Prepare data for training and/or evaluation
+        if should_train:
+            # Use memory-efficient data processing (REUSE existing functions)
+            logging.debug("Starting memory-efficient data processing...")
+            data_generator = tools.create_data_generator(dfs, period_config, features, scaler_x=global_scaler_x)
+            X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
 
-        # Note: Don't delete dfs yet - needed for evaluation pipeline later
-        gc.collect()
-        logging.debug("Data processing completed.")
+            # Note: Don't delete dfs yet - needed for evaluation pipeline later
+            gc.collect()
+            logging.debug("Data processing completed.")
 
-        # Log shapes
-        if isinstance(X_train, dict):
-            if 'known' in X_train:
-                logging.info(f'Data shape: X_train known: {X_train["known"].shape}, X_test known: {X_test["known"].shape}')
-            if 'static' in X_train:
-                logging.info(f'Data shape: X_train static: {X_train["static"].shape}, X_test static: {X_test["static"].shape}')
-            logging.info(f'Data shape: X_train observed: {X_train["observed"].shape}, X_test observed: {X_test["observed"].shape}')
-            logging.info(f'Data shape: y_train: {y_train.shape}, y_test: {y_test.shape}')
+            # Log shapes
+            if isinstance(X_train, dict):
+                if 'known' in X_train:
+                    logging.info(f'Data shape: X_train known: {X_train["known"].shape}, X_test known: {X_test["known"].shape}')
+                if 'static' in X_train:
+                    logging.info(f'Data shape: X_train static: {X_train["static"].shape}, X_test static: {X_test["static"].shape}')
+                logging.info(f'Data shape: X_train observed: {X_train["observed"].shape}, X_test observed: {X_test["observed"].shape}')
+                logging.info(f'Data shape: y_train: {y_train.shape}, y_test: {y_test.shape}')
+            else:
+                logging.info(f'Data shape: X_train: {X_train.shape}, X_test: {X_test.shape}')
+                logging.info(f'Data shape: y_train: {y_train.shape}, y_test: {y_test.shape}')
+
+            # Device selection
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            logging.info(f"Using device: {device}")
+
+            # --- TRAINING WITH PYTORCH ---
+            history, model = tools.training_pipeline(
+                train=(X_train, y_train),
+                val=(X_test, y_test),
+                hyperparameters=hyperparameters,
+                config=period_config,
+                device=device
+            )
+
+            # Store model if training once
+            if train_once_eval_multiple:
+                trained_model = model
+                logging.info(f"Model trained and will be reused for all {len(test_periods)} evaluation periods.")
+                # For train_once_eval_multiple in the first period, we need to prepare eval data separately
+                # Create a separate config for evaluation with period-specific boundaries
+                eval_period_config = config.copy()
+                eval_period_config['data']['test_start'] = eval_test_start
+                eval_period_config['data']['test_end'] = eval_test_end
+                # Regenerate test data with evaluation boundaries
+                logging.debug("Preparing evaluation data for first period...")
+                eval_data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x)
+                _, _, _, _, test_data = tools.combine_datasets_efficiently(eval_data_generator)
+                gc.collect()
+
+            logging.info(f"Training completed. Final metrics:")
+            logging.info(f"  Train - MSE: {history['train_loss'][-1]:.6f}, RMSE: {history['train_rmse'][-1]:.4f}, R²: {history['train_r2'][-1]:.4f}")
+            if 'val_loss' in history:
+                logging.info(f"  Val   - MSE: {history['val_loss'][-1]:.6f}, RMSE: {history['val_rmse'][-1]:.4f}, R²: {history['val_r2'][-1]:.4f}")
         else:
-            logging.info(f'Data shape: X_train: {X_train.shape}, X_test: {X_test.shape}')
-            logging.info(f'Data shape: y_train: {y_train.shape}, y_test: {y_test.shape}')
-
-        # Device selection
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logging.info(f"Using device: {device}")
-
-        # --- TRAINING WITH PYTORCH ---
-        history, model = tools.training_pipeline(
-            train=(X_train, y_train),
-            val=(X_test, y_test),
-            hyperparameters=hyperparameters,
-            config=period_config,
-            device=device
-        )
-
-        logging.info(f"Training completed. Final metrics:")
-        logging.info(f"  Train - MSE: {history['train_loss'][-1]:.6f}, RMSE: {history['train_rmse'][-1]:.4f}, R²: {history['train_r2'][-1]:.4f}")
-        if 'val_loss' in history:
-            logging.info(f"  Val   - MSE: {history['val_loss'][-1]:.6f}, RMSE: {history['val_rmse'][-1]:.4f}, R²: {history['val_r2'][-1]:.4f}")
+            # Evaluation only: prepare test data for this period with period-specific boundaries
+            logging.info("Evaluation only (using previously trained model)...")
+            eval_period_config = config.copy()
+            eval_period_config['data']['test_start'] = eval_test_start
+            eval_period_config['data']['test_end'] = eval_test_end
+            data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x)
+            _, _, _, _, test_data = tools.combine_datasets_efficiently(data_generator)
+            model = trained_model
+            history = None  # No training history for evaluation-only periods
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            gc.collect()
 
         # --- GENERATE PREDICTIONS AND EVALUATE PER PARK ---
         logging.info('Start evaluation pipeline...')
@@ -296,8 +363,13 @@ def main() -> None:
             # Get park data
             park_df = dfs[park_key]
 
-            # Determine test_start from period_config
-            test_start_str = period_config['data']['test_start']
+            # Determine test_start for evaluation
+            # For train_once_eval_multiple, use eval_test_start (period-specific)
+            # For retraining, use training_test_start (same as period-specific)
+            if train_once_eval_multiple:
+                test_start_str = eval_test_start
+            else:
+                test_start_str = period_config['data']['test_start']
             t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
 
             # Run evaluation pipeline for this park
@@ -347,26 +419,40 @@ def main() -> None:
 
         # Store results for this period
         all_evaluations.append(period_evaluation)
-        all_histories.append(history)
+        if history is not None:
+            all_histories.append(history)
 
-        logging.info(f"Completed training cycle {period_idx + 1}/{len(test_periods)}")
+        if train_once_eval_multiple:
+            if period_idx == 0:
+                logging.info(f"Completed training cycle 1/1")
+            else:
+                logging.info(f"Completed evaluation cycle {period_idx + 1}/{len(test_periods)}")
+        else:
+            logging.info(f"Completed training cycle {period_idx + 1}/{len(test_periods)}")
 
     # --- AGGREGATE RESULTS ACROSS ALL RETRAINING PERIODS ---
     logging.info(f"\n{'='*80}")
 
     if len(all_evaluations) > 1:
-        # Calculate mean evaluation across all retrainings
-        # Only average numeric columns; for string columns (like 'freq'), take the first value
-        concatenated = pd.concat(all_evaluations)
-        grouped = concatenated.groupby(level=0)
+        # Calculate mean evaluation across all retrainings/evaluations
+        # Average DataFrames row-wise to maintain structure
 
-        # Average numeric columns
-        evaluation = grouped.mean(numeric_only=True)
+        # Separate numeric and non-numeric columns from first DataFrame
+        first_eval = all_evaluations[0]
+        numeric_cols = first_eval.select_dtypes(include=[np.number]).columns
+        non_numeric_cols = first_eval.select_dtypes(exclude=[np.number]).columns
 
-        # For non-numeric columns, take the first value (they should be the same across periods)
-        non_numeric_cols = concatenated.select_dtypes(exclude=[np.number]).columns
-        for col in non_numeric_cols:
-            evaluation[col] = grouped[col].first()
+        # Create empty DataFrame with same structure as input
+        evaluation = first_eval.copy()
+
+        # Average numeric columns row-wise across all evaluations
+        for col in numeric_cols:
+            # Extract this column from all evaluations and compute mean
+            col_data = pd.concat([eval_df[col] for eval_df in all_evaluations], axis=1)
+            evaluation[col] = col_data.mean(axis=1)
+
+        # For non-numeric columns, keep values from first evaluation
+        # (they should be the same across all periods)
 
         logging.info(f"Aggregated evaluation:")
         logging.info(evaluation)
@@ -375,7 +461,7 @@ def main() -> None:
         results = {
             'hyperparameters': hyperparameters,
             'config': config,
-            'history': all_histories,  # List of dictionaries
+            'history': all_histories if all_histories else None,  # List of dictionaries, or None if eval-only
             'evaluation': evaluation,
             'individual_evaluations': all_evaluations,
             'test_dates': test_periods
@@ -383,10 +469,11 @@ def main() -> None:
     else:
         # Single training run (backward compatible)
         evaluation = all_evaluations[0]
+        history_result = all_histories[0] if all_histories else None
         results = {
             'hyperparameters': hyperparameters,
             'config': config,
-            'history': all_histories[0],  # Single dictionary
+            'history': history_result,  # Single dictionary or None
             'evaluation': evaluation,
             'test_dates': test_periods
         }
@@ -406,33 +493,38 @@ def main() -> None:
         torch.save(model.state_dict(), model_path)
         logging.info(f"Model saved to: {model_path}")
 
-    # Log final metrics (handle both single dict and list of dicts)
+    # Log final metrics (handle both single dict and list of dicts, or None)
     metrics_data = []
     histories = results['history']
-    if not isinstance(histories, list):
-        histories = [histories]
 
-    for i, hist in enumerate(histories):
-        row = {
-            'Cycle': i + 1 if len(histories) > 1 else 'Final',
-            'train_loss': hist['train_loss'][-1],
-            'val_loss': hist['val_loss'][-1] if 'val_loss' in hist else None,
-            'train_rmse': hist['train_rmse'][-1],
-            'val_rmse': hist['val_rmse'][-1] if 'val_rmse' in hist else None,
-            'train_r2': hist['train_r2'][-1],
-            'val_r2': hist['val_r2'][-1] if 'val_r2' in hist else None,
-        }
-        metrics_data.append(row)
+    if histories is None or (isinstance(histories, list) and len(histories) == 0):
+        # No training history (eval-only mode)
+        logging.info("\nNo training history (evaluation-only mode with single trained model)")
+    else:
+        if not isinstance(histories, list):
+            histories = [histories]
 
-    metrics_df = pd.DataFrame(metrics_data)
-    # Define the desired column order for logging
-    ordered_cols = ['Cycle', 'train_loss', 'val_loss', 'train_rmse', 'val_rmse', 'train_r2', 'val_r2']
-    # Filter for columns that actually exist in the DataFrame
-    final_cols = [col for col in ordered_cols if col in metrics_df.columns]
-    metrics_df = metrics_df[final_cols]
+        for i, hist in enumerate(histories):
+            row = {
+                'Cycle': i + 1 if len(histories) > 1 else 'Final',
+                'train_loss': hist['train_loss'][-1],
+                'val_loss': hist['val_loss'][-1] if 'val_loss' in hist else None,
+                'train_rmse': hist['train_rmse'][-1],
+                'val_rmse': hist['val_rmse'][-1] if 'val_rmse' in hist else None,
+                'train_r2': hist['train_r2'][-1],
+                'val_r2': hist['val_r2'][-1] if 'val_r2' in hist else None,
+            }
+            metrics_data.append(row)
 
-    logging.info("\nTraining and Validation Metrics:")
-    logging.info(metrics_df.to_string(index=False, float_format="%.6f", na_rep='N/A'))
+        metrics_df = pd.DataFrame(metrics_data)
+        # Define the desired column order for logging
+        ordered_cols = ['Cycle', 'train_loss', 'val_loss', 'train_rmse', 'val_rmse', 'train_r2', 'val_r2']
+        # Filter for columns that actually exist in the DataFrame
+        final_cols = [col for col in ordered_cols if col in metrics_df.columns]
+        metrics_df = metrics_df[final_cols]
+
+        logging.info("\nTraining and Validation Metrics:")
+        logging.info(metrics_df.to_string(index=False, float_format="%.6f", na_rep='N/A'))
 
     # Cleanup
     del dfs

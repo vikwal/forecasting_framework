@@ -200,6 +200,7 @@ def get_data(data_dir: str,
 
 def split_data(data: pd.DataFrame,
                train_frac: float = 0.75,
+               train_start: pd.Timestamp = None,
                test_start: pd.Timestamp = None,
                test_end: pd.Timestamp = None,
                t_0: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -209,7 +210,7 @@ def split_data(data: pd.DataFrame,
     df = data.copy()
     index = data.index
 
-    # Split data into train and test sets with a 75/25 ratio, ensuring full days
+    # Split data into train and test sets
     if test_start:
         train_end = test_start - pd.Timedelta(hours=0.25)
     else:
@@ -219,24 +220,27 @@ def split_data(data: pd.DataFrame,
         test_start = train_end + pd.Timedelta(hours=0.25)
         test_start = pd.Timestamp(test_start)
 
-    # handel MultiIndex if needed
+    # handle MultiIndex if needed
     if type(data.index) == pd.core.indexes.multi.MultiIndex:
         # Ensure timestamps are timezone-aware (UTC) for comparison
         ts_test_start = pd.to_datetime(test_start).tz_convert('UTC') if pd.to_datetime(test_start).tzinfo else pd.to_datetime(test_start).tz_localize('UTC')
+        if test_end:
+            ts_test_end = pd.to_datetime(test_end).tz_convert('UTC') if pd.to_datetime(test_end).tzinfo else pd.to_datetime(test_end).tz_localize('UTC')
+        else:
+            ts_test_end = data.index.get_level_values('starttime').max()
         ts_train_end = pd.to_datetime(train_end).tz_convert('UTC') if pd.to_datetime(train_end).tzinfo else pd.to_datetime(train_end).tz_localize('UTC')
+        if train_start is not None and not pd.isna(train_start):
+            ts_train_start = pd.to_datetime(train_start).tz_convert('UTC') if pd.to_datetime(train_start).tzinfo else pd.to_datetime(train_start).tz_localize('UTC')
+        else:
+            ts_train_start = data.index.get_level_values('starttime').min()
 
-        # For test_end, we want to include the full day if it's just a date, or up to the specific time
-        # If test_end is passed as a string like '2025-10-21', pd.to_datetime will make it 00:00:00
-        # If we want inclusive, we should probably ensure we cover the day.
-        # However, the user logic in train_cl.py handles test_end time setting.
-        # Here we just convert and use it.
-        ts_test_end = pd.to_datetime(test_end).tz_convert('UTC') if pd.to_datetime(test_end).tzinfo else pd.to_datetime(test_end).tz_localize('UTC')
-
-        df_train = df[df.index.get_level_values('starttime') < ts_test_start]
+        df_train = df[(df.index.get_level_values('starttime') < ts_test_start) &
+                      (df.index.get_level_values('starttime') >= ts_train_start)]
         df_test = df[(df.index.get_level_values('starttime') > ts_train_end) &
                      (df.index.get_level_values('starttime') <= ts_test_end)]
+
     else:
-        df_train = df[:train_end]
+        df_train = df[train_start:train_end]
         df_test = df[test_start:test_end]
 
     #print(df_train.index)
@@ -274,8 +278,9 @@ def pipeline(data: pd.DataFrame,
                                              observed_past_cols=observed_cols,
                                              static_cols=static_cols,
                                              train_frac=config['data']['train_frac'],
-                                             test_start=pd.Timestamp(config['data']['test_start']),
-                                             test_end=pd.Timestamp(config['data']['test_end']),
+                                             train_start=pd.Timestamp(config['data'].get('train_start', None)),
+                                             test_start=pd.Timestamp(config['data'].get('test_start', None)),
+                                             test_end=pd.Timestamp(config['data'].get('test_end', None)),
                                              t_0=t_0,
                                              scaler_x=config.get('scaler_x', None))
     elif config['model']['name'] == 'stemgnn':
@@ -287,8 +292,9 @@ def pipeline(data: pd.DataFrame,
                                                  step_size=config['model']['step_size'],
                                                  train_frac=config['data']['train_frac'],
                                                  target_col=target_col,
-                                                 test_start=pd.Timestamp(config['data']['test_start']),
-                                                 test_end=pd.Timestamp(config['data']['test_end']),
+                                                 train_start=pd.Timestamp(config['data'].get('train_start', None)),
+                                                 test_start=pd.Timestamp(config['data'].get('test_start', None)),
+                                                 test_end=pd.Timestamp(config['data'].get('test_end', None)),
                                                  t_0=t_0,
                                                  scale_target=config['data'].get('scale_y', False),
                                                  scaler_x=config.get('scaler_x', None))
@@ -315,8 +321,9 @@ def pipeline(data: pd.DataFrame,
                                      train_frac=config['data']['train_frac'],
                                      scale_y=config['data']['scale_y'],
                                      t_0=t_0,
-                                     test_start=pd.Timestamp(config['data']['test_start'], tz='UTC'),
-                                     test_end=pd.Timestamp(config['data']['test_end'], tz='UTC'),
+                                     train_start=pd.Timestamp(config['data'].get('train_start', None), tz='UTC'),
+                                     test_start=pd.Timestamp(config['data'].get('test_start', None), tz='UTC'),
+                                     test_end=pd.Timestamp(config['data'].get('test_end', None), tz='UTC'),
                                      target_col=target_col,
                                      scaler_x=config.get('scaler_x', None))
 
@@ -510,6 +517,7 @@ def prepare_data(data: pd.DataFrame,
                  scale_y: bool = False,
                  target_col: str = 'power',
                  t_0: int = 0,
+                 train_start: pd.Timestamp = None,
                  test_start: pd.Timestamp = None,
                  test_end: pd.Timestamp = None,
                  seq2seq: bool = False,
@@ -527,8 +535,8 @@ def prepare_data(data: pd.DataFrame,
     df.drop(target_col, axis=1, inplace=True)
 
     # Use helper function for splitting
-    df_train, df_test = split_data(df, train_frac, test_start, test_end, t_0)
-    target_train, target_test = split_data(target, train_frac, test_start, test_end, t_0)
+    df_train, df_test = split_data(df, train_frac, train_start, test_start, test_end, t_0)
+    target_train, target_test = split_data(target, train_frac, train_start, test_start, test_end, t_0)
 
     #logging.info(f"Training data range: {df_train.index.min()} to {df_train.index.max()} ({len(df_train)} rows)")
     #logging.info(f"Test data range:     {df_test.index.min()} to {df_test.index.max()} ({len(df_test)} rows)")
@@ -1605,6 +1613,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          step_size: int = 1, # Step size for windowing (e.g., 3 to take every 3rd window)
                          train_frac: float = 0.75,
                          target_col: str = 'power',
+                         train_start: pd.Timestamp = None,
                          test_start: pd.Timestamp = None,
                          test_end: pd.Timestamp = None,
                          t_0: int = 0,
@@ -1660,7 +1669,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
         test_start = test_start_adjusted
 
     # Use helper function for splitting which handles MultiIndex correctly
-    train_df, test_df = split_data(df, train_frac, test_start, test_end, t_0)
+    train_df, test_df = split_data(df, train_frac, train_start, test_start, test_end, t_0)
 
     #logging.info(f"Training data range: {train_df.index.min()} to {train_df.index.max()} ({len(train_df)} rows)")
     #logging.info(f"Test data range:     {test_df.index.min()} to {test_df.index.max()} ({len(test_df)} rows)")

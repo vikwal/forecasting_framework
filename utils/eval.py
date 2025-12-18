@@ -152,17 +152,44 @@ def evaluate_models(pred: pd.DataFrame,
     return results
 
 
-def get_metrics(y_pred: np.ndarray,
-                y_true: np.ndarray) -> dict:
+def get_metrics(y_pred: np.ndarray, # shape (n_samples, n_horizon)
+                y_true: np.ndarray,
+                detailed=False) -> dict:
     """Calculate metrics - framework agnostic"""
     error = y_pred - y_true
     r2 = r2_score(y_true.flatten(), y_pred.flatten())
     rmse = np.sqrt(np.square(error).mean())
     mae = np.abs(error).mean()
+    if detailed:
+        rmse = np.mean(np.sqrt(np.mean(np.square(error), axis=0)))
+        r2 = r2_score(y_true, y_pred, multioutput='variance_weighted')
     metrics = {'R^2': [r2],
                'RMSE': [rmse],
                'MAE': [mae]}
     return metrics
+
+def get_metrics_per_forecast_run(y_pred: np.ndarray, y_true: np.ndarray) -> dict:
+    """
+    y_pred, y_true shape: (n_samples, 48) -> z.B. (1000 Tage, 48 Stunden)
+    """
+    error = y_pred - y_true
+    global_rmse = np.sqrt(np.mean(np.square(error)))
+    global_mae = np.mean(np.abs(error))
+    global_r2 = r2_score(y_true.flatten(), y_pred.flatten())
+
+    raw_rmse_per_step = np.sqrt(np.mean(np.square(error), axis=0))
+    raw_mae_per_step = np.mean(np.abs(error), axis=0)
+
+    raw_r2_per_step = r2_score(y_true, y_pred, multioutput='raw_values')
+
+    return {
+        # Globale Zahlen (Scalar)
+        'Global_RMSE': global_rmse,
+        'Global_R2': global_r2,
+        'RMSE_per_hour': raw_rmse_per_step,
+        'MAE_per_hour': raw_mae_per_step,
+        'R2_per_hour': raw_r2_per_step
+    }
 
 
 def evaluation_pipeline(data: pd.DataFrame,

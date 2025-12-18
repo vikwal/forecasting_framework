@@ -8,24 +8,10 @@ data:
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2025-08-01'
-  test_end: '2025-10-21'
-  target_col: 'power'
-  scale_x: True
-  scale_y: False
-  use_pca: False
-  pca_components: 3
-  lag_in_col: False
-  n_neighbors: 5
-  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
-  nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
-  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
-  stations_master: 'data/stations_master.csv'
-  freq: '1h'
-  train_frac: 1
-  val_frac: 0.25 # abs from train_frac
-  test_start: '2025-08-01'
-  test_end: '2025-10-21'
+  test_start: '2024-08-01'
+  test_end: '2025-07-31'
+  retrain_interval: 12
+  eval_interval: 12
   target_col: 'power'
   scale_x: True
   scale_y: False
@@ -130,7 +116,7 @@ model:
     mode: 'min'  # 'min' for metrics to minimize (loss, rmse, mae), 'max' for metrics to maximize (r2)
     restore_best_weights: True  # Restore model weights from the epoch with the best value
   parallelize: False
-  lookup_hpo: False
+  lookup_hpo: True
   verbose: 1
 
 

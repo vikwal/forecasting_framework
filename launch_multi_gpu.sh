@@ -215,7 +215,7 @@ PIDS=()
 # Launch training on each GPU
 for i in "${!GPU_ARRAY[@]}"; do
     GPU_ID="${GPU_ARRAY[$i]}"
-    INDEX="gpu${GPU_ID}"
+    INDEX="gpu${GPU_ID}_2"
 
     echo "Starting training on GPU $GPU_ID (index: $INDEX)..."
 

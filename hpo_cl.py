@@ -33,6 +33,8 @@ def main() -> None:
     index = ''
     if args.index:
         index = f'_{args.index}'
+    if '.yaml' in args.config:
+        args.config = args.config.split('.')[0]
     if '/' in args.config:
         config_name = args.config.split('/')[-1]
     else:
@@ -62,8 +64,6 @@ def main() -> None:
     os.makedirs('studies', exist_ok=True)
 
     # Load config
-    if '.yaml' in args.config:
-        args.config = args.config.split('.')[0]
     config = tools.load_config(f'{args.config}.yaml')
 
     # Override verbose setting
@@ -305,13 +305,13 @@ def main() -> None:
                         f'{metric_name}: {average_accuracy:.4f}'
                     )
 
-                completed_trials += 1
                 logging.info(f'Progress: {completed_trials}/{config["hpo"]["trials"]} successful trials completed.')
+                completed_trials += 1
 
         except optuna.TrialPruned:
             logging.info(f'Trial number {trial_number+1} was pruned by Optuna')
             study.tell(trial, state=optuna.trial.TrialState.PRUNED)
-            trial_counter += 1
+
 
         except KeyboardInterrupt:
             logging.warning(f'Trial number {trial_number+1} interrupted by user. Marking as failed.')
@@ -322,7 +322,6 @@ def main() -> None:
             logging.error(f'Trial number {trial_number+1} failed with error: {str(e)}. Marking as failed.')
             logging.exception("Full traceback:")
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
-            trial_counter += 1
             raise  # Continue with next trial instead of crashing
 
         trial_counter += 1

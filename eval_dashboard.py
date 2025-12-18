@@ -382,9 +382,18 @@ with tab2:
             if cl_results:
                 st.success(f"✅ Simulation geladen: {selected_sim}")
 
+                # Detect scenario: Check if 'individual_evaluations' exists
+                is_multi_training = 'individual_evaluations' in cl_results
+
+                if is_multi_training:
+                    st.info(f"📊 Multi-Training Szenario erkannt: {len(cl_results['individual_evaluations'])} Trainingszyklen")
+                else:
+                    st.info("📊 Single-Training Szenario")
+
                 # Konfigurations-Info
                 with st.expander("🔧 Konfiguration anzeigen"):
                     params = cl_results['config']['params']
+                    data_params = cl_results['config']['data']
                     hyperparams = cl_results.get('hyperparameters', {})
 
                     col1, col2, col3 = st.columns(3)
@@ -403,14 +412,18 @@ with tab2:
                             st.write("- N/A")
 
                     with col3:
+                        test_start = pd.to_datetime(data_params.get("test_start", "N/A"))
+                        test_end = pd.to_datetime(data_params.get("test_end", "N/A"))
+                        retrain_interval = data_params.get("retrain_interval", "N/A")
                         st.write('**More Info:**')
                         st.write(f'- Next n grid points: {params.get("next_n_grid_points", "N/A")}')
-                        st.write(f'- Aggregate grid points: {params.get("aggregate_grid_points", "N/A")}')
-                        st.write(f'- NWP models: {params["openmeteo"].get("nwp_models", "N/A")}')
                         st.write(f'- Turbines per park: {params.get("turbines_per_park", "N/A")}')
+                        st.write(f'- Test start: {test_start.strftime("%Y-%m-%d")}')
+                        st.write(f'- Test end: {test_end.strftime("%Y-%m-%d")}')
+                        st.write(f'- Retrain interval: {retrain_interval}')
 
-                # Metriken anzeigen
-                st.subheader("📊 Evaluations-Metriken")
+                # Metriken anzeigen - Always show the averaged evaluation at the top
+                st.subheader("📊 Evaluations-Metriken (Durchschnitt über alle Zyklen)" if is_multi_training else "📊 Evaluations-Metriken")
                 eval_df = cl_results['evaluation'][['R^2', 'RMSE', 'MAE']].copy()
                 if 'Skill' in cl_results['evaluation'].columns:
                     eval_df['Skill'] = cl_results['evaluation']['Skill']
@@ -419,25 +432,124 @@ with tab2:
 
                 st.dataframe(eval_df.round(4))
 
+                # Bar chart for multi-training scenario showing all cycles
+                if is_multi_training:
+                    st.subheader("📊 Metriken-Vergleich über alle Zyklen")
+
+                    # Selectbox for metric selection
+                    available_metrics = ['R^2', 'RMSE', 'MAE']
+                    if 'Skill' in cl_results['evaluation'].columns:
+                        available_metrics.append('Skill')
+
+                    selected_metric = st.selectbox(
+                        "Metrik auswählen:",
+                        available_metrics,
+                        key=f"metric_select_{selected_sim_key}"
+                    )
+
+                    # Collect metric values for all cycles
+                    if 'individual_evaluations' in cl_results:
+                        cycle_labels = [f"Z{i+1}" for i in range(len(cl_results['individual_evaluations']))]
+                        metric_values = []
+
+                        for eval_df_cycle in cl_results['individual_evaluations']:
+                            # Calculate mean of the metric across all parks for this cycle
+                            if 'mean' in eval_df_cycle.index:
+                                metric_values.append(eval_df_cycle.loc['mean', selected_metric])
+                            else:
+                                metric_values.append(eval_df_cycle[selected_metric].mean())
+
+                        # Create bar chart with plotly
+                        fig = go.Figure(data=[
+                            go.Bar(
+                                x=cycle_labels,
+                                y=metric_values,
+                                marker_color='rgb(31, 119, 180)',
+                                text=[f'{v:.4f}' for v in metric_values],
+                                textposition='auto',
+                            )
+                        ])
+
+                        # Set y-axis range based on metric
+                        y_range = [0, 1] if selected_metric == 'R^2' else [0, 0.5]
+
+                        fig.update_layout(
+                            xaxis_title="Zyklus",
+                            yaxis_title=selected_metric,
+                            hovermode="x",
+                            font=dict(size=14),
+                            showlegend=False
+                        )
+
+                        fig.update_xaxes(
+                            title_font=dict(size=16),
+                            tickfont=dict(size=14)
+                        )
+                        fig.update_yaxes(
+                            title_font=dict(size=16),
+                            tickfont=dict(size=14),
+                            range=y_range
+                        )
+
+                        try:
+                            st.plotly_chart(fig, width="stretch")
+                        except:
+                            st.plotly_chart(fig, use_container_width=True)
+
+                # For multi-training scenario, add selectbox for test_dates
+                selected_period_idx = 0  # Default to first period
+                if is_multi_training:
+                    st.markdown("---")
+                    st.subheader("🔍 Einzelne Trainingszyklen")
+
+                    # Create options for selectbox
+                    test_dates = cl_results['test_dates']
+                    period_options = {}
+                    for idx, (start, end) in enumerate(test_dates):
+                        # Format the dates nicely
+                        if hasattr(start, 'strftime'):
+                            start_str = start.strftime('%Y-%m-%d')
+                            end_str = end.strftime('%Y-%m-%d')
+                        else:
+                            start_str = str(start)
+                            end_str = str(end)
+                        period_options[f"Zyklus {idx + 1}: {start_str} bis {end_str}"] = idx
+
+                    selected_period_key = st.selectbox(
+                        "Wählen Sie einen Trainingszyklus:",
+                        list(period_options.keys()),
+                        key=f"period_select_{selected_sim_key}"
+                    )
+                    selected_period_idx = period_options[selected_period_key]
+
+                    # Display individual evaluation for selected period
+                    st.subheader(f"📊 Evaluations-Metriken für {selected_period_key}")
+                    if 'individual_evaluations' in cl_results and len(cl_results['individual_evaluations']) > selected_period_idx:
+                        individual_eval = cl_results['individual_evaluations'][selected_period_idx]
+                        individual_eval_df = individual_eval[['R^2', 'RMSE', 'MAE']].copy()
+                        if 'Skill' in individual_eval.columns:
+                            individual_eval_df['Skill'] = individual_eval['Skill']
+                        if 'key' in individual_eval.columns:
+                            individual_eval_df['key'] = individual_eval['key']
+                        st.dataframe(individual_eval_df.round(4))
+                    else:
+                        st.warning("Evaluations-Daten für den gewählten Zyklus nicht verfügbar")
+
                 # Training History Plot
                 fontsize=11
                 st.subheader("📈 Training History")
                 if 'history' in cl_results and cl_results['history']:
-                    plot_interactive_history(cl_results['history'], key_prefix=f"cl_{selected_sim_key}")
-                    # fig, ax = plt.subplots(figsize=(7, 3))
-
-                    # if 'loss' in cl_results['history']:
-                    #     ax.plot(cl_results['history']['loss'], label='Train Loss')
-                    # if 'val_loss' in cl_results['history']:
-                    #     ax.plot(cl_results['history']['val_loss'], label='Val Loss')
-
-                    # ax.set_xlabel('Epochs', fontsize=fontsize)
-                    # ax.set_ylabel('Loss', fontsize=fontsize)
-                    # ax.legend(fontsize=fontsize)
-                    # ax.grid(True, alpha=0.3)
-
-                    # st.pyplot(fig)
-                    # plt.close()
+                    # Handle both single dict and list of dicts
+                    if is_multi_training:
+                        # Multiple trainings: history is a list of dicts
+                        if isinstance(cl_results['history'], list) and len(cl_results['history']) > selected_period_idx:
+                            selected_history = cl_results['history'][selected_period_idx]
+                            plot_interactive_history(selected_history, key_prefix=f"cl_{selected_sim_key}_period_{selected_period_idx}")
+                        else:
+                            st.warning("History-Daten für den gewählten Zyklus nicht verfügbar")
+                    else:
+                        # Single training: history is a single dict
+                        plot_interactive_history(cl_results['history'], key_prefix=f"cl_{selected_sim_key}")
                 else:
                     st.info("Keine History-Daten verfügbar")
             else:
