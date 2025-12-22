@@ -28,7 +28,9 @@ data:
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
   test_start: '2025-08-01'
-  test_end: '2025-10-21'
+  test_end: '2025-10-31'
+  retrain_interval: 3
+  eval_interval: 3
   target_col: 'power'
   scale_x: True
   scale_y: False
@@ -133,7 +135,7 @@ model:
     mode: 'min'  # 'min' for metrics to minimize (loss, rmse, mae), 'max' for metrics to maximize (r2)
     restore_best_weights: True  # Restore model weights from the epoch with the best value
   parallelize: False
-  lookup_hpo: False
+  lookup_hpo: True
   verbose: 1
 
 
@@ -145,8 +147,8 @@ hpo:
     - metric: 'val_rmse'
       direction: 'minimize'
   trials: 1000
-  kfolds: 12
-  min_train_date: '2024-06-30'
+  kfolds: 4
+  min_train_date: '2024-04-30'
   val_split: 1
   pruning:
     use_median_pruner: True
@@ -177,7 +179,7 @@ hpo:
     n_lstm_layers: [1, 5]  # Same for both encoder and decoder
     static_embedding_dim: [8, 128]  # Separate dimension for static feature embeddings (null = use hidden_dim)
     num_quantiles: [1]
-    clipnorm: [0.1, 10.0]
+    clipnorm: [0, 10.0]
   fl:
     strategy: 'fedavg'
     personalize: False

@@ -20,7 +20,7 @@ CONFIG_DIR="configs/wind_100ex50"
 PROGRESS_FILE="train_progress_100ex50.txt"
 
 # Counter for GPU assignment
-gpu_id=4
+gpu_id=7
 
 # Create progress file if it doesn't exist
 touch "$PROGRESS_FILE"
@@ -48,7 +48,7 @@ for config_file in "$CONFIG_DIR"/config_wind_*.yaml; do
     echo "[$total_configs] Starting training for $config_path on GPU $gpu_id"
 
     # Start the training process and wait for it to complete
-    CUDA_VISIBLE_DEVICES=$gpu_id python train_cl.py -m tft -c "$config_path" --save_model
+    CUDA_VISIBLE_DEVICES=$gpu_id python train_cl.py -m tft -c "$config_path" -i retrain
 
     # Check if the command succeeded
     if [ $? -eq 0 ]; then

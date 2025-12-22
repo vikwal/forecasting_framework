@@ -718,6 +718,7 @@ def _process_csv_file(args):
     try:
         # Load CSV file
         df_grid = pd.read_csv(csv_path)
+        df_grid.drop_duplicates(subset=['starttime', 'forecasttime', 'toplevel', 'bottomlevel'], keep='last', inplace=True)
 
         # Convert timestamp
         df_grid['starttime'] = pd.to_datetime(df_grid['starttime'], utc=True)

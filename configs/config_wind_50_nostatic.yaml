@@ -19,10 +19,10 @@ data:
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
   #train_start: '2024-01-01'
-  test_start: '2024-08-01'
-  test_end: '2025-07-31'
-  retrain_interval: 12
-  eval_interval: 12
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
+  retrain_interval: 1
+  eval_interval: 3
   target_col: 'power'
   scale_x: True
   scale_y: False

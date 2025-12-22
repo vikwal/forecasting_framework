@@ -14,10 +14,10 @@ else
 fi
 
 # Directory containing the config files
-CONFIG_DIR="configs/wind_100"
+CONFIG_DIR="configs/wind_50_4n"
 
 # Progress tracking file
-PROGRESS_FILE="hpo_progress.txt"
+PROGRESS_FILE="hpo_progress_50_4n.txt"
 
 # Counter for GPU assignment
 gpu_id=0

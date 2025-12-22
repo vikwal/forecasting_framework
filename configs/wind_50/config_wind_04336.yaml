@@ -1,16 +1,17 @@
 data:
-  path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
+  path: '/mnt/nvme1/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
   files: ['04336'] # Specific client files to lo
-  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
-  nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
-  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
+  nwp_path: '/mnt/nvme1/icon-d2/csv' # '/mnt/nvme1/open-meteo/wind'
+  #synth_path: '/mnt/nvme1/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2024-08-01'
-  test_end: '2025-07-31'
-  retrain_interval: 12
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
+  retrain_interval: 3
+  eval_interval: 3
   target_col: 'power'
   scale_x: True
   scale_y: False
@@ -120,7 +121,7 @@ model:
 
 
 hpo:
-  studies_path: '/mnt/nas/optuna_studies/optuna_viktor.db'
+  studies_path: '/mnt/nvme1/optuna_studies/optuna_viktor.db'
   objectives:
     # - metric: 'val_r2'
     #   direction: 'maximize'
@@ -172,7 +173,8 @@ hpo:
 eval:
   results_path: 'results'
   eval_on_all_test_data: True
-  retrain_interval: 0 # in hours - 0 if no retraining is wanted
+  retrain_interval: 3 # in hours - 0 if no retraining is wanted
+  eval_interval: 3
   t_0: 12
   synth_wind:
     h1: 10
@@ -187,12 +189,12 @@ eval:
     apply_ageing: True
     hourly_resolution: True
     random_seed: 64
-    turbine_dir: "/mnt/nas/synthetic/wind/power_curves"
+    turbine_dir: "/mnt/nvme1/synthetic/wind/power_curves"
     turbine_power: 'turbine_power.csv'
     turbine_specs: "turbine_specs.csv"
     turbine_cp: "turbine_cp.csv"
     turbine_names: "turbine_names.csv"
-    wind_ages: '/mnt/nas/synthetic/wind/wind_ages.npy'
+    wind_ages: '/mnt/nvme1/synthetic/wind/wind_ages.npy'
   synth_pv:
     pv_ages: 'data/pv_ages.npy'
 
