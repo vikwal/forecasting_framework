@@ -48,7 +48,7 @@ def concatenate_results(results_dir: str,
         for col in index_cols:
             indices[col].append(df[col].iloc[0])
         df.drop(index_cols, axis=1, inplace=True)
-        metric = df.mean(axis=0)
+        metric = df.mean(axis=0, numeric_only=True)
         metrics.append(metric)
 
     df = pd.DataFrame(metrics, columns=metric.index)
@@ -78,7 +78,7 @@ def plot_interactive_history(history: dict, key_prefix: str = "cl"):
         history: Dictionary mit den History-Daten (z.B. {'loss': [...], 'val_loss': [...]})
         key_prefix: Eindeutiger Prefix für Streamlit-Keys, um Konflikte zu vermeiden.
     """
-    if not history:
+    if history is None or (isinstance(history, dict) and not history) or (isinstance(history, pd.DataFrame) and history.empty):
         st.info("Keine History-Daten verfügbar")
         return
 
@@ -223,7 +223,7 @@ def plot_interactive_history(history: dict, key_prefix: str = "cl"):
         st.plotly_chart(fig, width="stretch")
     except:
          # Fallback für ältere Streamlit Versionen
-         st.plotly_chart(fig, use_container_width=True)
+         st.plotly_chart(fig, width='stretch')
 
 # Haupttitel
 st.title("📊 Forecasting Evaluation Dashboard")
@@ -492,9 +492,9 @@ with tab2:
                         )
 
                         try:
-                            st.plotly_chart(fig, width="stretch")
+                            st.plotly_chart(fig, width='stretch')
                         except:
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(fig, width='stretch')
 
                 # For multi-training scenario, add selectbox for test_dates
                 selected_period_idx = 0  # Default to first period
@@ -1262,7 +1262,7 @@ with tab3:
             fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
 
             # Display the plot
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             # Export option for high-resolution PNG
             st.markdown("**Export Plot:**")

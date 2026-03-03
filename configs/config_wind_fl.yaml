@@ -62,6 +62,7 @@ params:
     'density_rotor_eq', # 'wind_speed_rotor_eq',
     #'wind_speed_80m', 'wind_speed_120m','wind_speed_180m', # 'wind_speed_10m',
     #'density_80m', 'density_120m', 'density_180m', # 'density_10m'
+    #'wind_speed_hub'
                    ]
   observed_features: [
                       'power'
@@ -87,6 +88,7 @@ params:
 
 model:
   num_workers: 0 # 'auto' for all physical cores
+  epochs: 10
   output_dim: 48
   lookback: 48
   horizon: 48
@@ -102,7 +104,7 @@ model:
   cnn:
     filters: 128
     kernel_size: 3
-    n_cnn_layers: 10
+    n_cnn_layers: 5
     increase_filters: False
   rnn:
     n_rnn_layers: 2
@@ -123,9 +125,9 @@ model:
     num_quantiles: 1
     clipnorm: 7
   callbacks: False
-  save_model: True
   shuffle: True
   force_retrain: True
+  # handles whether during fine tuning early stopping is applied
   early_stopping:
     enabled: True  # Set to True to enable early stopping
     patience: 10  # Number of epochs to wait for improvement
@@ -221,9 +223,23 @@ fl:
     clientB: ['15813', '04466', '01759', '02932']
     clientC: ['00963', '02564', '04745', '00282']
     clientD: ['00342', '02907', '02171', '02794']
-  strategy: 'fedavg'
+    #clientE: ['01200']
+    #clientF: ['04466']
+    #clientG: ['02564']
+    #clientH: ['02907']
+  strategy: 'fedadam'
   n_rounds: 10
-  personalize: False
+  n_local_epochs: 1
+  personalize: True
+  fine_tune: False
+  # handles whether during FL early stopping is applied
+  early_stopping:
+    enabled: True
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
+    restore_best_weights: True
   fedopt:
     server_lr: 0.001
     beta_1: 0.9
@@ -232,5 +248,3 @@ fl:
   force_retrain: True
   verbose: True
   save_history: False
-  num_gpus: 1
-  num_cpus: 11

@@ -3,11 +3,22 @@ import time
 import logging
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+import torch
+import torch.nn as nn
 from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
 
 from . import tools, models, preprocessing
+
+
+def aggregate_scalers(client_stats):
+    n_total = sum(s['n'] for s in client_stats)
+    mu_global = sum(s['n'] * s['mu'] for s in client_stats) / n_total
+    var_global = sum(s['n'] * (s['var'] + s['mu']**2) for s in client_stats) / n_total - mu_global**2
+    var_global = np.maximum(var_global, 0)
+    return mu_global, np.sqrt(var_global)
+
 
 def load_federated_data(config, freq, features, target_col='power'):
     """
@@ -32,110 +43,120 @@ def load_federated_data(config, freq, features, target_col='power'):
         client_files = preprocessing.get_data(data_dir=base_path,
                                             config=client_config,
                                             freq=freq,
-                                            features=features,
-                                            target_col=target_col)
+                                            features=features)
 
         clients_data[client_id] = client_files
 
     return clients_data
 
+
+def state_dict_to_numpy_list(state_dict):
+    """Convert PyTorch state_dict to list of numpy arrays for aggregation"""
+    return [v.cpu().numpy() for v in state_dict.values()]
+
+
+def numpy_list_to_state_dict(numpy_list, reference_state_dict):
+    """Convert list of numpy arrays back to state_dict format"""
+    result = {}
+    for (k, ref_v), np_v in zip(reference_state_dict.items(), numpy_list):
+        tensor = torch.from_numpy(np_v)
+        # Ensure same dtype and device as reference
+        if ref_v.dtype != tensor.dtype:
+            tensor = tensor.to(dtype=ref_v.dtype)
+        result[k] = tensor.to(ref_v.device)
+    return result
+
+
 class ServerOptimizer:
     """
-    Verwaltet den Zustand und die Update-Logik für serverseitige Optimierer
-    wie FedAvgM und FedAdam.
+    Manages state and update logic for server-side optimizers like FedAvgM and FedAdam.
+    Works with PyTorch state_dicts.
     """
     def __init__(self,
                  strategy: str,
                  hyperparameters: Dict[str, Any],
-                 initial_weights: List[np.ndarray]):
+                 initial_weights: Dict[str, torch.Tensor]):
         self.strategy = strategy.lower()
         self.hyperparameters = hyperparameters
         self.step_count = 0
 
-        # Hyperparameter für Server-Optimierer holen (mit Standardwerten)
-        self.server_lr = hyperparameters.get('server_lr', 1.0)      # Server Lernrate (eta_s)
-        self.beta_1 = hyperparameters.get('beta_1', 0.9)            # Momentum für FedAvgM, Beta1 für FedAdam
-        self.beta_2 = hyperparameters.get('beta_2', 0.999)          # Beta2 für FedAdam
-        self.tau = hyperparameters.get('tau', 1e-8)                 # Epsilon/Tau für FedAdam (numerische Stabilität)
+        # Get server optimizer hyperparameters (with defaults)
+        self.server_lr = hyperparameters.get('server_lr', 1.0)
+        self.beta_1 = hyperparameters.get('beta_1', 0.9)
+        self.beta_2 = hyperparameters.get('beta_2', 0.999)
+        self.tau = hyperparameters.get('tau', 1e-8)
 
-        # Initialisiere Zustandsvariablen (als Liste von Numpy-Arrays, wie die Gewichte)
-        self.server_state_v = [np.zeros_like(w) for w in initial_weights] # Momentum für FedAvgM / v für FedAdam
-        if self.strategy in ['fedadam', 'fedyogi']: # FedAdam/Yogi brauchen einen zweiten Moment-Schätzer
-            self.server_state_m = [np.zeros_like(w) for w in initial_weights] # m für FedAdam/Yogi
+        # Initialize state variables as numpy arrays for easier computation
+        self.initial_weights_list = state_dict_to_numpy_list(initial_weights)
+        self.server_state_v = [np.zeros_like(w) for w in self.initial_weights_list]
+
+        if self.strategy in ['fedadam', 'fedyogi']:
+            self.server_state_m = [np.zeros_like(w) for w in self.initial_weights_list]
 
         logging.info(f"[ServerOptimizer] Initialized for strategy '{self.strategy}' with server_lr={self.server_lr}, "
                      f"beta_1={self.beta_1}, beta_2={self.beta_2}, tau={self.tau}")
 
     def step(self,
-             old_global_weights: List[np.ndarray],
-             aggregated_weights: List[np.ndarray]) -> List[np.ndarray]:
+             old_global_weights: Dict[str, torch.Tensor],
+             aggregated_weights: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
-        Führt einen Optimierungsschritt auf dem Server aus.
+        Perform server optimization step.
 
         Args:
-            old_global_weights (w_t): Die globalen Gewichte VOR dem Update.
-            aggregated_weights (w_{t+1}^{avg}): Die durch FedAvg aggregierten Gewichte.
+            old_global_weights: Global weights before the update
+            aggregated_weights: Weights aggregated through FedAvg
 
         Returns:
-            List[np.ndarray]: Die finalen globalen Gewichte (w_{t+1}) nach dem Server-Optimierungsschritt.
+            dict: Final global weights after server optimization
         """
         self.step_count += 1
-        # Berechne das durchschnittliche Update-Delta (w_{t+1}^{avg} - w_t)
-        delta_t = [agg - old for agg, old in zip(aggregated_weights, old_global_weights)]
+
+        # Convert to numpy lists for computation
+        old_weights_list = state_dict_to_numpy_list(old_global_weights)
+        agg_weights_list = state_dict_to_numpy_list(aggregated_weights)
+
+        # Calculate average update delta
+        delta_t = [agg - old for agg, old in zip(agg_weights_list, old_weights_list)]
 
         if self.strategy == 'fedavgm':
-            # FedAvgM Update Rule:
-            # v_{t+1} = beta_1 * v_t + delta_t
-            # w_{t+1} = w_t + server_lr * v_{t+1}
-            # Update server momentum (v) -> In-place Update der Liste
+            # FedAvgM Update Rule
             self.server_state_v[:] = [self.beta_1 * v + dt for v, dt in zip(self.server_state_v, delta_t)]
-            # Calculate new global weights
-            final_weights = [old + self.server_lr * v for old, v in zip(old_global_weights, self.server_state_v)]
+            final_weights_list = [old + self.server_lr * v for old, v in zip(old_weights_list, self.server_state_v)]
             logging.debug(f"[ServerOptimizer FedAvgM] Applied momentum update. Step: {self.step_count}")
 
         elif self.strategy == 'fedadam':
-            # FedAdam Update Rule:
-            # m_{t+1} = beta_1 * m_t + (1 - beta_1) * delta_t
-            # v_{t+1} = beta_2 * v_t + (1 - beta_2) * delta_t^2
-            # Optional: Bias correction (hier implementiert)
-            # m_hat = m_{t+1} / (1 - beta_1^t)
-            # v_hat = v_{t+1} / (1 - beta_2^t)
-            # w_{t+1} = w_t + server_lr * m_hat / (sqrt(v_hat) + tau)
-            # Update first moment estimate (m) -> In-place
+            # FedAdam Update Rule
             self.server_state_m[:] = [self.beta_1 * m + (1 - self.beta_1) * dt
                                       for m, dt in zip(self.server_state_m, delta_t)]
-            # Update second moment estimate (v) -> In-place
             self.server_state_v[:] = [self.beta_2 * v + (1 - self.beta_2) * np.square(dt)
                                       for v, dt in zip(self.server_state_v, delta_t)]
+
+            # Bias correction
             beta_1_power = self.beta_1 ** self.step_count
             beta_2_power = self.beta_2 ** self.step_count
             m_hat = [m / (1 - beta_1_power) for m in self.server_state_m]
             v_hat = [v / (1 - beta_2_power) for v in self.server_state_v]
 
-            final_weights = [old + self.server_lr * m_h / (np.sqrt(v_h) + self.tau)
-                             for old, m_h, v_h in zip(old_global_weights, m_hat, v_hat)]
+            final_weights_list = [old + self.server_lr * m_h / (np.sqrt(v_h) + self.tau)
+                             for old, m_h, v_h in zip(old_weights_list, m_hat, v_hat)]
             logging.debug(f"[ServerOptimizer FedAdam] Applied Adam update. Step: {self.step_count}")
 
         elif self.strategy == 'fedyogi':
-             # FedYogi ist ähnlich zu FedAdam, aber mit anderem Update für v
-             # v_{t+1} = v_t - (1 - beta_2) * delta_t^2 * sign(v_t - delta_t^2)
-             # (Implementierung hier ausgelassen, da nicht primär gefordert)
-             logging.warning(f"FedYogi strategy not fully implemented yet.")
-             final_weights = aggregated_weights # Fallback zu FedAvg
+            logging.warning(f"FedYogi strategy not fully implemented yet.")
+            final_weights_list = agg_weights_list
 
         elif self.strategy == 'fedadagrad':
-             # FedAdagrad braucht auch einen state (Summe der quadrierten Deltas)
-             # v_{t+1} = v_t + delta_t^2
-             # w_{t+1} = w_t + server_lr * delta_t / (sqrt(v_{t+1}) + tau)
-             # (Implementierung hier ausgelassen)
-             logging.warning(f"FedAdagrad strategy not fully implemented yet.")
-             final_weights = aggregated_weights # Fallback zu FedAvg
+            logging.warning(f"FedAdagrad strategy not fully implemented yet.")
+            final_weights_list = agg_weights_list
         else:
-             logging.error(f"Unknown server optimization strategy: {self.strategy}")
-             final_weights = aggregated_weights
-        return [np.array(w) for w in final_weights]
+            logging.error(f"Unknown server optimization strategy: {self.strategy}")
+            final_weights_list = agg_weights_list
 
-@ray.remote # Dekoriert die Klasse als Ray Actor
+        # Convert back to state_dict
+        return numpy_list_to_state_dict(final_weights_list, old_global_weights)
+
+
+@ray.remote
 class ClientActor:
     def __init__(self,
                  client_id: int,
@@ -150,167 +171,474 @@ class ClientActor:
         self.X_val, self.y_val = X_val, y_val
         self.config = config
         self.hyperparameters = hyperparameters
-        # Wichtig: Das Modell muss innerhalb des Actors erstellt werden
+
+        # Initialize GPU
         tools.initialize_gpu()
-        self.model = models.get_model(config=self.config,
-                                      hyperparameters=self.hyperparameters)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Create model within the actor
+        self.model = models.get_model(config=self.config, hyperparameters=self.hyperparameters)
+        self.model = self.model.to(self.device)
+
         self.logger = logging.getLogger(f"ClientActor_{self.client_id}")
         self.logger.setLevel(logging.INFO)
-        logging.info(f"[ClientActor {self.client_id}] Initialized model.")
+        logging.info(f"[ClientActor {self.client_id}] Initialized PyTorch model on {self.device}.")
 
-    def train(self,
-              global_weights: List):
-        """Performs model training for a communication round."""
-        verbose = self.config['fl']['verbose']
+    def train(self, global_weights: Dict[str, torch.Tensor]):
+        """Performs model training for a communication round using PyTorch."""
+        from . import tools
+        import copy
+        from torch.utils.data import TensorDataset, DataLoader
+
+        verbose = self.config['fl'].get('verbose', False)
         personalize = self.config['fl'].get('personalize', False)
+
+        # Load global weights (handle personalization if needed)
         if personalize:
-             _, personal_weights = split_weights_by_layer_name(self.model)
-             set_weights_by_layer_name(self.model, global_weights, personal_weights)
+            model_name = self.config['model']['name']
+            # Split GLOBAL weights to get only shared parts
+            shared_global, _ = self._split_weights_by_layer_name(global_weights, model_name)
+            # Split LOCAL weights to get only personal parts
+            _, personal_local = self._split_weights_by_layer_name(self.model.state_dict(), model_name)
+            # Merge: shared from global + personal from local
+            merged_weights = {**shared_global, **personal_local}
+            self.model.load_state_dict(merged_weights, strict=False)
+            logging.debug(f"[ClientActor {self.client_id}] Loaded {len(shared_global)} shared weights from global, {len(personal_local)} personal weights from local")
         else:
-            self.model.set_weights(global_weights)
+            self.model.load_state_dict(global_weights)
+
+        # Determine number of local epochs
+        fl_early_stopping = self.config.get('fl', {}).get('early_stopping', {})
+        if fl_early_stopping.get('enabled', False):
+            n_epochs = self.hyperparameters.get('epochs', 200)
+            patience = fl_early_stopping.get('patience', 10)
+            min_delta = fl_early_stopping.get('min_delta', 0.0001)
+            mode = fl_early_stopping.get('mode', 'min')
+            restore_best = fl_early_stopping.get('restore_best_weights', True)
+        else:
+            n_epochs = self.config.get('fl', {}).get('n_local_epochs', 10)
+            patience = None  # No early stopping
+
+        # Create DataLoaders
+        batch_size = self.hyperparameters['batch_size']
+        is_tft = self.config['model']['name'] == 'tft'
+
+        if isinstance(self.X_train, dict):
+            # TFT case
+            tensors = [torch.from_numpy(self.X_train['observed']).float(),
+                       torch.from_numpy(self.X_train['known']).float()]
+            if 'static' in self.X_train:
+                tensors.append(torch.from_numpy(self.X_train['static']).float())
+            tensors.append(torch.from_numpy(self.y_train).float())
+            train_dataset = TensorDataset(*tensors)
+        else:
+            train_dataset = TensorDataset(
+                torch.from_numpy(self.X_train).float(),
+                torch.from_numpy(self.y_train).float()
+            )
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size,
+                                  shuffle=self.config['model'].get('shuffle', True),
+                                  drop_last=True, pin_memory=True)
+
+        val_loader = None
         if self.X_val is not None and self.y_val is not None:
-            validation_data = (self.X_val, self.y_val)
-        else:
-            validation_data = None
-        # if config['model']['callbacks']:
-        #     callbacks = [keras.callbacks.ModelCheckpoint(f'models/{config["model_name"]}.keras', save_best_only=True)]
-        history = self.model.fit(
-            x=self.X_train,
-            y=self.y_train,
-            epochs=self.hyperparameters['epochs'],
-            batch_size=self.hyperparameters['batch_size'],
-            validation_data=validation_data,
-            #callbacks = callbacks if config['model']['callbacks'] else None,
-            shuffle=self.config['model']['shuffle'],
-            verbose=0#self.config['model']['verbose'],
-        )
+            if isinstance(self.X_val, dict):
+                val_tensors = [torch.from_numpy(self.X_val['observed']).float(),
+                               torch.from_numpy(self.X_val['known']).float()]
+                if 'static' in self.X_val:
+                    val_tensors.append(torch.from_numpy(self.X_val['static']).float())
+                val_tensors.append(torch.from_numpy(self.y_val).float())
+                val_dataset = TensorDataset(*val_tensors)
+            else:
+                val_dataset = TensorDataset(
+                    torch.from_numpy(self.X_val).float(),
+                    torch.from_numpy(self.y_val).float()
+                )
+            val_loader = DataLoader(val_dataset, batch_size=batch_size,
+                                    shuffle=False, drop_last=False, pin_memory=True)
+
+        # Setup optimizer and loss — train the EXISTING self.model
+        lr = self.hyperparameters.get('learning_rate', self.hyperparameters.get('lr', 0.001))
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        criterion = nn.MSELoss()
+
+        # Training loop
+        history = {'train_loss': [], 'val_loss': [], 'train_rmse': [], 'val_rmse': [],
+                   'train_mae': [], 'val_mae': [], 'train_r2': [], 'val_r2': []}
+
+        best_val = float('inf') if not patience or mode == 'min' else float('-inf')
+        epochs_no_improve = 0
+        best_state = None
+
+        for epoch in range(n_epochs):
+            # --- Training ---
+            self.model.train()
+            train_preds, train_targets = [], []
+
+            for batch in train_loader:
+                if is_tft:
+                    if len(batch) == 4:
+                        obs, known, static, targets = [b.to(self.device) for b in batch]
+                        predictions = self.model(obs, known, static)
+                    elif len(batch) == 3:
+                        obs, known, targets = [b.to(self.device) for b in batch]
+                        predictions = self.model(obs, known)
+                else:
+                    inputs, targets = [b.to(self.device) for b in batch]
+                    predictions = self.model(inputs)
+
+                loss = criterion(predictions, targets)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                train_preds.append(predictions.detach().cpu().numpy())
+                train_targets.append(targets.detach().cpu().numpy())
+
+            # Compute train metrics
+            train_preds = np.concatenate(train_preds)
+            train_targets = np.concatenate(train_targets)
+            train_mse = np.mean((train_targets - train_preds) ** 2)
+            train_mae = np.mean(np.abs(train_targets - train_preds))
+            ss_res = np.sum((train_targets - train_preds) ** 2)
+            ss_tot = np.sum((train_targets - np.mean(train_targets)) ** 2)
+            train_r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+
+            history['train_loss'].append(train_mse)
+            history['train_rmse'].append(np.sqrt(train_mse))
+            history['train_mae'].append(train_mae)
+            history['train_r2'].append(train_r2)
+
+            # --- Validation ---
+            if val_loader is not None:
+                self.model.eval()
+                val_preds, val_targets_list = [], []
+                with torch.no_grad():
+                    for batch in val_loader:
+                        if is_tft:
+                            if len(batch) == 4:
+                                obs, known, static, targets = [b.to(self.device) for b in batch]
+                                predictions = self.model(obs, known, static)
+                            elif len(batch) == 3:
+                                obs, known, targets = [b.to(self.device) for b in batch]
+                                predictions = self.model(obs, known)
+                        else:
+                            inputs, targets = [b.to(self.device) for b in batch]
+                            predictions = self.model(inputs)
+
+                        val_preds.append(predictions.cpu().numpy())
+                        val_targets_list.append(targets.cpu().numpy())
+
+                val_preds = np.concatenate(val_preds)
+                val_targets_arr = np.concatenate(val_targets_list)
+                val_mse = np.mean((val_targets_arr - val_preds) ** 2)
+                val_mae = np.mean(np.abs(val_targets_arr - val_preds))
+                ss_res = np.sum((val_targets_arr - val_preds) ** 2)
+                ss_tot = np.sum((val_targets_arr - np.mean(val_targets_arr)) ** 2)
+                val_r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+
+                history['val_loss'].append(val_mse)
+                history['val_rmse'].append(np.sqrt(val_mse))
+                history['val_mae'].append(val_mae)
+                history['val_r2'].append(val_r2)
+
+                # Early stopping check
+                if patience:
+                    current_val = val_mse if mode == 'min' else val_r2
+                    improved = (current_val < best_val - min_delta) if mode == 'min' else (current_val > best_val + min_delta)
+                    if improved:
+                        best_val = current_val
+                        epochs_no_improve = 0
+                        if restore_best:
+                            best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+                    else:
+                        epochs_no_improve += 1
+                        if epochs_no_improve >= patience:
+                            if restore_best and best_state:
+                                self.model.load_state_dict(best_state)
+                            break
+
         if verbose:
-            logging.info(f"[ClientActor {self.client_id}] Terminated fitting.")
+            logging.info(f"[ClientActor {self.client_id}] Training completed ({epoch+1} epochs).")
+
+        # Extract final metrics
         metrics = {}
-        for key, value in history.history.items():
-            metrics[key] = value[-1] # get metric in last round
-        results = {'client_id': self.client_id,
-                   'weights': self.model.get_weights(),
-                   'n_samples': len(self.y_train),
-                   'metrics': metrics,
-                   'history': history.history}
+        for key, values in history.items():
+            if len(values) > 0:
+                metrics[key] = values[-1]
+
+        results = {
+            'client_id': self.client_id,
+            'weights': self.model.state_dict(),
+            'n_samples': len(self.y_train),
+            'metrics': metrics,
+            'history': history
+        }
         return results
 
-    def evaluate(self,
-                 global_weights: list):
+    def evaluate(self, global_weights: Dict[str, torch.Tensor]):
         """Performs local evaluation at the end of a communication round."""
         personalize = self.config['fl'].get('personalize', False)
+
         if personalize:
-             _, personal_weights = split_weights_by_layer_name(self.model)
-             set_weights_by_layer_name(self.model, global_weights, personal_weights)
+            model_name = self.config['model']['name']
+            # Split GLOBAL weights to get only shared parts
+            shared_global, _ = self._split_weights_by_layer_name(global_weights, model_name)
+            # Split LOCAL weights to get only personal parts
+            _, personal_local = self._split_weights_by_layer_name(self.model.state_dict(), model_name)
+            # Merge: shared from global + personal from local
+            merged_weights = {**shared_global, **personal_local}
+            self.model.load_state_dict(merged_weights, strict=False)
         else:
-            self.model.set_weights(global_weights)
+            self.model.load_state_dict(global_weights)
+
         if self.X_val is not None and self.y_val is not None:
-            metrics = self.model.evaluate(
-                x=self.X_val,
-                y=self.y_val,
-                batch_size=self.hyperparameters['batch_size'],
-                verbose=0,#self.config['model']['verbose'],
-                return_dict=True
-            )
+            self.model.eval()
+            metrics = {}
+
+            with torch.no_grad():
+                # Prepare input
+                if isinstance(self.X_val, dict):
+                    # TFT case
+                    X_val_tensors = {k: torch.from_numpy(v).float().to(self.device) for k, v in self.X_val.items()}
+                    y_val_tensor = torch.from_numpy(self.y_val).float().to(self.device)
+
+                    if 'static' in X_val_tensors:
+                        predictions = self.model(X_val_tensors['observed'], X_val_tensors['known'], X_val_tensors['static'])
+                    else:
+                        predictions = self.model(X_val_tensors['observed'], X_val_tensors['known'])
+                else:
+                    X_val_tensor = torch.from_numpy(self.X_val).float().to(self.device)
+                    y_val_tensor = torch.from_numpy(self.y_val).float().to(self.device)
+                    predictions = self.model(X_val_tensor)
+
+                # Calculate metrics
+                mse = nn.MSELoss()(predictions, y_val_tensor).item()
+                mae = nn.L1Loss()(predictions, y_val_tensor).item()
+                rmse = np.sqrt(mse)
+
+                pred_np = predictions.cpu().numpy()
+                target_np = y_val_tensor.cpu().numpy()
+                ss_res = np.sum((target_np - pred_np) ** 2)
+                ss_tot = np.sum((target_np - np.mean(target_np)) ** 2)
+                r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+
+                metrics = {
+                    'loss': mse,
+                    'mae': mae,
+                    'rmse': rmse,
+                    'r^2': r2
+                }
         else:
             logging.warning(f"[ClientActor {self.client_id}] No validation data available for evaluation.")
             metrics = None
-        logging.info(f"[ClientActor {self.client_id}] Terminated local evaluation.")
-        results = {'client_id': self.client_id,
-                   'n_samples': len(self.y_val),
-                   'metrics': metrics,
-                   'weights': self.model.get_weights()}
+
+        logging.info(f"[ClientActor {self.client_id}] Local evaluation completed.")
+        results = {
+            'client_id': self.client_id,
+            'n_samples': len(self.y_val) if self.y_val is not None else 0,
+            'metrics': metrics,
+            'weights': self.model.state_dict()
+        }
         return results
 
+    def _split_weights_by_layer_name(self, state_dict, model_name):
+        """
+        Split weights into shared and personal based on model architecture.
 
-def split_weights_by_layer_name(model):
-    shared_weights = []
-    personal_weights = []
-    for layer in model.layers:
-        name = layer.name
-        weights = layer.get_weights()
-        if name.startswith("tcn_"):
-            shared_weights.extend(weights)
-        elif name.startswith("gru_") or name == "output":
-            personal_weights.extend(weights)
-    return shared_weights, personal_weights
+        Args:
+            state_dict: Model state dictionary
+            model_name: Name of the model ('tcn-gru', 'tft', etc.)
 
-def set_weights_by_layer_name(model, shared_weights, personal_weights):
-    shared_ptr = 0
-    personal_ptr = 0
-    for layer in model.layers:
-        name = layer.name
-        layer_weights = layer.get_weights()
-        n = len(layer_weights)
-        if name.startswith("tcn_"):
-            layer.set_weights(shared_weights[shared_ptr:shared_ptr + n])
-            shared_ptr += n
-        elif name.startswith("gru_") or name == "output":
-            layer.set_weights(personal_weights[personal_ptr:personal_ptr + n])
-            personal_ptr += n
+        Returns:
+            shared_weights: Weights to be aggregated globally
+            personal_weights: Weights kept locally per client
+        """
+        shared_weights = {}
+        personal_weights = {}
+
+        model_name = model_name.lower()
+
+        if model_name == 'tcn-gru':
+            # TCN-GRU: TCN layers are shared, GRU and output are personal
+            for key, value in state_dict.items():
+                if 'conv_stack' in key:
+                    # TCN layers are shared
+                    shared_weights[key] = value
+                elif 'rnn' in key or 'attention' in key or 'output_fc' in key:
+                    # GRU, attention, and output layers are personal
+                    personal_weights[key] = value
+                else:
+                    # Default: treat as shared
+                    shared_weights[key] = value
+
+        elif model_name == 'tft':
+            for key, value in state_dict.items():
+                if any(s in key for s in ['enrichment_grn', 'multihead_attn', 'attn_gate', 'attn_ln', 'positionwise_grn']):
+                    shared_weights[key] = value
+                else:
+                    personal_weights[key] = value
+
+        else:
+            # For other models, keep all weights shared (no personalization)
+            logging.warning(f"Model '{model_name}' does not have personalization logic, treating all weights as shared")
+            shared_weights = state_dict
+
+        logging.debug(f"[ClientActor {self.client_id}] Split weights for {model_name}: "
+                     f"{len(shared_weights)} shared, {len(personal_weights)} personal")
+        return shared_weights, personal_weights
 
 
-def aggregate_weights(client_results: List[Dict[str, Any]]):
+def get_shared_keys(state_dict: Dict[str, torch.Tensor], model_name: str) -> set:
+    """
+    Identify which keys in state_dict are shared (vs personal) for a given model.
+
+    Args:
+        state_dict: Model state dictionary
+        model_name: Name of the model ('tcn-gru', 'tft', etc.)
+
+    Returns:
+        Set of keys that should be shared across clients
+    """
+    shared_keys = set()
+    model_name_lower = model_name.lower()
+
+    for key in state_dict.keys():
+        is_shared = False
+
+        if model_name_lower == 'tcn-gru':
+            if 'conv_stack' in key:
+                is_shared = True
+            elif 'rnn' not in key and 'attention' not in key and 'output_fc' not in key:
+                is_shared = True
+
+        elif model_name_lower == 'tft':
+            # For TFT, enrichment_grn + attention block + positionwise_grn are shared
+            if any(s in key for s in ['enrichment_grn', 'multihead_attn', 'attn_gate', 'attn_ln', 'positionwise_grn']):
+                is_shared = True
+        else:
+            # Unknown model - aggregate all weights
+            is_shared = True
+
+        if is_shared:
+            shared_keys.add(key)
+
+    return shared_keys
+
+
+def aggregate_weights(client_results: List[Dict[str, Any]], config: Dict[str, Any] = None) -> Dict[str, torch.Tensor]:
+    """
+    Aggregate weights from multiple clients using FedAvg (weighted average).
+    Works with PyTorch state_dicts.
+
+    Args:
+        client_results: List of dictionaries containing client weights and metadata
+        config: Configuration dictionary (optional, needed for personalization)
+
+    Returns:
+        Aggregated weights dictionary
+    """
     total_samples = sum(client['n_samples'] for client in client_results)
-    weights_agg = [np.zeros_like(layer_weights) for layer_weights in client_results[0]['weights']]
+
+    # Check if personalization is enabled
+    personalize = False
+    model_name = None
+    if config is not None:
+        personalize = config.get('fl', {}).get('personalize', False)
+        if personalize:
+            model_name = config['model']['name']
+
+    # Initialize aggregated weights
+    first_weights = client_results[0]['weights']
+
+    if personalize and model_name:
+        # Only aggregate SHARED weights when personalization is enabled
+        shared_keys = get_shared_keys(first_weights, model_name)
+
+        # Only initialize aggregation for shared keys
+        weights_agg = {k: torch.zeros_like(v) for k, v in first_weights.items() if k in shared_keys}
+
+        logging.debug(f"[Server] Aggregating {len(weights_agg)} shared weights (out of {len(first_weights)} total)")
+    else:
+        # No personalization - aggregate all weights
+        weights_agg = {k: torch.zeros_like(v) for k, v in first_weights.items()}
+
     for client in client_results:
-        client_weights = client['weights'] if 'weights' in client else None
+        client_weights = client['weights']
         num_samples = client['n_samples']
         weight_factor = num_samples / total_samples
-        if client_weights:
-            for i, layer_weights in enumerate(client_weights):
-                weights_agg[i] += np.array(layer_weights) * weight_factor
-        else:
-            client_weights = None
+
+        for key in weights_agg.keys():
+            weights_agg[key] += client_weights[key] * weight_factor
+
     return weights_agg
 
+
+
 def aggregate_metrics(client_results: List[Dict[str, Any]]):
+    """Aggregate metrics from multiple clients (weighted by sample count)."""
     metrics_sum = {}
     metrics_total_samples = {}
+
     for client in client_results:
         num_samples = client['n_samples']
-        metrics = client['metrics']
+        metrics = client.get('metrics')
+
+        if metrics is None:
+            continue
+
         for metric, value in metrics.items():
-            if 'val' in metric:
-                continue
+            # Aggregate ALL metrics (both training and validation)
             if metric not in metrics_sum:
                 metrics_sum[metric] = 0.0
                 metrics_total_samples[metric] = 0.0
             metrics_sum[metric] += value * num_samples
             metrics_total_samples[metric] += num_samples
+
     metrics_agg = {}
     for metric, total_value in metrics_sum.items():
         metrics_agg[metric] = total_value / metrics_total_samples[metric]
+
     return metrics_agg if metrics_agg else None
 
+
 def get_train_history(client_results: List[Dict[str, Any]]):
+    """Extract training history from client results."""
     histories = {}
     for client in client_results:
         client_id = client['client_id']
-        history = client['history'] if 'history' in client else None
+        history = client.get('history')
         histories[client_id] = history
     return histories
 
+
 def get_clients_weights(client_results: List[Dict[str, Any]]):
-    """Extracts the weights of each client from the results."""
+    """Extract weights of each client from the results."""
     clients_weights = {}
     for client in client_results:
         client_id = client['client_id']
         clients_weights[client_id] = client['weights']
     return clients_weights
 
+
 def get_kfolds_partitions(n_splits, partitions):
+    """
+    Create k-fold partitions for time series cross-validation.
+    Compatible with both numpy arrays and dictionaries (for TFT).
+    """
     tscv = TimeSeriesSplit(n_splits=n_splits)
-    raw_partitions = [] # Speichert Folds pro ursprünglicher Partition: [[fold1_p1, fold2_p1,...], [fold1_p2, ...]]
+    raw_partitions = []
+
     for i, part in enumerate(partitions):
-        X_train_orig = part[0] # Kann np.ndarray oder dict sein
-        y_train = part[1]      # Sollte immer np.ndarray sein
-        folds = [] # Speichert die Folds für DIESE eine Partition part
+        X_train_orig = part[0]
+        y_train = part[1]
+        folds = []
         data_for_splitting = y_train
+
         for fold_idx, (train_index, val_index) in enumerate(tscv.split(data_for_splitting)):
-            # 1. Teile y_train (ist immer ein Array)
             y_train_fold, y_val_fold = y_train[train_index], y_train[val_index]
+
             if isinstance(X_train_orig, np.ndarray):
                 X_train_fold = X_train_orig[train_index]
                 X_val_fold = X_train_orig[val_index]
@@ -319,25 +647,25 @@ def get_kfolds_partitions(n_splits, partitions):
                 X_train_fold = {}
                 X_val_fold = {}
                 for key, value_array in X_train_orig.items():
-                    # Prüfe, ob der Key 'static_input' ist
-                    if key == 'static_input':
-                        # Statische Features werden nicht gesplittet, sondern übernommen
+                    if key == 'static_input' or key == 'static':
+                        # Static features are not split
                         X_train_fold[key] = value_array
                         X_val_fold[key] = value_array
-                        logging.debug(f"Fold {fold_idx}, Partition {i}: Passing through static_input.")
+                        logging.debug(f"Fold {fold_idx}, Partition {i}: Passing through {key}.")
                     else:
                         X_train_fold[key] = value_array[train_index]
                         X_val_fold[key] = value_array[val_index]
+
             folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
         raw_partitions.append(folds)
 
     kfolds_partitions = []
-    for split_idx in range(n_splits): # Iteriere über die Fold-Indizes (0 bis K-1)
+    for split_idx in range(n_splits):
         partition_for_this_fold = []
-        for client_folds in raw_partitions: # Iteriere über die Ergebnisse jeder ursprünglichen Partition
-            # Stelle sicher, dass diese Partition Folds hat und auch diesen spezifischen Fold
+        for client_folds in raw_partitions:
             partition_for_this_fold.append(client_folds[split_idx])
         kfolds_partitions.append(partition_for_this_fold)
+
     return kfolds_partitions
 
 
@@ -345,7 +673,19 @@ def run_simulation(partitions: Any,
                    config: Dict[str, Any],
                    hyperparameters: Dict[str, Any],
                    client_ids = None):
-    """Performs FL simulation."""
+    """
+    Perform FL simulation using Ray and PyTorch.
+
+    Args:
+        partitions: Dictionary or list of client partitions
+        config: Configuration dictionary
+        hyperparameters: Training hyperparameters
+        client_ids: Optional list of client IDs
+
+    Returns:
+        history: Training history
+        clients_weights: Final weights for each client
+    """
 
     if isinstance(partitions, list):
         if client_ids:
@@ -354,25 +694,28 @@ def run_simulation(partitions: Any,
             partitions = {client_id: part for client_id, part in zip(client_ids, partitions)}
         else:
             partitions = {i: part for i, part in enumerate(partitions)}
+
     n_clients = len(partitions)
+    n_rounds = hyperparameters.get('n_rounds', config['fl'].get('n_rounds', 10))
+    save_history = config['fl'].get('save_history', False)
+    strategy = config['fl'].get('strategy', 'fedavg').lower()
 
-    # initialize variables
-    #n_clients = config['fl']['n_clients']
-    n_rounds = hyperparameters['n_rounds']
-    save_history = config['fl']['save_history']
-    strategy = config['fl']['strategy'].lower()
-    total_num_gpus = len(tf.config.list_physical_devices('GPU'))
-    gpu_per_actor = min(1, total_num_gpus/n_clients)
+    # GPU configuration
+    total_num_gpus = torch.cuda.device_count()
+    gpu_per_actor = min(1, total_num_gpus/n_clients) if total_num_gpus > 0 else 0
 
-    # Ray initialisieren (wenn kein Cluster läuft, startet es einen lokalen)
-    # include_dashboard=False unterdrückt das Starten des Web-Dashboards
-    ray.init(num_gpus=total_num_gpus,
-             ignore_reinit_error=True,
-             include_dashboard=False,
-             logging_level=logging.WARNING,  # Setzt den Level für Ray-Komponenten und oft auch für Worker
-             log_to_driver=True         # Leitet Worker-Logs an den Driver (deine Konsole)
-            )
+    logging.info(f"FL Simulation: {n_clients} clients, {n_rounds} rounds, {total_num_gpus} GPUs, strategy={strategy}")
 
+    # Initialize Ray
+    ray.init(
+        num_gpus=total_num_gpus,
+        ignore_reinit_error=True,
+        include_dashboard=False,
+        logging_level=logging.WARNING,
+        log_to_driver=True
+    )
+
+    # Create client actors
     client_actors = []
     for key, value in partitions.items():
         X_train, y_train, X_val, y_val = value
@@ -387,81 +730,113 @@ def run_simulation(partitions: Any,
         )
         client_actors.append(actor)
 
-    logging.info("Start FL simulation using Ray.")
+    logging.info("Start FL simulation using Ray and PyTorch.")
     start_time = time.time()
 
-    logging.info('[Server] Global model is initialized.')
-    global_model = models.get_model(config=config,
-                                    hyperparameters=hyperparameters)
-    global_weights = global_model.get_weights()
+    # Initialize global model
+    logging.debug('[Server] Global model is initialized.')
+    global_model = models.get_model(config=config, hyperparameters=hyperparameters)
+    global_weights = global_model.state_dict()
 
+    # Initialize server optimizer if needed
     server_optimizer = None
     if strategy != 'fedavg':
-        server_optimizer = ServerOptimizer(strategy, hyperparameters, global_weights)
+        # When personalization is enabled, only initialize with shared weights
+        personalize = config.get('fl', {}).get('personalize', False)
+
+        if personalize:
+            model_name = config['model']['name']
+            shared_keys = get_shared_keys(global_weights, model_name)
+            shared_weights = {k: v for k, v in global_weights.items() if k in shared_keys}
+            server_optimizer = ServerOptimizer(strategy, hyperparameters, shared_weights)
+            logging.info(f"[Server] Initialized ServerOptimizer with {len(shared_weights)} shared weights (personalization enabled)")
+        else:
+            server_optimizer = ServerOptimizer(strategy, hyperparameters, global_weights)
+            logging.info(f"[Server] Initialized ServerOptimizer with {len(global_weights)} weights")
 
     history = {}
     all_rounds_metrics_data = []
+
     for round_num in range(1, n_rounds+1):
         history[round_num] = {}
         logging.info(f"--- Round {round_num}/{n_rounds} ---")
         round_start_time = time.time()
 
-        # Die .remote()-Aufrufe blockieren nicht, sie geben sofort ein ObjectRef zurück
-        logging.info("[Server] Start train jobs on clients.")
-        results_refs = []
-        for actor in client_actors:
-            # Übergebe die aktuellen globalen Gewichte an jeden Actor
-            ref = actor.train.remote(global_weights)
-            results_refs.append(ref)
-        # Warte auf die Ergebnisse aller Clients und hole sie ab
-        # ray.get() blockiert, bis alle Aufgaben in der Liste abgeschlossen sind
+        # Client training
+        logging.debug("[Server] Start train jobs on clients.")
+        results_refs = [actor.train.remote(global_weights) for actor in client_actors]
         client_results = ray.get(results_refs)
-        logging.info(f"[Server] All clients trained. Start aggregation.")
+        logging.debug(f"[Server] All clients trained. Start aggregation.")
 
-        # Aggregate metrics and weights
-        aggregated_weights = aggregate_weights(client_results)
+        # Aggregate weights and metrics
+        aggregated_weights = aggregate_weights(client_results, config)
         train_metrics_agg = aggregate_metrics(client_results)
 
-        # --- Server-seitigen Optimierungsschritt anwenden (falls nicht FedAvg) ---
+        # Apply server-side optimization
         if server_optimizer:
-            new_global_weights = server_optimizer.step(global_weights, aggregated_weights)
+            # When personalization is enabled, aggregated_weights only contains shared weights
+            # We need to extract only shared weights from global_weights for proper shape matching
+            personalize = config.get('fl', {}).get('personalize', False)
+
+            if personalize:
+                # Extract only the shared weights from global_weights that match aggregated_weights
+                shared_global_weights = {k: v for k, v in global_weights.items() if k in aggregated_weights}
+                new_shared_weights = server_optimizer.step(shared_global_weights, aggregated_weights)
+                new_global_weights = new_shared_weights
+            else:
+                new_global_weights = server_optimizer.step(global_weights, aggregated_weights)
         else:
-            # Bei FedAvg sind die aggregierten Gewichte die finalen Gewichte
             new_global_weights = aggregated_weights
 
-        # (optional:) save clients histories
+        # Save client histories
         if save_history:
             history[round_num]['history'] = get_train_history(client_results)
 
-        logging.info('[Server] Training metrics aggregated.')
+        logging.debug('[Server] Training metrics aggregated.')
 
         # Update global model
         if new_global_weights:
-            global_model.set_weights(new_global_weights)
-            global_weights = new_global_weights # Gewichte für die nächste Runde speichern
+            personalize = config.get('fl', {}).get('personalize', False)
+
+            if personalize:
+                # When personalization is enabled, aggregated weights only contain shared weights
+                # We need to merge them with existing personal weights from the global model
+                current_global_state = global_model.state_dict()
+
+                # Update only the keys present in new_global_weights (shared weights)
+                for key, value in new_global_weights.items():
+                    current_global_state[key] = value
+
+                # Load the merged state dict
+                global_model.load_state_dict(current_global_state)
+                global_weights = current_global_state
+
+                logging.debug(f"[Server] Updated {len(new_global_weights)} shared weights in global model")
+            else:
+                # No personalization - load all weights normally
+                global_model.load_state_dict(new_global_weights)
+                global_weights = new_global_weights
         else:
-            logging.warning("[Server] There's nothing to aggregate.")
+            logging.warning("[Server] Nothing to aggregate.")
 
-        logging.info(f'[Server] Start local evaluation.')
         # Local evaluation
-        results_refs = []
-        for actor in client_actors:
-            # Übergebe die aktuellen globalen Gewichte an jeden Actor
-            ref = actor.evaluate.remote(global_weights)
-            results_refs.append(ref)
+        logging.debug(f'[Server] Start local evaluation.')
+        results_refs = [actor.evaluate.remote(global_weights) for actor in client_actors]
         client_results = ray.get(results_refs)
-        #logging.info(f"[Server] Local evaluation terminated.")
 
-        # aggregte evaluation metrics
+        # Aggregate evaluation metrics
         val_metrics_agg = aggregate_metrics(client_results)
-        logging.info(f'[Server] Evaluation metrics aggregated.')
+        logging.debug(f'[Server] Evaluation metrics aggregated.')
 
+        # Collect round data
         round_data = {'round': round_num}
         if train_metrics_agg:
             for key, value in train_metrics_agg.items():
-                if 'val' in key:
-                    continue
-                round_data[f'train_{key}'] = value
+                # Don't add 'train_' prefix if it already exists
+                if key.startswith('train_'):
+                    round_data[key] = value
+                else:
+                    round_data[f'train_{key}'] = value
         if val_metrics_agg:
             for key, value in val_metrics_agg.items():
                 round_data[f'val_{key}'] = value
@@ -470,15 +845,18 @@ def run_simulation(partitions: Any,
         round_end_time = time.time()
         logging.info(f"Round {round_num} terminated in {round_end_time - round_start_time:.2f} seconds.")
 
-        # (Optional) Centralized evaluation
-
     end_time = time.time()
     logging.info(f"--- Simulation terminated in {end_time - start_time:.2f} seconds ---")
     ray.shutdown()
+
+    # Create metrics DataFrame
     metrics_df = pd.DataFrame(all_rounds_metrics_data)
-    metrics_df = metrics_df.set_index('round') # Setze die Runde als Index
+    metrics_df = metrics_df.set_index('round')
     history['metrics_aggregated'] = metrics_df
     logging.info("Aggregated Metrics DataFrame ---")
     logging.info(f"\n{metrics_df}")
+
+    # Get final client weights
     clients_weights = get_clients_weights(client_results)
+
     return history, clients_weights

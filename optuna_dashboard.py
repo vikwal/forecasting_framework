@@ -643,7 +643,7 @@ def main():
     # Sidebar for configuration
     st.sidebar.header("⚙️ Configuration")
 
-    studies_dir = "/mnt/nas/optuna_studies"
+    studies_dir = "/mnt/nvme1/optuna_studies"
 
     # UI elements for refresh control
     auto_refresh = st.sidebar.checkbox("Auto Refresh (5min)", value=True)

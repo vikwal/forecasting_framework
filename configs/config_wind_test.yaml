@@ -1,25 +1,9 @@
 data:
   path: '/mnt/nas/synthetic/wind/wind_hourly_age_20251103'  # Base path where client CSV files are located
-  files: ['00298', '02907', '02564', '05930', '15813',
-          '02932', '01759', '07403', '05404', '00662',
-          '00596', '03098', '04642', '03366', '03158',
-          '03362', '03032', '00591', '02812', '03946',
-          '00303', '00891', '04336', '15000', '01694',
-          '05490', '01605', '04271', '00656', '00691',
-          '03761', '00198', '01443', '06163', '04464',
-          '03513', '01975', '00427', '01691', '07394',
-          '07370', '05906', '03093', '03268', '15444',
-          '00282', '05440', '05779', '00460', '00856',
-          '00963', '00704', '04745', '00342', '01766',
-          '01544', '05516', '04466', '01200', '02171',
-          '00880', '02794', '04393', '07369', '03126',
-          '00232', '00164', '02261', '07393', '05158',
-          '07412', '03379', '05349', '07341', '03028',
-          '13674', '01684', '02925', '04177', '07368',
-          '01303', '07395', '03015', '04280', '01262',
-          '00183', '05546', '01587', '07410', '03631',
-          '00433', '02712', '05029', '06197', '07374',
-          '03660', '02597', '05800', '03196', '00867'] # Specific client files to lo
+  files: ['01766', '01200', '01544', '07403', #,
+          '15813', '04466', '01759', '02932', #,
+          '00963', '02564', '04745', '00282', #,
+          '00342', '02907', '02171', '02794'] # Specific client files to lo
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
   nwp_path: '/mnt/nas/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
   #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
@@ -54,39 +38,41 @@ params:
     # 'temperature_h10', 'temperature_h38', 'temperature_h78', 'temperature_h127', 'temperature_h184', 'temperature_h247',
     # 'pressure_h10', 'pressure_h38', 'pressure_h78', 'pressure_h127', 'pressure_h184', 'pressure_h247',
     # 'relative_humidity_h10', 'relative_humidity_h38', 'relative_humidity_h78', 'relative_humidity_h127', 'relative_humidity_h184', 'relative_humidity_h247'
-    'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184',
+    #'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184',
     #'density_h78', 'density_h127', 'density_h184',
     #'wind_speed_h127', 'temperature_h127', 'pressure_h127', 'relative_humidity_h127',
     #'wind_speed_h184', 'temperature_h184', 'pressure_h184', 'relative_humidity_h184',
     #'wind_speed_h127', 'density_h127'
-    'density_rotor_eq', # 'wind_speed_rotor_eq',
+    #'density_rotor_eq', # 'wind_speed_rotor_eq',
     #'wind_speed_80m', 'wind_speed_120m','wind_speed_180m', # 'wind_speed_10m',
     #'density_80m', 'density_120m', 'density_180m', # 'density_10m'
+    'wind_speed_hub'
                    ]
   observed_features: [
                       'power'
                       ] # lag features
   static_features: [
-    'park_age',
-    'cut_in',
-    'cut_out',
-    'rated_wind_speed',
-    'hub_height',
-    'rotor_diameter',
-    'altitude'
+    # 'park_age',
+    # 'cut_in',
+    # 'cut_out',
+    # 'rated_wind_speed',
+    # 'hub_height',
+    # 'rotor_diameter',
+    # 'altitude'
   ]
   aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True
   # openmeteo:
   #   nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
   turbines_per_park: 1
-  #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
-  random_seed: 42
+  random_seeds: [96, 100, 97, 49, 46, 99, 48, 47, 92, 44, 94, 87, 95, 43, 101, 103]
+  #random_seed: 42
   next_n_grid_points: 1 # Number of nearest grid points to include
   aggregate_grid_points: False
 
 model:
   num_workers: 0 # 'auto' for all physical cores
+  epochs: 10
   output_dim: 48
   lookback: 48
   horizon: 48
@@ -123,9 +109,9 @@ model:
     num_quantiles: 1
     clipnorm: 7
   callbacks: False
-  save_model: True
   shuffle: True
   force_retrain: True
+  # handles whether during fine tuning early stopping is applied
   early_stopping:
     enabled: True  # Set to True to enable early stopping
     patience: 10  # Number of epochs to wait for improvement
@@ -223,7 +209,17 @@ fl:
     clientD: ['00342', '02907', '02171', '02794']
   strategy: 'fedavg'
   n_rounds: 10
+  n_local_epochs: 10
   personalize: False
+  fine_tune: True
+  # handles whether during FL early stopping is applied
+  early_stopping:
+    enabled: False
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
+    restore_best_weights: True
   fedopt:
     server_lr: 0.001
     beta_1: 0.9
@@ -232,5 +228,3 @@ fl:
   force_retrain: True
   verbose: True
   save_history: False
-  num_gpus: 1
-  num_cpus: 11

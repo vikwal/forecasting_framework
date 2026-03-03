@@ -188,7 +188,14 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     # Create model
     model = models.get_model(config=config, hyperparameters=hyperparameters)
     model = model.to(device)
-    model = torch.compile(model)
+
+    # Compile model if not in federated mode (torch.compile causes state_dict key mismatch in FL)
+    use_compile = config['model'].get('use_compile', True)
+    if use_compile and not config.get('model', {}).get('fl', False):
+        model = torch.compile(model)
+        logging.debug("Model compiled with torch.compile")
+    else:
+        logging.debug("Skipping torch.compile (disabled or in FL mode)")
 
     logging.debug(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
 

@@ -252,7 +252,7 @@ def main() -> None:
                 if period_config['model']['name'] not in ['tft', 'stemgnn']:
                     # Create lag features for observed columns (same as in pipeline)
                     for col in features['observed']:
-                        all_observed_cols = [new_col for new_col in df_temp.columns if col in new_col]
+                        all_observed_cols = [new_col for new_col in df_temp.columns if new_col == col or new_col.startswith(col + '_lag_')]
                         for new_col in all_observed_cols:
                             df_temp = preprocessing.lag_features(
                                 data=df_temp,
@@ -277,7 +277,7 @@ def main() -> None:
                     test_end=pd.Timestamp(period_config['data']['test_end'], tz='UTC'),
                     t_0=t_0
                 )
-                global_scaler_x.partial_fit(df_train)
+                global_scaler_x.partial_fit(df_train.values)
 
                 del df_temp, df_train
                 gc.collect()

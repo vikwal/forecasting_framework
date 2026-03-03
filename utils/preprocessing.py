@@ -3,6 +3,7 @@ import os
 import random
 import warnings
 import re
+import copy
 import gc
 import math
 import pandas as pd
@@ -55,40 +56,62 @@ def _get_data_from_config_files(config: dict,
     is_wind_data = ('wind' in base_path.lower() or
                    'turbines' in config.get('params', {}))
 
-    is_pv_data = ('pv' in base_path.lower() or
-                  'solar' in base_path.lower())
-    for file in files:
-        # Try different possible file patterns
-        possible_paths = [
-            os.path.join(base_path, f"{file}.csv"),
-            os.path.join(base_path, f"synth_{file}.csv"),
-            os.path.join(base_path, file)  # in case file already contains .csv
-        ]
+    # Load station-turbine assignments CSV for deterministic turbine mapping
+    assignments_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    'data', 'station_turbine_assignments.csv')
+    station_turbine_map = {}
+    if os.path.exists(assignments_path):
+        try:
+            assignments_df = pd.read_csv(assignments_path, dtype={'station_id': str})
+            station_turbine_map = dict(zip(assignments_df['station_id'], assignments_df['turbine_type']))
+            #logging.info(f"Loaded {len(station_turbine_map)} station-turbine assignments from {assignments_path}")
+        except Exception as e:
+            logging.warning(f"Could not load station_turbine_assignments.csv: {e}. Falling back to random seed.")
+    else:
+        logging.warning(f"station_turbine_assignments.csv not found at {assignments_path}. Falling back to random seed.")
 
-        file_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                file_path = path
-                break
+    # Store original seed (used as fallback if CSV lookup fails)
+    original_seed = config['params'].get('random_seed', 42)
 
-        if not file_path:
-            logging.warning(f"File not found for file {file} in any expected format, skipping")
+    # Process each file
+    for file_idx, file in enumerate(files):
+        file_path = os.path.join(base_path, f"synth_{file}.csv")
+        if not os.path.exists(file_path):
+            logging.warning(f"File not found: {file_path}")
             continue
 
         try:
+            # Create a copy of config for this specific file
+            file_config = copy.deepcopy(config)
+
+            # Look up turbine type from station_turbine_assignments.csv
+            station_id = str(file).zfill(5)  # Ensure consistent zero-padded format
+            if station_id in station_turbine_map:
+                file_config['params']['station_turbine_type'] = station_turbine_map[station_id]
+                logging.debug(f"Processing {file}: assigned turbine '{station_turbine_map[station_id]}' from CSV")
+            else:
+                # Fallback to seed-based random assignment
+                file_config['params']['random_seed'] = original_seed + file_idx
+                logging.warning(f"Station {station_id} not found in assignments CSV. "
+                                f"Falling back to seed {file_config['params']['random_seed']}")
+
+            # Determine preprocessing based on data type
+            is_wind_data = 'wind' in base_path.lower()
+            is_pv_data = 'pv' in base_path.lower() or 'solar' in base_path.lower()
+
             if is_wind_data:
-                # Check NWP model type for wind data
-                if 'open-meteo' in config.get('data', {}).get('nwp_path', ''):
+                # Wind data preprocessing
+                if 'open-meteo' in config['data']['nwp_path']:
                     df = preprocess_synth_wind_openmeteo(path=file_path,
-                                                       config=config,
-                                                       freq=freq,
-                                                       features=features.copy() if features else None,
-                                                       target_col=target_col)
-                elif 'icon-d2' in config.get('data', {}).get('nwp_path', '') or 'icon_d2' in config.get('data', {}).get('nwp_path', ''):
-                    df = preprocess_synth_wind_icond2(path=file_path,
-                                                        config=config,
+                                                        config=file_config,
                                                         freq=freq,
-                                                        features=features.copy() if features else None)
+                                                        features=features.copy() if features else None,
+                                                        target_col=target_col)
+                elif 'icon-d2' in config['data']['nwp_path']:
+                    df = preprocess_synth_wind_icond2(path=file_path,
+                                                     config=file_config,
+                                                     freq=freq,
+                                                     features=features.copy() if features else None)
                 else:
                     raise ValueError('NWP model source is not known for wind data')
 
@@ -97,7 +120,7 @@ def _get_data_from_config_files(config: dict,
                                        freq=freq,
                                        features=features)
             else:
-                # Generic CSV loading - try to infer preprocessing method
+                # Generic CSV loading
                 logging.warning(f"Unknown data type for {file_path}, using generic CSV loading")
                 df = pd.read_csv(file_path)
                 if 'timestamp' in df.columns:
@@ -105,12 +128,18 @@ def _get_data_from_config_files(config: dict,
                     df.set_index('timestamp', inplace=True)
                     if freq:
                         df = df.resample(freq).mean()
+
             key = os.path.basename(file_path)
             dfs[key] = df
             logging.debug(f"Successfully loaded data for file: {key}")
+
         except Exception as e:
             logging.error(f"Error loading data for file {file}: {str(e)}")
             continue
+
+    # Restore original seed in config
+    config['params']['random_seed'] = original_seed
+
     if not dfs:
         raise ValueError("No valid data files were loaded from the specified files")
     return dfs
@@ -301,8 +330,8 @@ def pipeline(data: pd.DataFrame,
     else:
         # create lag features for observed columns
         for col in observed_cols:
-            all_known_cols = [new_col for new_col in df.columns if col in new_col]
-            all_observed_cols = [new_col for new_col in df.columns if col in new_col]
+            all_known_cols = [new_col for new_col in df.columns if new_col == col or new_col.startswith(col + '_lag_')]
+            all_observed_cols = [new_col for new_col in df.columns if new_col == col or new_col.startswith(col + '_lag_')]
             for new_col in all_observed_cols:
                 df = lag_features(data=df,
                                 lookback=config['model']['lookback'],
@@ -1034,15 +1063,17 @@ def preprocess_synth_wind_icond2(path: str,
     altitude = wind_parameter.loc[wind_parameter.park_id == station_id]['altitude'].values[0]
     # Handle commissioning date and park age
     commissioning_date = wind_parameter.loc[wind_parameter.park_id == station_id]['commissioning_date'].values[0]
-    if 'random_seeds' not in config['params']:
-        random.seed(config['params']['random_seed'])
-    else:
-        iterator = config['params'].get('iterator', 0)
-        config['params']['iterator'] = iterator
-        random_seed = config['params']['random_seeds'][iterator]
-        config['params']['random_seed'] = random_seed
-        random.seed(random_seed)
-        config['params']['iterator'] = iterator + 1
+    if 'station_turbine_type' not in config['params']:
+        # Fallback: use random seed if no CSV-based assignment
+        if 'random_seeds' not in config['params']:
+            random.seed(config['params']['random_seed'])
+        else:
+            iterator = config['params'].get('iterator', 0)
+            config['params']['iterator'] = iterator
+            random_seed = config['params']['random_seeds'][iterator]
+            config['params']['random_seed'] = random_seed
+            random.seed(random_seed)
+            config['params']['iterator'] = iterator + 1
 
     if commissioning_date != '-':
         park_age_years = (pd.Timestamp.now() - pd.to_datetime(commissioning_date)).days // 365
@@ -1056,7 +1087,18 @@ def preprocess_synth_wind_icond2(path: str,
 
     if 'turbines' in config['params']:
         turbines_list = config['params']['turbines']
-        if 'turbines_per_park' in config['params']:
+        if 'station_turbine_type' in config['params']:
+            # Deterministic assignment from station_turbine_assignments.csv
+            assigned_turbine = config['params']['station_turbine_type']
+            if assigned_turbine in turbines_list:
+                turbines_list = [assigned_turbine]
+                logging.debug(f"Using assigned turbine '{assigned_turbine}' for station {station_id}")
+            else:
+                logging.warning(f"Assigned turbine '{assigned_turbine}' not in turbines list. "
+                                f"Falling back to random selection.")
+                turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
+                config['params']['random_seed'] += 1
+        elif 'turbines_per_park' in config['params']:
             turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
             config['params']['random_seed'] += 1
         power_curves = power_curves[turbines_list]
@@ -1191,14 +1233,13 @@ def preprocess_synth_wind_icond2(path: str,
     # Handle turbine-specific features
     new_rel_features = []
 
-    # Expand generic turbine features to specific turbine columns ONLY if in rel_features
+    # Replace wind_speed_t with wind_speed_hub for consistent naming across turbines
     if 'wind_speed_t' in rel_features:
         rel_features.remove('wind_speed_t')
-        for index, turbine in turbines.iterrows():
-            turbine_id = turbine['turbine']
-            turbine_col = f'wind_speed_{turbine_id}'
-            if turbine_col in df_merged.columns:
-                new_rel_features.append(turbine_col)
+        # Add wind_speed_hub as the standardized feature name
+        # The actual column will be renamed from wind_speed_t* to wind_speed_hub later
+        new_rel_features.append('wind_speed_hub')
+
 
     if 'density_t' in rel_features:
         rel_features.remove('density_t')
@@ -1217,10 +1258,13 @@ def preprocess_synth_wind_icond2(path: str,
             cols_to_drop.append(col)
 
     # Drop wind_speed_t* columns if not explicitly requested in rel_features
-    if 'wind_speed_t' not in features.get('known', []) and 'wind_speed_t' not in features.get('observed', []):
+    # IMPORTANT: Don't drop if wind_speed_hub is requested, as we need to rename wind_speed_t* to wind_speed_hub
+    if ('wind_speed_t' not in features.get('known', []) and 'wind_speed_t' not in features.get('observed', []) and
+        'wind_speed_hub' not in features.get('known', []) and 'wind_speed_hub' not in features.get('observed', [])):
         for col in df_merged.columns:
             if col.startswith('wind_speed_t'):
                 cols_to_drop.append(col)
+
 
     # Always drop generic wind_speed (without suffix)
     if 'wind_speed' in df_merged.columns and 'wind_speed' not in rel_features:
@@ -1229,6 +1273,18 @@ def preprocess_synth_wind_icond2(path: str,
     # Drop the unwanted columns
     if cols_to_drop:
         df_merged.drop(columns=cols_to_drop, inplace=True)
+
+    # Rename wind_speed_t* columns to wind_speed_hub for consistent feature names across turbines
+    # This is important for federated learning where different stations may have different turbine types
+    # Check if either wind_speed_t or wind_speed_hub is requested (wind_speed_hub is the new standardized name)
+    if ('wind_speed_t' in features.get('known', []) or 'wind_speed_t' in features.get('observed', []) or
+        'wind_speed_hub' in features.get('known', []) or 'wind_speed_hub' in features.get('observed', [])):
+        wind_speed_t_cols = [col for col in df_merged.columns if col.startswith('wind_speed_t') and col != 'wind_speed_t']
+        if wind_speed_t_cols:
+            # There should only be one wind_speed_t* column per station (one turbine type)
+            # Rename it to wind_speed_hub so all stations have the same column name
+            for col in wind_speed_t_cols:
+                df_merged.rename(columns={col: 'wind_speed_hub'}, inplace=True)
 
     # Add Icon-D2 features
     if rel_features:
@@ -1240,9 +1296,6 @@ def preprocess_synth_wind_icond2(path: str,
         patterns = [re.compile(f"^{re.escape(feat)}(_\d+)?$") for feat in rel_features]
 
         for col in df_merged.columns:
-            if col in ['power']:  # Keep power and other important columns
-                available_cols.append(col)
-                continue
 
             # Check if column matches any of the requested features strictly
             for pattern in patterns:
@@ -1378,15 +1431,17 @@ def preprocess_synth_wind_openmeteo(path: str,
     df.set_index(timestamp_col, inplace=True)
     commissioning_date = wind_parameter.loc[wind_parameter.park_id == park_id]['commissioning_date'].values[0]
     altitude = wind_parameter.loc[wind_parameter.park_id == park_id]['altitude'].values[0]
-    if 'random_seeds' not in config['params']:
-        random.seed(config['params']['random_seed'])
-    else:
-        iterator = config['params'].get('iterator', 0)
-        config['params']['iterator'] = iterator
-        random_seed = config['params']['random_seeds'][iterator]
-        config['params']['random_seed'] = random_seed
-        random.seed(random_seed)
-        config['params']['iterator'] = iterator + 1
+    if 'station_turbine_type' not in config['params']:
+        # Fallback: use random seed if no CSV-based assignment
+        if 'random_seeds' not in config['params']:
+            random.seed(config['params']['random_seed'])
+        else:
+            iterator = config['params'].get('iterator', 0)
+            config['params']['iterator'] = iterator
+            random_seed = config['params']['random_seeds'][iterator]
+            config['params']['random_seed'] = random_seed
+            random.seed(random_seed)
+            config['params']['iterator'] = iterator + 1
     if commissioning_date != '-':
         park_age_years = (pd.Timestamp.now() - pd.to_datetime(commissioning_date)).days // 365
     else:
@@ -1394,7 +1449,18 @@ def preprocess_synth_wind_openmeteo(path: str,
     heights = []
     if 'turbines' in config['params']:
         turbines_list = config['params']['turbines']
-        if 'turbines_per_park' in config['params']:
+        if 'station_turbine_type' in config['params']:
+            # Deterministic assignment from station_turbine_assignments.csv
+            assigned_turbine = config['params']['station_turbine_type']
+            if assigned_turbine in turbines_list:
+                turbines_list = [assigned_turbine]
+                logging.debug(f"Using assigned turbine '{assigned_turbine}' for station {park_id}")
+            else:
+                logging.warning(f"Assigned turbine '{assigned_turbine}' not in turbines list. "
+                                f"Falling back to random selection.")
+                turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
+                config['params']['random_seed'] += 1
+        elif 'turbines_per_park' in config['params']:
             turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
             config['params']['random_seed'] += 1
         power_curves = power_curves[turbines_list]
@@ -1534,7 +1600,8 @@ def preprocess_synth_wind_openmeteo(path: str,
                     weighted_speed_cubed_series += area_weights[i] * (nwp[wind_col] ** 3)
 
             nwp[f'wind_speed_rotor_eq_{model}'] = (weighted_speed_cubed_series) ** (1/3)
-            new_rel_features.append(f'wind_speed_rotor_eq_{model}')
+            if 'wind_speed_rotor_eq' in rel_features:
+                new_rel_features.append(f'wind_speed_rotor_eq_{model}')
             wind_speed_cols_to_remove = [col for col in nwp.columns if col.startswith('wind_speed_') and col.endswith(f'_{model}') and 'rotor_eq' not in col and col not in rel_features]
             nwp.drop(columns=wind_speed_cols_to_remove, inplace=True)
         elif config['params']['aggregate_nwp_layers'] == 'mean':
@@ -1685,49 +1752,36 @@ def prepare_data_for_tft(data: pd.DataFrame,
     # CRITICAL: Static features must be scaled with the same scaler as dynamic features!
     if scaler_x and X_static_train.size > 0 and static_cols:
         try:
-            # Check if scaler knows about static features
-            if hasattr(scaler_x, 'feature_names_in_'):
-                scaler_features = list(scaler_x.feature_names_in_)
-                # Find which static features are in the scaler
-                static_features_in_scaler = [col for col in static_cols if col in scaler_features]
+            # Use feature_cols (the columns used to fit the scaler) to find static feature indices
+            # feature_cols is defined later at line 1815, so we compute it here too
+            scaler_feature_cols = [c for c in train_df.columns if c != target_col]
+            static_features_in_scaler = [col for col in static_cols if col in scaler_feature_cols]
 
-                if static_features_in_scaler:
-                    # Create a dummy dataframe with just the static features for transformation
-                    # We need to create a row with all features the scaler expects
-                    dummy_row_train = pd.DataFrame(0.0, index=[0], columns=scaler_features)
-                    dummy_row_test = pd.DataFrame(0.0, index=[0], columns=scaler_features)
+            if static_features_in_scaler:
+                # Create a dummy row with zeros for all features
+                dummy_row_train = np.zeros((1, len(scaler_feature_cols)))
+                dummy_row_test = np.zeros((1, len(scaler_feature_cols)))
 
-                    # Fill in the static feature values
-                    for i, col in enumerate(static_cols):
-                        if col in static_features_in_scaler:
-                            dummy_row_train[col] = X_static_train[i]
-                            dummy_row_test[col] = X_static_test[i]
+                # Fill in the static feature values at the correct positions
+                for i, col in enumerate(static_cols):
+                    if col in static_features_in_scaler:
+                        col_idx = scaler_feature_cols.index(col)
+                        dummy_row_train[0, col_idx] = X_static_train[i]
+                        dummy_row_test[0, col_idx] = X_static_test[i]
 
-                    # Transform
-                    scaled_train = scaler_x.transform(dummy_row_train)
-                    scaled_test = scaler_x.transform(dummy_row_test)
+                # Transform
+                scaled_train = scaler_x.transform(dummy_row_train)
+                scaled_test = scaler_x.transform(dummy_row_test)
 
-                    # Extract only the static feature columns
-                    static_indices = [scaler_features.index(col) for col in static_features_in_scaler]
-                    X_static_train = scaled_train[0, static_indices]
-                    X_static_test = scaled_test[0, static_indices]
+                # Extract only the static feature columns
+                static_indices = [scaler_feature_cols.index(col) for col in static_features_in_scaler]
+                X_static_train = scaled_train[0, static_indices]
+                X_static_test = scaled_test[0, static_indices]
 
-                    logging.debug(f"Static features scaled using global scaler_x: {static_features_in_scaler}")
-                    logging.debug(f"Scaled static train: shape={X_static_train.shape}, values={X_static_train}")
-                    logging.debug(f"Scaled static test: shape={X_static_test.shape}, values={X_static_test}")
-
-                    # Ensure correct shape: should be (n_static_features,)
-                    assert X_static_train.shape == (len(static_features_in_scaler),), \
-                        f"X_static_train has wrong shape: {X_static_train.shape}, expected ({len(static_features_in_scaler)},)"
-                    assert X_static_test.shape == (len(static_features_in_scaler),), \
-                        f"X_static_test has wrong shape: {X_static_test.shape}, expected ({len(static_features_in_scaler)},)"
-
-                else:
-                    logging.warning(f"Static features {static_cols} not found in scaler_x feature names. "
-                                  f"Static features will NOT be scaled! This may cause poor model performance.")
+                logging.debug(f"Static features scaled using global scaler_x: {static_features_in_scaler}")
             else:
-                logging.warning("Scaler has no feature_names_in_. Cannot verify if static features are included. "
-                              "Static features will NOT be scaled! This may cause poor model performance.")
+                logging.warning(f"Static features {static_cols} not found in feature columns. "
+                              f"Static features will NOT be scaled!")
         except Exception as e:
             logging.error(f"Error scaling static features: {e}. "
                         f"Static features will NOT be scaled! This may cause poor model performance.")
@@ -1753,8 +1807,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
 
         # Transform all features
         # We use the DataFrame directly so sklearn can match feature names
-        train_df_scaled[feature_cols] = scaler_x.transform(train_df[feature_cols])
-        test_df_scaled[feature_cols] = scaler_x.transform(test_df[feature_cols])
+        train_df_scaled[feature_cols] = scaler_x.transform(train_df[feature_cols].values)
+        test_df_scaled[feature_cols] = scaler_x.transform(test_df[feature_cols].values)
 
         # Now extract the specific columns from the scaled dataframes
         if known_future_cols:
