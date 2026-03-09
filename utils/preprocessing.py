@@ -297,7 +297,7 @@ def pipeline(data: pd.DataFrame,
     df = knn_imputer(data=df, n_neighbors=config['data']['n_neighbors'])
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
 
-    if config['model']['name'] == 'tft':
+    if config['model']['name'] in ('tft', 'tcn-tft'):
         #logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
         prepared_data = prepare_data_for_tft(data=df,
                                              history_length=config['model']['lookback'], # e.g., 72 (for 3 days history)
@@ -312,6 +312,22 @@ def pipeline(data: pd.DataFrame,
                                              test_end=pd.Timestamp(config['data'].get('test_end', None)),
                                              t_0=t_0,
                                              scaler_x=config.get('scaler_x', None))
+    elif config['model']['name'] == 'chronos':
+        prepared_data = prepare_data_for_chronos2(
+            data=df,
+            history_length=config['model']['lookback'],
+            future_horizon=config['model']['horizon'],
+            step_size=config['model']['step_size'],
+            known_future_cols=known_cols,
+            observed_past_cols=observed_cols,
+            static_cols=static_cols,
+            train_frac=config['data']['train_frac'],
+            train_start=pd.Timestamp(config['data'].get('train_start', None)),
+            test_start=pd.Timestamp(config['data'].get('test_start', None)),
+            test_end=pd.Timestamp(config['data'].get('test_end', None)),
+            t_0=t_0,
+            scaler_x=config.get('scaler_x', None),
+        )
     elif config['model']['name'] == 'stemgnn':
         n_nodes = config['params'].get('next_n_grid_points', 12)
         prepared_data = prepare_data_for_stemgnn(data=df,
@@ -2007,33 +2023,39 @@ def create_tft_sequences(known_data: np.ndarray,
                     # Store first occurrence of each timestamp
                     timestamp_to_first_idx[ts] = np.where(timestamps_all == ts)[0][0]
 
+            # Number of past forecast runs needed to cover history_len.
+            # E.g. history_len=96, future_len=48 → 2 past runs needed.
+            n_past_runs = math.ceil(history_len / future_len)
+
             # Process each forecast run
             for current_start in unique_starttimes:
-                # Calculate the starttime we need for past data
-                previous_start = current_start - pd.Timedelta(hours=step_size)
-
-                # Quick check if previous forecast exists
-                if previous_start not in starttime_to_indices:
+                # Get current run indices (needed for target + observed timestamp anchor)
+                current_indices = starttime_to_indices.get(current_start)
+                if current_indices is None or len(current_indices) == 0:
                     continue
 
-                # Get indices using pre-computed mapping (O(1) instead of O(n))
-                current_indices = starttime_to_indices[current_start]
-                previous_indices = starttime_to_indices[previous_start]
-
-                # Validate data availability
-                if len(current_indices) == 0 or len(previous_indices) == 0:
-                    continue
-
-                # Known features: combine past (from previous run) + future (from current run)
+                # Known features: stack n_past_runs previous runs (oldest first) + current run.
+                # Resulting shape: (n_past_runs * future_len + future_len) = history_len + future_len
                 if known_data is not None:
-                    # Verify we have the expected number of timesteps
-                    if len(previous_indices) != future_len or len(current_indices) != future_len:
-                        logging.warning(f"Unexpected known data length at {current_start}: "
-                                      f"past={len(previous_indices)}, future={len(current_indices)}, expected={future_len}")
+                    past_chunks = []
+                    valid = True
+                    for k in range(n_past_runs, 0, -1):  # oldest run first
+                        past_start = current_start - pd.Timedelta(hours=k * step_size)
+                        past_indices = starttime_to_indices.get(past_start)
+                        if past_indices is None or len(past_indices) != future_len:
+                            valid = False
+                            break
+                        past_chunks.append(known_data[past_indices])
+
+                    if not valid:
                         continue
 
-                    # Direct indexing without intermediate copies
-                    known_window = np.vstack([known_data[previous_indices], known_data[current_indices]])
+                    if len(current_indices) != future_len:
+                        logging.warning(f"Unexpected current run length at {current_start}: "
+                                       f"{len(current_indices)}, expected {future_len}")
+                        continue
+
+                    known_window = np.vstack(past_chunks + [known_data[current_indices]])
                     X_known_list.append(known_window)
 
                 # Observed features: select by timestamp (power is measured, not forecasted)
@@ -2356,5 +2378,49 @@ def prepare_data_for_stemgnn(data: pd.DataFrame,
         'index_test': index_test,
         'scalers': {'x': scaler_x, 'y': scaler_y if scale_target else None}
     }
+
+
+def prepare_data_for_chronos2(data: pd.DataFrame,
+                               history_length: int,
+                               future_horizon: int,
+                               known_future_cols: list,
+                               observed_past_cols: list,
+                               static_cols: list,
+                               step_size: int = 1,
+                               train_frac: float = 0.75,
+                               target_col: str = 'power',
+                               train_start: pd.Timestamp = None,
+                               test_start: pd.Timestamp = None,
+                               test_end: pd.Timestamp = None,
+                               t_0: int = 0,
+                               scaler_x=None):
+    """
+    Prepare data for Chronos-2.
+
+    Reuses the TFT windowing logic (same observed/known/static structure).
+    The target column is NOT scaled because Chronos-2 applies its own robust
+    normalisation internally.  NWP features (known_future_cols) are scaled via
+    scaler_x so that covariate magnitudes are comparable.
+
+    Returns the same results dict as prepare_data_for_tft(), so caching and
+    get_y_chronos2() can reuse it without modification.
+    """
+    return prepare_data_for_tft(
+        data=data,
+        history_length=history_length,
+        future_horizon=future_horizon,
+        known_future_cols=known_future_cols,
+        observed_past_cols=observed_past_cols,
+        static_cols=static_cols,
+        step_size=step_size,
+        train_frac=train_frac,
+        target_col=target_col,
+        train_start=train_start,
+        test_start=test_start,
+        test_end=test_end,
+        t_0=t_0,
+        scale_target=False,
+        scaler_x=scaler_x,
+    )
 
     return results

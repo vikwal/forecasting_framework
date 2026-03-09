@@ -202,6 +202,7 @@ def main() -> None:
     # Add FL-specific hyperparameters
     hyperparameters['n_rounds'] = config['fl'].get('n_rounds', 10)
     hyperparameters['personalization'] = config['fl'].get('personalize', False)
+    hyperparameters['global_scaler'] = config['fl'].get('global_scaler', False)
 
     logging.info(f"Hyperparameters: {json.dumps(hyperparameters, indent=2)}")
 
@@ -315,7 +316,7 @@ def main() -> None:
                     target_col = period_config['data']['target_col']
 
                     # For non-TFT models, create lag features before fitting scaler
-                    if period_config['model']['name'] not in ['tft', 'stemgnn']:
+                    if period_config['model']['name'] not in ['tft', 'tcn-tft', 'stemgnn']:
                         for col in features['observed']:
                             all_observed_cols = [new_col for new_col in df_temp.columns if new_col == col or new_col.startswith(col + '_lag_')]
                             for new_col in all_observed_cols:
@@ -638,7 +639,15 @@ def main() -> None:
             # Add aggregated statistics
             period_evaluation.loc['mean'] = period_evaluation.mean(numeric_only=True)
             period_evaluation.loc['std'] = period_evaluation.std(numeric_only=True)
-            logging.info(period_evaluation)
+            logging.info(f"\n{period_evaluation.to_string()}")
+
+            # Log metrics grouped by client_id
+            numeric_cols = period_evaluation.select_dtypes(include=[np.number]).columns.tolist()
+            # Exclude mean/std rows for grouping
+            eval_without_agg = period_evaluation.drop(['mean', 'std'], errors='ignore')
+            if 'client_id' in eval_without_agg.columns:
+                client_grouped = eval_without_agg.groupby('client_id')[numeric_cols].mean()
+                logging.info(f"\nMetrics grouped by client_id (mean):\n{client_grouped.to_string()}")
 
         period_evaluation['output_dim'] = output_dim
         period_evaluation['freq'] = freq
@@ -716,10 +725,34 @@ def main() -> None:
 
     # Save model if requested
     if args.save_model:
-        for client_id, weights in clients_weights.items():
-            model_path = os.path.join('models', f'{study_name}_client-{client_id}.pt')
-            torch.save(weights, model_path)
-            logging.info(f"Client {client_id} model saved to: {model_path}")
+        os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
+
+        if config['fl'].get('personalize', False):
+            # Personalized: save one model and scaler per client
+            for client_id, weights in clients_weights.items():
+                model_name = f'{study_name}_id-{client_id}.pt'
+                model_path = os.path.join('models', model_name)
+                torch.save(weights, model_path)
+                logging.info(f"Client {client_id} model saved to: {model_path}")
+
+                scaler_name = f'scaler_{study_name}_id-{client_id}.pkl'
+                scaler_path = os.path.join('models', 'scaler', scaler_name)
+                with open(scaler_path, 'wb') as f:
+                    pickle.dump(clients_data[client_id]['scaler_x'], f)
+                logging.info(f"Client {client_id} scaler saved to: {scaler_path}")
+        else:
+            # Global model: all clients share the same weights, save once
+            first_client_id = list(clients_weights.keys())[0]
+            model_name = f'{study_name}_global.pt'
+            model_path = os.path.join('models', model_name)
+            torch.save(clients_weights[first_client_id], model_path)
+            logging.info(f"Global model saved to: {model_path}")
+
+            scaler_name = f'scaler_{study_name}_global.pkl'
+            scaler_path = os.path.join('models', 'scaler', scaler_name)
+            with open(scaler_path, 'wb') as f:
+                pickle.dump(clients_data[first_client_id]['scaler_x'], f)
+            logging.info(f"Global scaler saved to: {scaler_path}")
 
     # Log final metrics
     if results['history'] is not None:

@@ -4,9 +4,14 @@ Training Script
 """
 
 import os
+import math
 import copy
 import json
+import warnings
 import argparse
+
+warnings.filterwarnings('ignore', message=".*GetPrototype.*")
+warnings.filterwarnings('ignore', message='X does not have valid feature names', category=UserWarning)
 import pandas as pd
 import numpy as np
 import logging
@@ -80,6 +85,19 @@ def main() -> None:
 
     # Set model name for preprocessing pipeline
     config['model']['name'] = args.model
+
+    # ── Chronos-2 setup ──────────────────────────────────────────────────────
+    is_chronos = args.model == 'chronos'
+    chronos_pipeline = None
+    if is_chronos:
+        from chronos import BaseChronosPipeline
+        chronos_cfg = config['model']['chronos']
+        repo_id = chronos_cfg.get('repo_id', 'amazon/chronos-2')
+        device_map = chronos_cfg.get('device_map', 'cuda')
+        logging.info(f"Loading Chronos-2 from {repo_id} …")
+        chronos_pipeline = BaseChronosPipeline.from_pretrained(repo_id, device_map=device_map)
+        logging.info("Chronos-2 pipeline loaded.")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Extract retrain settings with defaults
     retrain_interval = config['data'].get('retrain_interval', 1)
@@ -249,7 +267,7 @@ def main() -> None:
                 target_col = period_config['data']['target_col']
 
                 # For non-TFT models, create lag features before fitting scaler
-                if period_config['model']['name'] not in ['tft', 'stemgnn']:
+                if period_config['model']['name'] not in ['tft', 'tcn-tft', 'stemgnn', 'chronos']:
                     # Create lag features for observed columns (same as in pipeline)
                     for col in features['observed']:
                         all_observed_cols = [new_col for new_col in df_temp.columns if new_col == col or new_col.startswith(col + '_lag_')]
@@ -311,14 +329,75 @@ def main() -> None:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             logging.info(f"Using device: {device}")
 
-            # --- TRAINING WITH PYTORCH ---
-            history, model = tools.training_pipeline(
-                train=(X_train, y_train),
-                val=(X_test, y_test),
-                hyperparameters=hyperparameters,
-                config=period_config,
-                device=device
-            )
+            if is_chronos:
+                # --- FINE-TUNING CHRONOS-2 ---
+                chronos_cfg = period_config['model']['chronos']
+                lr = hyperparameters.get('learning_rate', hyperparameters.get('lr', period_config['model']['lr']))
+                batch_size = hyperparameters.get('batch_size', period_config['model'].get('batch_size', 256))
+                finetune_mode = chronos_cfg.get('fine_tune_mode', 'full')
+                lora_config = chronos_cfg.get('lora_config', None)
+                # num_steps computed after inputs are built (needs n_sequences for steps_per_epoch)
+
+                # Build fit inputs (full training set)
+                known_cols_fit = period_config['params'].get('known_features', [])
+                if isinstance(X_train, dict):
+                    inputs_fit = tools.build_chronos_fit_inputs(X_train, y_train, known_cols_fit)
+                else:
+                    inputs_fit = [X_train[i].flatten() for i in range(X_train.shape[0])]
+
+                n_covariates_fit = len(known_cols_fit)
+                steps_per_epoch = math.ceil(len(inputs_fit) / batch_size)
+                epochs = hyperparameters.get('epochs', period_config['model']['epochs'])
+                num_steps = chronos_cfg.get('num_steps') or epochs * steps_per_epoch
+                logging.info(
+                    f"Fine-tuning Chronos-2 | mode={finetune_mode}, epochs={epochs}, "
+                    f"steps={num_steps}, steps_per_epoch={steps_per_epoch}, "
+                    f"lr={lr}, batch_size={batch_size}, "
+                    f"n_train={len(inputs_fit)}, n_val={y_test.shape[0]}, "
+                    f"n_known_covariates={n_covariates_fit}"
+                )
+
+                # Per-epoch metrics callback — validated on test set
+                es_cfg = period_config['model'].get('early_stopping', {})
+                chronos_cb = tools.ChronosEarlyStoppingCallback(
+                    pipeline=chronos_pipeline,
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_test, y_val=y_test,
+                    config=period_config,
+                    known_cols=known_cols_fit,
+                    early_stopping_cfg=es_cfg,
+                    steps_per_epoch=steps_per_epoch,
+                )
+
+                chronos_pipeline = chronos_pipeline.fit(
+                    inputs=inputs_fit,
+                    prediction_length=period_config['model']['horizon'],
+                    finetune_mode=finetune_mode,
+                    lora_config=lora_config,
+                    context_length=period_config['model']['lookback'],
+                    learning_rate=lr,
+                    num_steps=num_steps,
+                    batch_size=batch_size,
+                    output_dir=chronos_cfg.get('output_dir', 'models/'),
+                    finetuned_ckpt_name=chronos_cfg.get('finetuned_ckpt_name', 'finetuned-ckpt'),
+                    logging_steps=steps_per_epoch,
+                    callbacks=[chronos_cb.callback],
+                    disable_tqdm=True,
+                    report_to='none',
+                    remove_printer_callback=True,
+                )
+                history = chronos_cb.history
+                model = chronos_pipeline
+                logging.info("Chronos-2 fine-tuning complete.")
+            else:
+                # --- TRAINING WITH PYTORCH ---
+                history, model = tools.training_pipeline(
+                    train=(X_train, y_train),
+                    val=(X_test, y_test),
+                    hyperparameters=hyperparameters,
+                    config=period_config,
+                    device=device
+                )
 
             # Store model if training once
             if train_once_eval_multiple:
@@ -336,9 +415,12 @@ def main() -> None:
                 gc.collect()
 
             logging.info(f"Training completed. Final metrics:")
-            logging.info(f"  Train - MSE: {history['train_loss'][-1]:.6f}, RMSE: {history['train_rmse'][-1]:.4f}, R²: {history['train_r2'][-1]:.4f}")
-            if 'val_loss' in history:
-                logging.info(f"  Val   - MSE: {history['val_loss'][-1]:.6f}, RMSE: {history['val_rmse'][-1]:.4f}, R²: {history['val_r2'][-1]:.4f}")
+            if 'train_loss' in history:
+                logging.info(f"  Train - MSE: {history['train_loss'][-1]:.6f}, RMSE: {history['train_rmse'][-1]:.4f}, R²: {history['train_r2'][-1]:.4f}")
+                if 'val_loss' in history:
+                    logging.info(f"  Val   - MSE: {history['val_loss'][-1]:.6f}, RMSE: {history['val_rmse'][-1]:.4f}, R²: {history['val_r2'][-1]:.4f}")
+            else:
+                logging.info("  (no epoch-level metrics available for this model type)")
         else:
             # Evaluation only: prepare test data for this period with period-specific boundaries
             logging.info("Evaluation only (using previously trained model)...")
@@ -373,25 +455,53 @@ def main() -> None:
             t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
 
             # Run evaluation pipeline for this park
-            park_eval = eval.evaluation_pipeline(
-                data=park_df,
-                model=model,
-                model_name=f'{args.model.upper()}',
-                X_test=X_test_park,
-                y_test=y_test_park,
-                scaler_y=scaler_y_park,
-                output_dim=output_dim,
-                horizon=horizon,
-                index_test=index_test_park,
-                test_start=test_start_str,
-                t_0=t_0,
-                park_id=park_key,
-                synth_dir=None,
-                get_physical_persistence=False,
-                target_col=period_config['data']['target_col'],
-                evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
-                device=device
-            )
+            if is_chronos:
+                known_cols = period_config['params'].get('known_features', [])
+                y_true_park, y_pred_park = tools.get_y_chronos2(
+                    X_test=X_test_park,
+                    y_test=y_test_park,
+                    chronos_pipeline=model,
+                    config=period_config,
+                    known_cols=known_cols,
+                    scaler_y=scaler_y_park,
+                )
+                df_pred_park = tools.y_to_df(
+                    y=y_pred_park, output_dim=output_dim, horizon=horizon,
+                    index=index_test_park,
+                    t_0=None if period_config['eval']['eval_on_all_test_data'] else t_0,
+                )
+                df_true_park = tools.y_to_df(
+                    y=y_true_park, output_dim=output_dim, horizon=horizon,
+                    index=index_test_park,
+                    t_0=None if period_config['eval']['eval_on_all_test_data'] else t_0,
+                )
+                park_eval = eval.evaluate_models(
+                    pred=df_pred_park,
+                    true=df_true_park,
+                    persistence={},
+                    main_model_name='CHRONOS',
+                    drop_except_main=True,
+                )
+            else:
+                park_eval = eval.evaluation_pipeline(
+                    data=park_df,
+                    model=model,
+                    model_name=f'{args.model.upper()}',
+                    X_test=X_test_park,
+                    y_test=y_test_park,
+                    scaler_y=scaler_y_park,
+                    output_dim=output_dim,
+                    horizon=horizon,
+                    index_test=index_test_park,
+                    test_start=test_start_str,
+                    t_0=t_0,
+                    park_id=park_key,
+                    synth_dir=None,
+                    get_physical_persistence=False,
+                    target_col=period_config['data']['target_col'],
+                    evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
+                    device=device
+                )
             park_eval['key'] = park_key
             # Add park identifier
             eval_results.append(park_eval)
@@ -408,7 +518,7 @@ def main() -> None:
             # Add aggregated statistics
             period_evaluation.loc['mean'] = period_evaluation.mean(numeric_only=True)
             period_evaluation.loc['std'] = period_evaluation.std(numeric_only=True)
-            logging.info(period_evaluation)
+            logging.info(f"\n{period_evaluation.to_string()}")
 
         period_evaluation['output_dim'] = output_dim
         period_evaluation['freq'] = freq
@@ -489,15 +599,30 @@ def main() -> None:
 
     # Save model if requested
     if args.save_model:
-        model_path = os.path.join('models', f'{study_name}.pt')
-        torch.save(model.state_dict(), model_path)
-        logging.info(f"Model saved to: {model_path}")
+        os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
+
+        if is_chronos:
+            model_path = os.path.join('models', f'chronos_{study_name}')
+            chronos_pipeline.save_pretrained(model_path)
+            logging.info(f"Chronos-2 model saved to: {model_path}/")
+
+            scaler_path = os.path.join('models', 'scaler', f'scaler_chronos_{study_name}.pkl')
+        else:
+            model_path = os.path.join('models', f'{study_name}.pt')
+            torch.save(model.state_dict(), model_path)
+            logging.info(f"Model saved to: {model_path}")
+
+            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}.pkl')
+
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(global_scaler_x, f)
+        logging.info(f"Scaler saved to: {scaler_path}")
 
     # Log final metrics (handle both single dict and list of dicts, or None)
     metrics_data = []
     histories = results['history']
 
-    if histories is None or (isinstance(histories, list) and len(histories) == 0):
+    if not histories or (isinstance(histories, list) and len(histories) == 0):
         # No training history (eval-only mode)
         logging.info("\nNo training history (evaluation-only mode with single trained model)")
     else:

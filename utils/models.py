@@ -17,6 +17,8 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
 
     if model_name == 'tft':
         feature_dims = config['model']['feature_dim']
+        tft_quantiles = config['model'].get('tft', {}).get('quantiles', None)
+        num_quantiles = len(tft_quantiles) if tft_quantiles else 1
 
         model = TFT(
             observed_dim=feature_dims['observed_dim'],
@@ -29,6 +31,8 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             dropout=hyperparameters.get('dropout', 0.1),
             num_lstm_layers=hyperparameters.get('num_lstm_layers', hyperparameters.get('n_lstm_layers', 1)),
             static_embedding_dim=hyperparameters.get('static_embedding_dim', None),
+            rnn_type=config['model']['tft'].get('rnn_type', 'lstm'),
+            num_quantiles=num_quantiles,
         )
         return model
 
@@ -59,6 +63,36 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             hyperparameters=hyperparameters
         )
         return model
+
+    elif model_name == 'tcn-tft':
+        feature_dims = config['model']['feature_dim']
+        tft_quantiles = config['model'].get('tft', {}).get('quantiles', None)
+        num_quantiles = len(tft_quantiles) if tft_quantiles else 1
+
+        model = TCN_TFT(
+            observed_dim=feature_dims['observed_dim'],
+            known_dim=feature_dims['known_dim'],
+            static_dim=feature_dims['static_dim'],
+            # TFT core params — from model.tft / hpo.tft
+            hidden_dim=hyperparameters.get('hidden_dim', 32),
+            num_heads=hyperparameters.get('n_heads', 4),
+            lookback=config['model']['lookback'],
+            horizon=config['model']['horizon'],
+            dropout=hyperparameters.get('dropout', 0.1),
+            num_lstm_layers=hyperparameters.get('num_lstm_layers', 1),
+            static_embedding_dim=hyperparameters.get('static_embedding_dim', None),
+            # TCN stack params — from model.cnn / hpo.cnn
+            tcn_filters=hyperparameters.get('filters', 64),
+            tcn_kernel_size=hyperparameters.get('kernel_size', 3),
+            n_tcn_layers=hyperparameters.get('n_cnn_layers', 3),
+            increase_filters=hyperparameters.get('increase_filters', False),
+            num_quantiles=num_quantiles,
+        )
+        return model
+
+    elif model_name == 'chronos':
+        # Chronos-2 is not a PyTorch nn.Module; the pipeline is loaded separately.
+        return None
 
     else:
         raise NotImplementedError(f"Model {model_name} not implemented in PyTorch yet")
@@ -495,6 +529,8 @@ class TFT(nn.Module):
         dropout: float = 0.1,
         num_lstm_layers: int = 1,
         static_embedding_dim: Optional[int] = None,
+        rnn_type: str = 'lstm',
+        num_quantiles: int = 1,
     ):
         super().__init__()
 
@@ -505,6 +541,8 @@ class TFT(nn.Module):
         self.lookback = lookback
         self.horizon = horizon
         self.num_lstm_layers = num_lstm_layers
+        self.rnn_type = rnn_type.lower()
+        self.num_quantiles = num_quantiles
 
         # Use separate embedding dimension for static features if specified
         # Otherwise use same as hidden_dim (backward compatible)
@@ -543,7 +581,9 @@ class TFT(nn.Module):
             self.static_context_grn = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
             self.static_enrichment_grn = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
             self.static_state_h_grn = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
-            self.static_state_c_grn = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
+            # Cell state only needed for LSTM (GRU has no cell state)
+            if rnn_type.lower() == 'lstm':
+                self.static_state_c_grn = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
 
         # === Temporal Variable Selection ===
         # Variable selection networks (now operate on embedded features)
@@ -563,14 +603,15 @@ class TFT(nn.Module):
             context_size=hidden_dim if static_dim > 0 else None
         )
 
-        # LSTM encoder-decoder (same number of layers for both)
+        # RNN encoder-decoder (LSTM or GRU, same number of layers for both)
         self.num_encoder_layers = num_lstm_layers
         self.num_decoder_layers = num_lstm_layers
-        self.lstm_encoder = nn.LSTM(
+        rnn_cls = nn.GRU if rnn_type.lower() == 'gru' else nn.LSTM
+        self.lstm_encoder = rnn_cls(
             hidden_dim, hidden_dim, num_lstm_layers,
             batch_first=True, dropout=dropout if num_lstm_layers > 1 else 0
         )
-        self.lstm_decoder = nn.LSTM(
+        self.lstm_decoder = rnn_cls(
             hidden_dim, hidden_dim, num_lstm_layers,
             batch_first=True, dropout=dropout if num_lstm_layers > 1 else 0
         )
@@ -601,8 +642,9 @@ class TFT(nn.Module):
         self.output_gate = GLU(hidden_dim)  # ← No dropout parameter!
         self.output_ln = nn.LayerNorm(hidden_dim)
 
-        # Output projection
-        self.output_layer = nn.Linear(hidden_dim, 1)
+        # Output projection: num_quantiles=1 → deterministic point forecast (MSE)
+        #                    num_quantiles>1 → probabilistic quantile forecast (pinball loss)
+        self.output_layer = nn.Linear(hidden_dim, num_quantiles)
 
     def forward(self, observed, known, static=None, return_attention_weights=False):
         """Forward pass of TFT.
@@ -645,7 +687,7 @@ class TFT(nn.Module):
             c_selection = self.static_context_grn(static_encoded)
             c_enrichment = self.static_enrichment_grn(static_encoded)
             c_state_h = self.static_state_h_grn(static_encoded)
-            c_state_c = self.static_state_c_grn(static_encoded)
+            c_state_c = self.static_state_c_grn(static_encoded) if self.rnn_type == 'lstm' else None
         else:
             c_selection = None
             c_enrichment = None
@@ -703,8 +745,11 @@ class TFT(nn.Module):
         initial_encoder_state = None
         if static is not None and self.static_dim > 0:
             state_h = c_state_h.unsqueeze(0).repeat(self.num_encoder_layers, 1, 1)
-            state_c = c_state_c.unsqueeze(0).repeat(self.num_encoder_layers, 1, 1)
-            initial_encoder_state = (state_h, state_c)
+            if self.rnn_type == 'lstm':
+                state_c = c_state_c.unsqueeze(0).repeat(self.num_encoder_layers, 1, 1)
+                initial_encoder_state = (state_h, state_c)
+            else:
+                initial_encoder_state = state_h
 
         # Encode past and decode future
         encoder_output, encoder_state = self.lstm_encoder(past_encoded, initial_encoder_state)
@@ -742,7 +787,9 @@ class TFT(nn.Module):
 
         # Extract future part and project
         future_output = final_output[:, self.lookback:, :]
-        predictions = self.output_layer(future_output).squeeze(-1)
+        predictions = self.output_layer(future_output)  # (batch, horizon, num_quantiles)
+        if self.num_quantiles == 1:
+            predictions = predictions.squeeze(-1)       # (batch, horizon) — deterministic
 
         # Return with attention weights if requested
         if return_attention_weights:
@@ -755,6 +802,265 @@ class TFT(nn.Module):
             return predictions, attention_dict
         else:
             return predictions
+
+
+class TCN_TFT(nn.Module):
+    """Hybrid TCN + TFT model.
+
+    Stage 1 (TCN): Extracts local temporal features from raw observed and known inputs
+                   using causal Conv1d stacks (no future information leakage).
+    Stage 2 (VSN): VariableSelectionNetwork dynamically weights the TCN feature groups.
+    Stage 3 (TFT Core): LSTM encoder-decoder, static enrichment, interpretable
+                        multi-head attention, and gated skip connections.
+
+    Args:
+        observed_dim: Number of observed (time-varying, unknown future) features
+        known_dim: Number of known (time-varying, known future) features
+        static_dim: Number of static features (0 to disable)
+        hidden_dim: Model hidden dimension (d_model)
+        num_heads: Number of attention heads
+        lookback: Encoder sequence length
+        horizon: Decoder / forecast horizon
+        dropout: Dropout rate
+        num_lstm_layers: Number of LSTM layers for encoder and decoder
+        static_embedding_dim: Embedding dim for static features (defaults to hidden_dim)
+        tcn_kernel_size: Kernel size for TCN Conv1d layers
+        n_tcn_layers: Number of TCN layers (dilation doubles each layer: 1, 2, 4, …)
+    """
+
+    def __init__(
+        self,
+        observed_dim: int,
+        known_dim: int,
+        static_dim: int,
+        hidden_dim: int,
+        num_heads: int,
+        lookback: int,
+        horizon: int,
+        dropout: float = 0.1,
+        num_lstm_layers: int = 1,
+        static_embedding_dim: Optional[int] = None,
+        tcn_filters: int = 64,
+        tcn_kernel_size: int = 3,
+        n_tcn_layers: int = 3,
+        increase_filters: bool = False,
+        num_quantiles: int = 1,
+    ):
+        super().__init__()
+
+        self.observed_dim = observed_dim
+        self.known_dim = known_dim
+        self.static_dim = static_dim
+        self.hidden_dim = hidden_dim
+        self.lookback = lookback
+        self.horizon = horizon
+        self.num_lstm_layers = num_lstm_layers
+        self.static_embedding_dim = static_embedding_dim if static_embedding_dim is not None else hidden_dim
+        self.num_quantiles = num_quantiles
+
+        # === Stage 1: TCN Feature Extractors ===
+        # TCN layers run at tcn_filters capacity (from model.cnn).
+        # A shared linear projection then maps the TCN output to hidden_dim (from model.tft),
+        # keeping the two hyperparameter spaces cleanly separated.
+        self.tcn_observed = _build_conv_stack(
+            input_channels=observed_dim,
+            filters=tcn_filters,
+            kernel_size=tcn_kernel_size,
+            n_layers=n_tcn_layers,
+            activation='relu',
+            conv_type='tcn',
+            increase_filters=increase_filters,
+        )
+        self.tcn_known = _build_conv_stack(
+            input_channels=known_dim,
+            filters=tcn_filters,
+            kernel_size=tcn_kernel_size,
+            n_layers=n_tcn_layers,
+            activation='relu',
+            conv_type='tcn',
+            increase_filters=increase_filters,
+        )
+        # Output channels of the last TCN layer
+        if increase_filters and n_tcn_layers > 1:
+            tcn_out_channels = tcn_filters * (2 ** (n_tcn_layers - 1))
+        else:
+            tcn_out_channels = tcn_filters
+        # Shared projection: TCN output → TFT hidden dimension
+        self.tcn_proj = nn.Linear(tcn_out_channels, hidden_dim)
+
+        # === Static Processing (identical to TFT) ===
+        if static_dim > 0:
+            self.static_embed = nn.ModuleList([
+                nn.Linear(1, self.static_embedding_dim) for _ in range(static_dim)
+            ])
+            self.static_variable_selection = VariableSelectionNetwork(
+                input_size=self.static_embedding_dim,
+                num_inputs=static_dim,
+                hidden_size=self.static_embedding_dim,
+                dropout=dropout,
+            )
+            self.static_context_grn    = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
+            self.static_enrichment_grn = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
+            self.static_state_h_grn    = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
+            self.static_state_c_grn    = GRN(self.static_embedding_dim, hidden_dim, hidden_dim, dropout)
+
+        # === Stage 2: Variable Selection on TCN Feature Maps ===
+        # Past VSN: chooses between TCN(observed) and TCN(known_past) → num_inputs=2
+        # Future VSN: only TCN(known_future) → num_inputs=1
+        self.vsn_past = VariableSelectionNetwork(
+            input_size=hidden_dim,
+            num_inputs=2,            # TCN(observed) + TCN(known_past)
+            hidden_size=hidden_dim,
+            dropout=dropout,
+            context_size=hidden_dim if static_dim > 0 else None,
+        )
+        self.vsn_future = VariableSelectionNetwork(
+            input_size=hidden_dim,
+            num_inputs=1,            # TCN(known_future) only
+            hidden_size=hidden_dim,
+            dropout=dropout,
+            context_size=hidden_dim if static_dim > 0 else None,
+        )
+
+        # === Stage 3: TFT Core ===
+        self.lstm_encoder = nn.LSTM(
+            hidden_dim, hidden_dim, num_lstm_layers,
+            batch_first=True, dropout=dropout if num_lstm_layers > 1 else 0,
+        )
+        self.lstm_decoder = nn.LSTM(
+            hidden_dim, hidden_dim, num_lstm_layers,
+            batch_first=True, dropout=dropout if num_lstm_layers > 1 else 0,
+        )
+        self.lstm_gate = GLU(hidden_dim, dropout=dropout)
+        self.lstm_ln   = nn.LayerNorm(hidden_dim)
+
+        self.enrichment_grn = GRN(
+            hidden_dim, hidden_dim, hidden_dim, dropout,
+            context_size=hidden_dim if static_dim > 0 else None,
+        )
+
+        self.multihead_attn = InterpretableMultiHeadAttention(
+            n_head=num_heads, d_model=hidden_dim, dropout=dropout,
+        )
+        self.attn_gate = GLU(hidden_dim, dropout=dropout)
+        self.attn_ln   = nn.LayerNorm(hidden_dim)
+
+        self.positionwise_grn = GRN(hidden_dim, hidden_dim, hidden_dim, dropout)
+
+        self.output_gate  = GLU(hidden_dim)   # no dropout, matches TFT
+        self.output_ln    = nn.LayerNorm(hidden_dim)
+        self.output_layer = nn.Linear(hidden_dim, num_quantiles)
+
+    def _apply_tcn(self, tcn: nn.Sequential, x: torch.Tensor) -> torch.Tensor:
+        """(batch, time, features) → TCN → project → (batch, time, hidden_dim)"""
+        x = x.permute(0, 2, 1)      # (batch, features, time)
+        x = tcn(x)                  # (batch, tcn_filters, time)
+        x = x.permute(0, 2, 1)      # (batch, time, tcn_filters)
+        return self.tcn_proj(x)     # (batch, time, hidden_dim)
+
+    def forward(
+        self,
+        observed: torch.Tensor,
+        known: torch.Tensor,
+        static: Optional[torch.Tensor] = None,
+        return_attention_weights: bool = False,
+    ):
+        """
+        Args:
+            observed: (batch, lookback, observed_dim)
+            known:    (batch, lookback + horizon, known_dim)
+            static:   (batch, static_dim), optional
+            return_attention_weights: return interpretability dict if True
+
+        Returns:
+            predictions:    (batch, horizon)
+            attention_dict: dict of attention/selection weights (optional)
+        """
+        # ── STEP 1: Static features ────────────────────────────────────────
+        if static is not None and self.static_dim > 0:
+            static_embedded = torch.stack(
+                [self.static_embed[i](static[:, i:i+1]) for i in range(self.static_dim)],
+                dim=1,
+            ).unsqueeze(1)  # (batch, 1, static_dim, static_emb_dim)
+
+            static_encoded, static_weights = self.static_variable_selection(static_embedded, None)
+            static_encoded = static_encoded.squeeze(1)  # (batch, static_emb_dim)
+
+            c_selection  = self.static_context_grn(static_encoded)
+            c_enrichment = self.static_enrichment_grn(static_encoded)
+            c_state_h    = self.static_state_h_grn(static_encoded)
+            c_state_c    = self.static_state_c_grn(static_encoded)
+        else:
+            c_selection = c_enrichment = c_state_h = c_state_c = static_weights = None
+
+        # ── STEP 2: TCN feature extraction ────────────────────────────────
+        known_past   = known[:, :self.lookback, :]   # (batch, lookback, known_dim)
+        known_future = known[:, self.lookback:, :]   # (batch, horizon,  known_dim)
+
+        # All three TCN calls use causal padding → no future leakage.
+        # tcn_known weights are shared between known_past and known_future.
+        obs_feats    = self._apply_tcn(self.tcn_observed, observed)    # (batch, lookback, hidden)
+        kp_feats     = self._apply_tcn(self.tcn_known,   known_past)   # (batch, lookback, hidden)
+        kf_feats     = self._apply_tcn(self.tcn_known,   known_future) # (batch, horizon,  hidden)
+
+        # ── STEP 3: Variable selection on TCN feature maps ─────────────────
+        # past:   (batch, lookback, 2, hidden_dim)
+        # future: (batch, horizon,  1, hidden_dim)
+        past_stacked   = torch.stack([obs_feats, kp_feats], dim=-2)
+        future_stacked = kf_feats.unsqueeze(-2)
+
+        past_encoded,   past_weights   = self.vsn_past(past_stacked,   c_selection)
+        future_encoded, future_weights = self.vsn_future(future_stacked, c_selection)
+
+        # ── STEP 4: LSTM encoder-decoder ──────────────────────────────────
+        initial_state = None
+        if static is not None and self.static_dim > 0:
+            h0 = c_state_h.unsqueeze(0).repeat(self.num_lstm_layers, 1, 1)
+            c0 = c_state_c.unsqueeze(0).repeat(self.num_lstm_layers, 1, 1)
+            initial_state = (h0, c0)
+
+        encoder_output, encoder_state = self.lstm_encoder(past_encoded,   initial_state)
+        decoder_output, _             = self.lstm_decoder(future_encoded, encoder_state)
+
+        lstm_output  = torch.cat([encoder_output, decoder_output], dim=1)
+        vsn_combined = torch.cat([past_encoded,   future_encoded], dim=1)
+
+        lstm_gated  = self.lstm_gate(lstm_output)
+        lstm_output = self.lstm_ln(vsn_combined + lstm_gated)
+
+        # ── STEP 5: Static enrichment + self-attention ────────────────────
+        enriched = self.enrichment_grn(lstm_output, c_enrichment)
+
+        seq_len     = lstm_output.size(1)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=lstm_output.device), diagonal=1
+        ).bool()
+
+        attn_output, attn_weights = self.multihead_attn(
+            enriched, enriched, enriched, attn_mask=causal_mask,
+        )
+        attn_gated  = self.attn_gate(attn_output)
+        attn_output = self.attn_ln(enriched + attn_gated)
+
+        # ── STEP 6: Position-wise feed-forward + final skip ───────────────
+        ff_output    = self.positionwise_grn(attn_output)
+        final_gated  = self.output_gate(ff_output)
+        final_output = self.output_ln(lstm_output + final_gated)
+
+        predictions = self.output_layer(
+            final_output[:, self.lookback:, :]
+        )  # (batch, horizon, num_quantiles)
+        if self.num_quantiles == 1:
+            predictions = predictions.squeeze(-1)  # (batch, horizon) — deterministic
+
+        if return_attention_weights:
+            return predictions, {
+                'decoder_self_attn': attn_weights,                              # (n_head, batch, seq, seq)
+                'static_weights':    static_weights.squeeze(-1) if static_weights is not None else None,
+                'past_weights':      past_weights.squeeze(-1),                  # (batch, lookback, 2)
+                'future_weights':    future_weights.squeeze(-1),                # (batch, horizon,  1)
+            }
+        return predictions
 
 
 class CNNRNN(nn.Module):

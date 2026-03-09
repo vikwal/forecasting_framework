@@ -629,25 +629,25 @@ def get_hyperparameters(config: dict,
     lookback = config['model']['lookback']#config['hpo']['tft']['lookback']
     horizon = config['model']['horizon']
     # fl specific hyperparameters
-    n_rounds = config['hpo']['fl']['n_rounds']
-    strategy = config['hpo']['fl']['strategy']
+    strategy = config['fl']['strategy']
     server_lr = config['hpo']['fl']['server_lr']
     beta_1 = config['hpo']['fl']['beta_1']
     beta_2 = config['hpo']['fl']['beta_2']
     tau = config['hpo']['fl']['tau']
     # boolean variables
-    is_cnn_type = 'cnn' in model_name or 'tcn' in model_name
-    is_rnn_type = 'lstm' in model_name or 'gru' in model_name
-    is_fnn_type = model_name == 'fnn'
-    is_tft_type = model_name == 'tft'
-    is_gnn_type = 'gnn' in model_name
+    is_cnn_type     = 'cnn' in model_name or 'tcn' in model_name
+    is_rnn_type     = 'lstm' in model_name or 'gru' in model_name
+    is_fnn_type     = model_name == 'fnn'
+    is_tft_type     = model_name == 'tft'
+    is_tcn_tft_type = model_name == 'tcn-tft'
+    is_gnn_type     = 'gnn' in model_name
 
     if hpo:
         hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
         #hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
         if config['model']['fl']:
-            hyperparameters['n_rounds'] = trial.suggest_int('n_rounds', n_rounds[0], n_rounds[1])
+            hyperparameters['n_rounds'] = config['fl']['n_rounds']
             hyperparameters['strategy'] = strategy
             if strategy in ['fedavgm', 'fedadam', 'fedyogi']:
                 hyperparameters['server_lr'] = trial.suggest_float('server_lr', server_lr[0], server_lr[1], log=True)
@@ -667,7 +667,7 @@ def get_hyperparameters(config: dict,
         if is_fnn_type:
             hyperparameters['n_layers'] = trial.suggest_int('n_layers', n_layers[0], n_layers[1])
             hyperparameters['units'] = trial.suggest_int('units', fnn_units[0], fnn_units[1])
-        if is_tft_type:
+        if is_tft_type or is_tcn_tft_type:
             hyperparameters['horizon'] = horizon
             hyperparameters['lookback'] = lookback#trial.suggest_categorical('lookback', lookback)
             n_heads_hpo = trial.suggest_int('n_heads', n_heads[0], n_heads[1])
@@ -738,7 +738,7 @@ def get_hyperparameters(config: dict,
             if is_fnn_type:
                 hyperparameters['n_layers'] = config['model']['fnn']['n_layers']
                 hyperparameters['units'] = config['model']['fnn']['units']
-            if is_tft_type:
+            if is_tft_type or is_tcn_tft_type:
                 hyperparameters['horizon'] = horizon
                 hyperparameters['lookback'] = lookback
                 hyperparameters['n_heads'] = config['model']['tft']['n_heads']
@@ -746,7 +746,8 @@ def get_hyperparameters(config: dict,
                 hyperparameters['dropout'] = config['model']['tft']['dropout']
                 hyperparameters['num_lstm_layers'] = config['model']['tft'].get('n_lstm_layers', 1)
                 hyperparameters['static_embedding_dim'] = config['model']['tft'].get('static_embedding_dim')
-                hyperparameters['num_quantiles'] = config['model']['tft']['num_quantiles']
+                tft_quantiles = config['model']['tft'].get('quantiles', None)
+                hyperparameters['num_quantiles'] = len(tft_quantiles) if tft_quantiles else 1
                 hyperparameters['clipnorm'] = config['model']['tft']['clipnorm']
             if is_gnn_type:
                 hyperparameters['n_nodes'] = config['params'].get('next_n_grid_points', 12)

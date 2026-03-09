@@ -82,7 +82,7 @@ sudo pkill -f "config.yaml"
 
 ### How It Works
 
-1. **Environment Setup**: Activates virtual environment and configures TensorFlow settings
+1. **Environment Setup**: Activates virtual environment and configures PyTorch settings
 2. **Data Preprocessing**: Creates or loads cached preprocessed data (shared across all GPUs)
 3. **Parallel Execution**: Launches separate HPO processes on each specified GPU
 4. **Monitoring**: Tracks progress and provides real-time status updates
@@ -252,10 +252,10 @@ hpo:
 
 ### Environment Variables
 
-The framework automatically sets optimal TensorFlow configurations:
+The framework automatically sets optimal PyTorch configurations:
 
-- `TF_CPP_MIN_LOG_LEVEL=3`: Suppress TensorFlow logging
-- `TF_ENABLE_ONEDNN_OPTS=0`: Disable oneDNN warnings
+- `CUDA_VISIBLE_DEVICES`: Controls GPU assignment per process
+- `torch.set_float32_matmul_precision('high')`: Optimized matrix multiplication on Ampere+ GPUs
 
 ## Directory Structure
 

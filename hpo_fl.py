@@ -75,7 +75,7 @@ def main() -> None:
     config['fl']['verbose'] = False
 
     # Extract FL strategy for HPO (used in study name and log file)
-    fl_strategy = config['hpo']['fl']['strategy']
+    fl_strategy = config['fl']['strategy']
 
     # Update log file name to include strategy (now that config is loaded)
     log_file_new = f'logs/hpo_fl_a-{fl_strategy}_m-{args.model}_c-{config_name}{index}.log'
@@ -118,7 +118,7 @@ def main() -> None:
 
     study_name_suffix = config_name
     suffix = ''
-    if config['hpo']['fl'].get('personalize', config['fl'].get('personalize', False)):
+    if config['fl'].get('personalize', False):
         suffix += '_pers'
     study_name = f'fl_a-{fl_strategy}_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}{suffix}'
     logging.info(f'Starting HPO for Federated Study: {study_name}')
@@ -328,7 +328,7 @@ def main() -> None:
     logging.info(f'Previous trials: {len_trials} total, {completed_trials} completed, {pruned_trials} pruned.')
 
     # Get personalization setting from HPO FL config or FL config
-    personalize = config['hpo']['fl'].get('personalize', config['fl'].get('personalize', False))
+    personalize = config['fl'].get('personalize', False)
 
     trial_counter = 0
     while completed_trials < config['hpo']['trials']:

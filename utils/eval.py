@@ -144,8 +144,9 @@ def evaluate_models(pred: pd.DataFrame,
     results.set_index('Models', inplace=True)
     # skill factor
     results['Skill'] = 0.0
-    for model in evaluation['Models']:
-        results.loc[model, 'Skill'] = 1 - results.loc[model].RMSE / results.loc['Persistence'].RMSE
+    if 'Persistence' in results.index:
+        for model in evaluation['Models']:
+            results.loc[model, 'Skill'] = 1 - results.loc[model].RMSE / results.loc['Persistence'].RMSE
     # drop all models except main model
     if drop_except_main:
         results = results.loc[[main_model_name]]
@@ -325,7 +326,11 @@ def evaluate_retrain(config,
 
     # Setup optimizer and loss
     optimizer = torch.optim.Adam(model.parameters(), lr=hyperparameters.get('lr', 0.001))
-    criterion = nn.MSELoss()
+    quantiles = config['model'].get('tft', {}).get('quantiles', None)
+    if quantiles:
+        criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
+    else:
+        criterion = nn.MSELoss()
 
     for day in range(full_days):
         from_index = day * retrain_interval

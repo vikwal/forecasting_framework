@@ -2,11 +2,14 @@
 utilities for data loading, training, and model management.
 """
 
+import copy
+import math
 import yaml
 import pandas as pd
 import numpy as np
 from typing import Dict, Tuple, Any, Optional
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score
 import os
 import logging
 import gc
@@ -16,6 +19,26 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
 from . import models
+
+
+def _pinball_loss(predictions: torch.Tensor, targets: torch.Tensor, quantiles: list) -> torch.Tensor:
+    """Pinball (quantile) loss averaged over all quantiles.
+
+    Args:
+        predictions: (batch, horizon, num_quantiles) or (batch, horizon) when num_quantiles=1
+        targets:     (batch, horizon)
+        quantiles:   list of floats, e.g. [0.1, 0.5, 0.9]
+    """
+    losses = []
+    for i, q in enumerate(quantiles):
+        # predictions may be 2D (num_quantiles=1, squeezed) or 3D (multiple quantiles)
+        if predictions.dim() == 2:
+            pred_q = predictions
+        else:
+            pred_q = predictions[..., i]
+        errors = targets - pred_q
+        losses.append(torch.max((q - 1) * errors, q * errors))
+    return torch.mean(torch.stack(losses, dim=-1))
 
 
 
@@ -67,6 +90,277 @@ def get_y(X_test: Any,
 
     y_pred[y_pred < 0] = 0
     return y_true, y_pred
+
+
+def get_y_chronos2(X_test: dict,
+                   y_test: np.ndarray,
+                   chronos_pipeline,
+                   config: dict,
+                   known_cols: list,
+                   scaler_y=None) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Get predictions from a Chronos-2 pipeline.
+
+    X_test must have the structure produced by prepare_data_for_chronos2():
+        'observed': (n_windows, lookback, n_observed)  – unscaled power history
+        'known':    (n_windows, lookback+horizon, n_known) – scaled NWP features
+
+    Returns (y_true, y_pred) as numpy arrays of shape (n_windows, horizon).
+    """
+    chronos_cfg = config['model']['chronos']
+    horizon = config['model']['horizon']
+    lookback = config['model']['lookback']
+
+    observed = X_test['observed']              # (n, lookback, 1)
+    known_full = X_test.get('known', None)     # (n, lookback+horizon, n_known)
+    n_windows = observed.shape[0]
+
+    # Slice NWP into past (lookback) and future (horizon) parts
+    known_past   = known_full[:, :lookback, :] if known_full is not None else None
+    known_future = known_full[:, lookback:,  :] if known_full is not None else None
+
+    # Build long-format DataFrames vectorized (avoids O(n*t*k) Python loops)
+    base_ts = pd.date_range('2020-01-01', periods=lookback + horizon, freq='1h')
+
+    # --- context_df ---
+    item_ids_ctx = np.repeat(np.arange(n_windows).astype(str), lookback)
+    ts_ctx = np.tile(base_ts[:lookback], n_windows)
+    context_df = pd.DataFrame({
+        'item_id': item_ids_ctx,
+        'timestamp': ts_ctx,
+        'target': observed[:, :, 0].ravel(),
+    })
+    if known_past is not None:
+        for k, col in enumerate(known_cols):
+            context_df[col] = known_past[:, :, k].ravel()
+
+    # --- future_df ---
+    future_df = None
+    if known_future is not None:
+        item_ids_fut = np.repeat(np.arange(n_windows).astype(str), horizon)
+        ts_fut = np.tile(base_ts[lookback:], n_windows)
+        future_df = pd.DataFrame({
+            'item_id': item_ids_fut,
+            'timestamp': ts_fut,
+        })
+        for k, col in enumerate(known_cols):
+            future_df[col] = known_future[:, :, k].ravel()
+
+    quantile_levels = chronos_cfg.get('quantile_levels', [0.5])
+
+    pred_df = chronos_pipeline.predict_df(
+        context_df,
+        future_df=future_df,
+        prediction_length=horizon,
+        quantile_levels=quantile_levels,
+        id_column='item_id',
+        timestamp_column='timestamp',
+        target='target',
+        batch_size=config['model'].get('batch_size', 256),
+        context_length=lookback,
+        cross_learning=chronos_cfg.get('cross_learning', False),
+    )
+
+    # Identify the quantile column (Chronos-2 names vary across versions)
+    target_q = quantile_levels[0]
+    candidate_cols = [f'q{target_q}', str(target_q), f'target_q{target_q}', 'mean']
+    median_col = next((c for c in candidate_cols if c in pred_df.columns), None)
+    if median_col is None:
+        non_meta = [c for c in pred_df.columns if c not in ('item_id', 'timestamp')]
+        median_col = non_meta[-1]
+
+    predictions = []
+    for i in range(n_windows):
+        item_preds = (
+            pred_df[pred_df['item_id'] == str(i)]
+            .sort_values('timestamp')[median_col]
+            .values
+        )
+        predictions.append(item_preds[:horizon])
+
+    y_pred = np.clip(np.array(predictions), 0, None)  # (n_windows, horizon)
+
+    y_true = y_test
+    if scaler_y:
+        y_pred = scaler_y.inverse_transform(y_pred)
+        y_true = scaler_y.inverse_transform(y_test.reshape(-1, horizon))
+
+    return y_true, y_pred
+
+
+def build_chronos_fit_inputs(X_dict: dict, y: np.ndarray, known_cols: list) -> list:
+    """
+    Convert X_dict/y arrays to the Chronos-2 fit() input format.
+
+    Each entry is a dict with:
+      'target'            : 1-D array of shape (lookback + horizon,)
+      'past_covariates'   : {col: array(lookback+horizon)} — NWP full window
+      'future_covariates' : {col: None} — signals known-future to the model
+    """
+    observed = X_dict['observed']           # (n, lookback, 1)
+    known_full = X_dict.get('known', None)  # (n, lookback+horizon, n_known)
+    inputs = []
+    for i in range(observed.shape[0]):
+        entry = {
+            'target': np.concatenate([observed[i, :, 0], y[i, :]]),
+        }
+        if known_full is not None and len(known_cols) > 0:
+            entry['past_covariates'] = {
+                col: known_full[i, :, k].astype(np.float32)
+                for k, col in enumerate(known_cols)
+            }
+            entry['future_covariates'] = {col: None for col in known_cols}
+        inputs.append(entry)
+    return inputs
+
+
+class ChronosEarlyStoppingCallback:
+    """
+    Wraps a HuggingFace TrainerCallback that computes val (and train) RMSE/R²
+    after every epoch and optionally stops training early.
+
+    Usage in train_cl.py
+    --------------------
+    cb = ChronosEarlyStoppingCallback(
+        pipeline=chronos_pipeline,
+        X_train=X_tr, y_train=y_tr,
+        X_val=X_val,  y_val=y_val,
+        config=period_config,
+        known_cols=known_cols_fit,
+        early_stopping_cfg=period_config['model'].get('early_stopping', {}),
+        steps_per_epoch=steps_per_epoch,
+    )
+    chronos_pipeline.fit(..., callbacks=[cb.callback])
+    history = cb.history
+    """
+
+    # Max windows used for train-metric inference (keeps it fast)
+    MAX_TRAIN_SAMPLES = 2000
+
+    def __init__(self, pipeline, X_train, y_train, X_val, y_val,
+                 config, known_cols, early_stopping_cfg, steps_per_epoch):
+        self.pipeline = pipeline
+        self.X_val = X_val
+        self.y_val = y_val
+        self.config = config
+        self.known_cols = known_cols
+        self.steps_per_epoch = steps_per_epoch
+
+        # Subsample training data for metric inference
+        n_tr = X_train['observed'].shape[0]
+        idx = np.random.choice(n_tr, min(n_tr, self.MAX_TRAIN_SAMPLES), replace=False)
+        self.X_train_sub = {k: v[idx] for k, v in X_train.items()}
+        self.y_train_sub = y_train[idx]
+
+        # Early stopping settings
+        es = early_stopping_cfg
+        self.use_early_stopping = es.get('enabled', False)
+        self.patience = es.get('patience', 10)
+        self.min_delta = es.get('min_delta', 0.0001)
+        self.monitor = es.get('monitor', 'val_rmse')
+        self.mode = es.get('mode', 'min')
+        self.restore_best_weights = es.get('restore_best_weights', True)
+
+        self.history = {
+            'train_loss': [], 'val_loss': [],
+            'train_rmse': [], 'val_rmse': [],
+            'train_r2':   [], 'val_r2':   [],
+        }
+        self.best_metric = float('inf') if self.mode == 'min' else float('-inf')
+        self.patience_counter = 0
+        self.best_state_dict = None
+
+        self.callback = self._build_hf_callback()
+
+    def _infer(self, model, X, y):
+        """Run predict_df with a temporarily swapped model; return (y_true, y_pred)."""
+        orig = self.pipeline.model
+        self.pipeline.model = model
+        try:
+            y_true, y_pred = get_y_chronos2(
+                X_test=X, y_test=y,
+                chronos_pipeline=self.pipeline,
+                config=self.config,
+                known_cols=self.known_cols,
+            )
+        finally:
+            self.pipeline.model = orig
+        return y_true, y_pred
+
+    def _compute_metrics(self, y_true, y_pred):
+        rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
+        r2   = float(r2_score(y_true.flatten(), y_pred.flatten()))
+        mse  = float(np.mean((y_pred - y_true) ** 2))
+        return rmse, r2, mse
+
+    def _build_hf_callback(self):
+        from transformers import TrainerCallback
+
+        outer = self  # closure reference
+
+        class _Callback(TrainerCallback):
+            def on_log(self, args, state, control, model, logs=None, **kwargs):
+                if logs is None or 'loss' not in logs:
+                    return
+                # Fire only at epoch boundaries
+                current_step = state.global_step
+                if current_step % outer.steps_per_epoch != 0:
+                    return
+
+                train_loss = logs['loss']
+                epoch = round(current_step / outer.steps_per_epoch)
+
+                # Val metrics
+                y_true_v, y_pred_v = outer._infer(model, outer.X_val, outer.y_val)
+                val_rmse, val_r2, val_loss = outer._compute_metrics(y_true_v, y_pred_v)
+
+                # Train metrics (subsample)
+                y_true_t, y_pred_t = outer._infer(model, outer.X_train_sub, outer.y_train_sub)
+                train_rmse, train_r2, _ = outer._compute_metrics(y_true_t, y_pred_t)
+
+                outer.history['train_loss'].append(train_loss)
+                outer.history['val_loss'].append(val_loss)
+                outer.history['train_rmse'].append(train_rmse)
+                outer.history['val_rmse'].append(val_rmse)
+                outer.history['train_r2'].append(train_r2)
+                outer.history['val_r2'].append(val_r2)
+
+                logging.info(
+                    f"Epoch {epoch} | "
+                    f"train_loss={train_loss:.4f}  train_rmse={train_rmse:.4f}  train_r²={train_r2:.4f} | "
+                    f"val_loss={val_loss:.4f}  val_rmse={val_rmse:.4f}  val_r²={val_r2:.4f}"
+                )
+
+                if not outer.use_early_stopping:
+                    return
+
+                current = val_rmse if outer.monitor == 'val_rmse' else val_r2
+                improved = (
+                    current < outer.best_metric - outer.min_delta
+                    if outer.mode == 'min'
+                    else current > outer.best_metric + outer.min_delta
+                )
+                if improved:
+                    outer.best_metric = current
+                    outer.patience_counter = 0
+                    if outer.restore_best_weights:
+                        outer.best_state_dict = copy.deepcopy(model.state_dict())
+                else:
+                    outer.patience_counter += 1
+                    logging.debug(
+                        f"No improvement ({outer.monitor}). "
+                        f"Patience {outer.patience_counter}/{outer.patience}"
+                    )
+                    if outer.patience_counter >= outer.patience:
+                        logging.info(f"Early stopping triggered at epoch {epoch}.")
+                        control.should_training_stop = True
+
+            def on_train_end(self, args, state, control, model, **kwargs):
+                if outer.restore_best_weights and outer.best_state_dict is not None:
+                    model.load_state_dict(outer.best_state_dict)
+                    logging.info("Chronos-2: restored best model weights.")
+
+        return _Callback()
 
 
 def y_to_df(y: np.ndarray,
@@ -197,7 +491,9 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     else:
         logging.debug("Skipping torch.compile (disabled or in FL mode)")
 
-    logging.debug(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info(f"Model parameters: trainable={trainable_params:,}, total={total_params:,}")
 
     batch_size = hyperparameters['batch_size']
 
@@ -234,7 +530,13 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     # Setup optimizer and loss
     lr = hyperparameters.get('learning_rate', hyperparameters.get('lr', 0.001))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    quantiles = config['model'].get('tft', {}).get('quantiles', None)
+    if quantiles:
+        criterion = lambda pred, tgt: _pinball_loss(pred, tgt, quantiles)
+        median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
+    else:
+        criterion = nn.MSELoss()
+        median_idx = None
 
     # Training loop
     epochs = hyperparameters.get('epochs', 200)
@@ -267,7 +569,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
             logging.warning("Early stopping enabled but no validation data provided. Disabling early stopping.")
 
     # Determine if model is TFT based on model name, not batch structure
-    is_tft = config['model']['name'] == 'tft'
+    is_tft = config['model']['name'] in ('tft', 'tcn-tft')
 
     for epoch in range(epochs):
         # Training
@@ -313,11 +615,16 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
         train_preds = torch.cat(train_preds_list, dim=0).numpy()
         train_targets = torch.cat(train_targets_list, dim=0).numpy()
 
-        train_mse = np.mean((train_preds - train_targets) ** 2)
+        # For multi-quantile TFT output use median quantile for point metrics
+        if median_idx is not None and train_preds.ndim == 3:
+            train_preds_point = train_preds[..., median_idx]
+        else:
+            train_preds_point = train_preds
+        train_mse = np.mean((train_preds_point - train_targets) ** 2)
         train_rmse = np.sqrt(train_mse)
-        train_mae = np.mean(np.abs(train_preds - train_targets))
+        train_mae = np.mean(np.abs(train_preds_point - train_targets))
 
-        ss_res = np.sum((train_targets - train_preds) ** 2)
+        ss_res = np.sum((train_targets - train_preds_point) ** 2)
         ss_tot = np.sum((train_targets - np.mean(train_targets)) ** 2)
         train_r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
 
@@ -357,11 +664,16 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
             val_preds = torch.cat(val_preds_list, dim=0).cpu().numpy()
             val_targets = torch.cat(val_targets_list, dim=0).cpu().numpy()
 
-            val_mse = np.mean((val_preds - val_targets) ** 2)
+            # For multi-quantile TFT output use median quantile for point metrics
+            if median_idx is not None and val_preds.ndim == 3:
+                val_preds_point = val_preds[..., median_idx]
+            else:
+                val_preds_point = val_preds
+            val_mse = np.mean((val_preds_point - val_targets) ** 2)
             val_rmse = np.sqrt(val_mse)
-            val_mae = np.mean(np.abs(val_preds - val_targets))
+            val_mae = np.mean(np.abs(val_preds_point - val_targets))
 
-            ss_res = np.sum((val_targets - val_preds) ** 2)
+            ss_res = np.sum((val_targets - val_preds_point) ** 2)
             ss_tot = np.sum((val_targets - np.mean(val_targets)) ** 2)
             val_r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
 

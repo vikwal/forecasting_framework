@@ -210,7 +210,7 @@ class ClientActor:
         # Determine number of local epochs
         fl_early_stopping = self.config.get('fl', {}).get('early_stopping', {})
         if fl_early_stopping.get('enabled', False):
-            n_epochs = self.hyperparameters.get('epochs', 200)
+            n_epochs = self.config.get('fl', {}).get('n_local_epochs', 1)
             patience = fl_early_stopping.get('patience', 10)
             min_delta = fl_early_stopping.get('min_delta', 0.0001)
             mode = fl_early_stopping.get('mode', 'min')
@@ -221,7 +221,7 @@ class ClientActor:
 
         # Create DataLoaders
         batch_size = self.hyperparameters['batch_size']
-        is_tft = self.config['model']['name'] == 'tft'
+        is_tft = self.config['model']['name'] in ('tft', 'tcn-tft')
 
         if isinstance(self.X_train, dict):
             # TFT case
@@ -261,7 +261,13 @@ class ClientActor:
         # Setup optimizer and loss — train the EXISTING self.model
         lr = self.hyperparameters.get('learning_rate', self.hyperparameters.get('lr', 0.001))
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-        criterion = nn.MSELoss()
+        quantiles = self.config['model'].get('tft', {}).get('quantiles', None)
+        if quantiles:
+            criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
+            median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
+        else:
+            criterion = nn.MSELoss()
+            median_idx = None
 
         # Training loop
         history = {'train_loss': [], 'val_loss': [], 'train_rmse': [], 'val_rmse': [],
@@ -299,9 +305,13 @@ class ClientActor:
             # Compute train metrics
             train_preds = np.concatenate(train_preds)
             train_targets = np.concatenate(train_targets)
-            train_mse = np.mean((train_targets - train_preds) ** 2)
-            train_mae = np.mean(np.abs(train_targets - train_preds))
-            ss_res = np.sum((train_targets - train_preds) ** 2)
+            if median_idx is not None and train_preds.ndim == 3:
+                train_preds_point = train_preds[..., median_idx]
+            else:
+                train_preds_point = train_preds
+            train_mse = np.mean((train_targets - train_preds_point) ** 2)
+            train_mae = np.mean(np.abs(train_targets - train_preds_point))
+            ss_res = np.sum((train_targets - train_preds_point) ** 2)
             ss_tot = np.sum((train_targets - np.mean(train_targets)) ** 2)
             train_r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
 
@@ -332,9 +342,13 @@ class ClientActor:
 
                 val_preds = np.concatenate(val_preds)
                 val_targets_arr = np.concatenate(val_targets_list)
-                val_mse = np.mean((val_targets_arr - val_preds) ** 2)
-                val_mae = np.mean(np.abs(val_targets_arr - val_preds))
-                ss_res = np.sum((val_targets_arr - val_preds) ** 2)
+                if median_idx is not None and val_preds.ndim == 3:
+                    val_preds_point = val_preds[..., median_idx]
+                else:
+                    val_preds_point = val_preds
+                val_mse = np.mean((val_targets_arr - val_preds_point) ** 2)
+                val_mae = np.mean(np.abs(val_targets_arr - val_preds_point))
+                ss_res = np.sum((val_targets_arr - val_preds_point) ** 2)
                 ss_tot = np.sum((val_targets_arr - np.mean(val_targets_arr)) ** 2)
                 val_r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
 
@@ -446,48 +460,26 @@ class ClientActor:
     def _split_weights_by_layer_name(self, state_dict, model_name):
         """
         Split weights into shared and personal based on model architecture.
-
-        Args:
-            state_dict: Model state dictionary
-            model_name: Name of the model ('tcn-gru', 'tft', etc.)
+        Uses get_shared_keys() as single source of truth for the split logic.
 
         Returns:
             shared_weights: Weights to be aggregated globally
             personal_weights: Weights kept locally per client
         """
-        shared_weights = {}
-        personal_weights = {}
-
-        model_name = model_name.lower()
-
-        if model_name == 'tcn-gru':
-            # TCN-GRU: TCN layers are shared, GRU and output are personal
-            for key, value in state_dict.items():
-                if 'conv_stack' in key:
-                    # TCN layers are shared
-                    shared_weights[key] = value
-                elif 'rnn' in key or 'attention' in key or 'output_fc' in key:
-                    # GRU, attention, and output layers are personal
-                    personal_weights[key] = value
-                else:
-                    # Default: treat as shared
-                    shared_weights[key] = value
-
-        elif model_name == 'tft':
-            for key, value in state_dict.items():
-                if any(s in key for s in ['enrichment_grn', 'multihead_attn', 'attn_gate', 'attn_ln', 'positionwise_grn']):
-                    shared_weights[key] = value
-                else:
-                    personal_weights[key] = value
-
-        else:
-            # For other models, keep all weights shared (no personalization)
-            logging.warning(f"Model '{model_name}' does not have personalization logic, treating all weights as shared")
-            shared_weights = state_dict
-
-        logging.debug(f"[ClientActor {self.client_id}] Split weights for {model_name}: "
-                     f"{len(shared_weights)} shared, {len(personal_weights)} personal")
+        shared_keys = get_shared_keys(state_dict, model_name)
+        shared_weights = {k: v for k, v in state_dict.items() if k in shared_keys}
+        personal_weights = {k: v for k, v in state_dict.items() if k not in shared_keys}
         return shared_weights, personal_weights
+
+
+# Shared layer patterns per model — single source of truth for personalization split.
+# Edit here to change which layers are shared vs personal.
+SHARED_LAYER_PATTERNS = {
+    'tft': ['lstm_encoder', 'lstm_decoder', 'lstm_gate', 'lstm_ln'],
+    # tcn-tft: TCN feature extractors + projection are shared globally;
+    # VSN, LSTM, attention and all TFT core layers remain local.
+    'tcn-tft': ['tcn_observed', 'tcn_known', 'tcn_proj'],
+}
 
 
 def get_shared_keys(state_dict: Dict[str, torch.Tensor], model_name: str) -> set:
@@ -514,8 +506,11 @@ def get_shared_keys(state_dict: Dict[str, torch.Tensor], model_name: str) -> set
                 is_shared = True
 
         elif model_name_lower == 'tft':
-            # For TFT, enrichment_grn + attention block + positionwise_grn are shared
-            if any(s in key for s in ['enrichment_grn', 'multihead_attn', 'attn_gate', 'attn_ln', 'positionwise_grn']):
+            if any(s in key for s in SHARED_LAYER_PATTERNS['tft']):
+                is_shared = True
+
+        elif model_name_lower == 'tcn-tft':
+            if any(s in key for s in SHARED_LAYER_PATTERNS['tcn-tft']):
                 is_shared = True
         else:
             # Unknown model - aggregate all weights
@@ -647,14 +642,8 @@ def get_kfolds_partitions(n_splits, partitions):
                 X_train_fold = {}
                 X_val_fold = {}
                 for key, value_array in X_train_orig.items():
-                    if key == 'static_input' or key == 'static':
-                        # Static features are not split
-                        X_train_fold[key] = value_array
-                        X_val_fold[key] = value_array
-                        logging.debug(f"Fold {fold_idx}, Partition {i}: Passing through {key}.")
-                    else:
-                        X_train_fold[key] = value_array[train_index]
-                        X_val_fold[key] = value_array[val_index]
+                    X_train_fold[key] = value_array[train_index]
+                    X_val_fold[key] = value_array[val_index]
 
             folds.append((X_train_fold, y_train_fold, X_val_fold, y_val_fold))
         raw_partitions.append(folds)
@@ -754,8 +743,31 @@ def run_simulation(partitions: Any,
             server_optimizer = ServerOptimizer(strategy, hyperparameters, global_weights)
             logging.info(f"[Server] Initialized ServerOptimizer with {len(global_weights)} weights")
 
+    # Log shared layer patterns for personalization
+    personalize = config.get('fl', {}).get('personalize', False)
+    if personalize:
+        model_name_log = config['model']['name'].lower()
+        patterns = SHARED_LAYER_PATTERNS.get(model_name_log, 'all (no personalization logic defined)')
+        logging.info(f"[Server] Shared layer patterns for '{model_name_log}': {patterns}")
+
     history = {}
     all_rounds_metrics_data = []
+
+    # Global early stopping setup
+    global_es_config = config['fl'].get('global_early_stopping', {})
+    global_es_enabled = global_es_config.get('enabled', False)
+    global_es_patience = global_es_config.get('patience', 10)
+    global_es_min_delta = global_es_config.get('min_delta', 0.0001)
+    global_es_monitor = global_es_config.get('monitor', 'val_rmse')
+    global_es_mode = global_es_config.get('mode', 'min')
+    best_global_val = float('inf') if global_es_mode == 'min' else float('-inf')
+    global_es_counter = 0
+    best_global_weights = None
+    best_clients_weights = None
+    best_round = 0
+
+    if global_es_enabled:
+        logging.info(f"[Global Early Stopping] Enabled — monitor={global_es_monitor}, patience={global_es_patience}, min_delta={global_es_min_delta}, mode={global_es_mode}")
 
     for round_num in range(1, n_rounds+1):
         history[round_num] = {}
@@ -828,6 +840,36 @@ def run_simulation(partitions: Any,
         val_metrics_agg = aggregate_metrics(client_results)
         logging.debug(f'[Server] Evaluation metrics aggregated.')
 
+        # Global early stopping check
+        if global_es_enabled and val_metrics_agg is not None:
+            monitor_key = global_es_monitor[len('val_'):] if global_es_monitor.startswith('val_') else global_es_monitor
+            current_val = val_metrics_agg.get(monitor_key)
+            if current_val is not None:
+                improved = (current_val < best_global_val - global_es_min_delta) if global_es_mode == 'min' \
+                           else (current_val > best_global_val + global_es_min_delta)
+                if improved:
+                    best_global_val = current_val
+                    global_es_counter = 0
+                    best_round = round_num
+                    best_global_weights = {k: v.clone() for k, v in global_weights.items()}
+                    best_clients_weights = get_clients_weights(client_results)
+                    logging.info(f"[Global Early Stopping] Round {round_num}: {global_es_monitor}={current_val:.6f} improved. New best.")
+                else:
+                    global_es_counter += 1
+                    logging.info(f"[Global Early Stopping] Round {round_num}: {global_es_monitor}={current_val:.6f} no improvement. Counter: {global_es_counter}/{global_es_patience}")
+                    if global_es_counter >= global_es_patience:
+                        logging.info(f"[Global Early Stopping] Early stopping triggered after round {round_num}. Best round: {best_round}, {global_es_monitor}={best_global_val:.6f}")
+                        # Store round data before breaking
+                        round_data = {'round': round_num}
+                        if train_metrics_agg:
+                            for key, value in train_metrics_agg.items():
+                                round_data[key if key.startswith('train_') else f'train_{key}'] = value
+                        if val_metrics_agg:
+                            for key, value in val_metrics_agg.items():
+                                round_data[f'val_{key}'] = value
+                        all_rounds_metrics_data.append(round_data)
+                        break
+
         # Collect round data
         round_data = {'round': round_num}
         if train_metrics_agg:
@@ -853,10 +895,12 @@ def run_simulation(partitions: Any,
     metrics_df = pd.DataFrame(all_rounds_metrics_data)
     metrics_df = metrics_df.set_index('round')
     history['metrics_aggregated'] = metrics_df
-    logging.info("Aggregated Metrics DataFrame ---")
-    logging.info(f"\n{metrics_df}")
 
-    # Get final client weights
-    clients_weights = get_clients_weights(client_results)
+    # Restore best weights if global early stopping was used
+    if global_es_enabled and best_global_weights is not None:
+        logging.info(f"[Global ES] Restoring best global weights from round {best_round} ({global_es_monitor}={best_global_val:.6f})")
+        clients_weights = best_clients_weights
+    else:
+        clients_weights = get_clients_weights(client_results)
 
     return history, clients_weights

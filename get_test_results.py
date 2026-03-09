@@ -22,7 +22,10 @@ Supports five modes:
 
 import os
 import sys
+import warnings
 import yaml
+
+warnings.filterwarnings('ignore', message='X does not have valid feature names', category=UserWarning)
 import torch
 import numpy as np
 import pandas as pd
@@ -30,6 +33,7 @@ from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import gc
+import pickle
 import logging
 from datetime import datetime
 import argparse
@@ -71,6 +75,25 @@ def setup_logging():
     return logger
 
 logger = setup_logging()
+
+
+def load_scaler_for_model(model_path, models_dir=None):
+    """Try to load a saved scaler for the given model. Returns scaler or None."""
+    if models_dir is None:
+        models_dir = Path('models')
+    model_stem = Path(model_path).stem
+    scaler_path = Path(models_dir) / 'scaler' / f'scaler_{model_stem}.pkl'
+    if scaler_path.exists():
+        try:
+            with open(scaler_path, 'rb') as f:
+                scaler = pickle.load(f)
+            logger.info(f"Loaded scaler from: {scaler_path}")
+            return scaler
+        except Exception as e:
+            logger.warning(f"Could not load scaler from {scaler_path}: {e}")
+    else:
+        logger.debug(f"No saved scaler found at {scaler_path}, will fit from data")
+    return None
 
 
 def get_config_path_from_model_name(model_name):
@@ -147,9 +170,13 @@ def calculate_metrics(y_true, y_pred):
     return r2, rmse, mae
 
 
-def evaluate_model(model_path, models_dir, identifier_key='station_id', identifier_value=None):
+def evaluate_model(model_path, models_dir, identifier_key='station_id', identifier_value=None, config=None, scaler_x=None):
     """
     Evaluate a single model on test data.
+
+    Args:
+        config:   Optional pre-loaded config dict. If None, derived from model filename.
+        scaler_x: Optional pre-fitted StandardScaler. If None, fitted internally.
 
     Returns:
         Tuple of (identifier_value, metrics_dict)
@@ -165,20 +192,20 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
 
     logger.info(f"{identifier_key}: {identifier_value}")
 
-    # Get config path
-    config_path, is_nostatic = get_config_path_from_model_name(model_name)
-    if config_path is None or not config_path.exists():
-        logger.warning(f"Config not found for {model_name}, skipping")
-        return identifier_value, None
+    # Get config (from argument or derived from model name)
+    if config is None:
+        config_path, is_nostatic = get_config_path_from_model_name(model_name)
+        if config_path is None or not config_path.exists():
+            logger.warning(f"Config not found for {model_name}, skipping")
+            return identifier_value, None
 
-    logger.info(f"Config: {config_path}")
+        logger.info(f"Config: {config_path}")
 
-    # Load configuration
-    try:
-        config = load_config(config_path, is_nostatic)
-    except Exception as e:
-        logger.error(f"Error loading config: {e}")
-        return identifier_value, None
+        try:
+            config = load_config(config_path, is_nostatic)
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            return identifier_value, None
 
     config['model']['name'] = 'tft'
 
@@ -217,32 +244,35 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
         logger.error(f"Error loading data: {e}")
         return identifier_value, None
 
-    # Fit global scaler
+    # Fit global scaler (or use provided one)
     try:
-        global_scaler_x = StandardScaler()
-        target_col = config['data']['target_col']
-        test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
-        test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+        if scaler_x is not None:
+            global_scaler_x = scaler_x
+        else:
+            global_scaler_x = StandardScaler()
+            target_col = config['data']['target_col']
+            test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+            test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
 
-        if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
-            test_end = test_end.replace(hour=23, minute=0, second=0)
+            if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+                test_end = test_end.replace(hour=23, minute=0, second=0)
 
-        for key, df in dfs.items():
-            df_temp = df.copy()
-            if target_col in df_temp.columns:
-                df_temp.drop(target_col, axis=1, inplace=True)
+            for key, df in dfs.items():
+                df_temp = df.copy()
+                if target_col in df_temp.columns:
+                    df_temp.drop(target_col, axis=1, inplace=True)
 
-            t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
-            df_train, _ = preprocessing.split_data(
-                data=df_temp,
-                train_frac=config['data']['train_frac'],
-                test_start=test_start,
-                test_end=test_end,
-                t_0=t_0
-            )
-            global_scaler_x.partial_fit(df_train)
-            del df_temp, df_train
-            gc.collect()
+                t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+                df_train, _ = preprocessing.split_data(
+                    data=df_temp,
+                    train_frac=config['data']['train_frac'],
+                    test_start=test_start,
+                    test_end=test_end,
+                    t_0=t_0
+                )
+                global_scaler_x.partial_fit(df_train)
+                del df_temp, df_train
+                gc.collect()
     except Exception as e:
         logger.error(f"Error fitting scaler: {e}")
         return identifier_value, None
@@ -438,64 +468,67 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
         logger.error(f"Error loading global model: {e}")
         return None
 
-    # Fit GLOBAL scaler on all stations
-    logger.info("="*80)
-    logger.info("Fitting GLOBAL scaler on all stations' training data...")
-    logger.info("="*80)
+    # Try to load saved scaler, fall back to fitting
+    global_scaler_x = load_scaler_for_model(model_path)
 
-    global_scaler_x = StandardScaler()
-    target_col = global_config['data']['target_col']
-    test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
-    test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
+    if global_scaler_x is None:
+        logger.info("="*80)
+        logger.info("Fitting GLOBAL scaler on all stations' training data...")
+        logger.info("="*80)
 
-    if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
-        test_end = test_end.replace(hour=23, minute=0, second=0)
+        global_scaler_x = StandardScaler()
+        target_col = global_config['data']['target_col']
+        test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
+        test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
 
-    for i, local_config_path in enumerate(local_config_files):
-        station_id = local_config_path.stem.replace('config_wind_', '')
+        if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+            test_end = test_end.replace(hour=23, minute=0, second=0)
 
-        try:
-            with open(local_config_path, 'r') as f:
-                local_config = yaml.safe_load(f)
+        for i, local_config_path in enumerate(local_config_files):
+            station_id = local_config_path.stem.replace('config_wind_', '')
 
-            data_dir = local_config['data']['path']
-            dfs = preprocessing.get_data(
-                data_dir=data_dir,
-                config=local_config,
-                freq=global_config['data']['freq'],
-                features=features
-            )
+            try:
+                with open(local_config_path, 'r') as f:
+                    local_config = yaml.safe_load(f)
 
-            if len(dfs) == 0:
+                data_dir = local_config['data']['path']
+                dfs = preprocessing.get_data(
+                    data_dir=data_dir,
+                    config=local_config,
+                    freq=global_config['data']['freq'],
+                    features=features
+                )
+
+                if len(dfs) == 0:
+                    continue
+
+                for key, df in dfs.items():
+                    df_temp = df.copy()
+                    if target_col in df_temp.columns:
+                        df_temp.drop(target_col, axis=1, inplace=True)
+
+                    t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
+                    df_train, _ = preprocessing.split_data(
+                        data=df_temp,
+                        train_frac=global_config['data']['train_frac'],
+                        test_start=test_start,
+                        test_end=test_end,
+                        t_0=t_0
+                    )
+                    global_scaler_x.partial_fit(df_train)
+                    del df_temp, df_train
+
+                del dfs
+                gc.collect()
+
+                if (i + 1) % 10 == 0:
+                    logger.info(f"  Fitted scaler on {i+1}/{len(local_config_files)} stations")
+            except Exception as e:
+                logger.warning(f"Could not fit scaler on station {station_id}: {e}")
                 continue
 
-            for key, df in dfs.items():
-                df_temp = df.copy()
-                if target_col in df_temp.columns:
-                    df_temp.drop(target_col, axis=1, inplace=True)
-
-                t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
-                df_train, _ = preprocessing.split_data(
-                    data=df_temp,
-                    train_frac=global_config['data']['train_frac'],
-                    test_start=test_start,
-                    test_end=test_end,
-                    t_0=t_0
-                )
-                global_scaler_x.partial_fit(df_train)
-                del df_temp, df_train
-
-            del dfs
-            gc.collect()
-
-            if (i + 1) % 10 == 0:
-                logger.info(f"  Fitted scaler on {i+1}/{len(local_config_files)} stations")
-        except Exception as e:
-            logger.warning(f"Could not fit scaler on station {station_id}: {e}")
-            continue
-
-    logger.info(f"Global scaler fitted on {len(local_config_files)} stations")
-    logger.info("="*80)
+        logger.info(f"Global scaler fitted on {len(local_config_files)} stations")
+        logger.info("="*80)
 
     # Dictionary to collect R² values per forecast date and station
     # Structure: {forecast_date: {station_id: r2_value}}
@@ -702,30 +735,33 @@ def evaluate_local_models_daily_r2(models_dir, local_configs_dirs):
                 logger.warning(f"No data found for station {station_id}")
                 continue
 
-            # Fit scaler on this station's training data
-            global_scaler_x = StandardScaler()
-            target_col = config['data']['target_col']
-            test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
-            test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+            # Try to load saved scaler, fall back to fitting
+            global_scaler_x = load_scaler_for_model(model_path)
 
-            if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
-                test_end = test_end.replace(hour=23, minute=0, second=0)
+            if global_scaler_x is None:
+                global_scaler_x = StandardScaler()
+                target_col = config['data']['target_col']
+                test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+                test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
 
-            for key, df in dfs.items():
-                df_temp = df.copy()
-                if target_col in df_temp.columns:
-                    df_temp.drop(target_col, axis=1, inplace=True)
+                if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+                    test_end = test_end.replace(hour=23, minute=0, second=0)
 
-                t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
-                df_train, _ = preprocessing.split_data(
-                    data=df_temp,
-                    train_frac=config['data']['train_frac'],
-                    test_start=test_start,
-                    test_end=test_end,
-                    t_0=t_0
-                )
-                global_scaler_x.partial_fit(df_train)
-                del df_temp, df_train
+                for key, df in dfs.items():
+                    df_temp = df.copy()
+                    if target_col in df_temp.columns:
+                        df_temp.drop(target_col, axis=1, inplace=True)
+
+                    t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+                    df_train, _ = preprocessing.split_data(
+                        data=df_temp,
+                        train_frac=config['data']['train_frac'],
+                        test_start=test_start,
+                        test_end=test_end,
+                        t_0=t_0
+                    )
+                    global_scaler_x.partial_fit(df_train)
+                    del df_temp, df_train
 
             # Prepare data
             data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x)
@@ -951,64 +987,67 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
         logger.error(f"Error loading global model: {e}")
         return
 
-    # Fit GLOBAL scaler on all stations
-    logger.info("="*80)
-    logger.info("Fitting GLOBAL scaler on all stations' training data...")
-    logger.info("="*80)
+    # Try to load saved scaler, fall back to fitting
+    global_scaler_x = load_scaler_for_model(model_path)
 
-    global_scaler_x = StandardScaler()
-    target_col = global_config['data']['target_col']
-    test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
-    test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
+    if global_scaler_x is None:
+        logger.info("="*80)
+        logger.info("Fitting GLOBAL scaler on all stations' training data...")
+        logger.info("="*80)
 
-    if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
-        test_end = test_end.replace(hour=23, minute=0, second=0)
+        global_scaler_x = StandardScaler()
+        target_col = global_config['data']['target_col']
+        test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
+        test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
 
-    for i, local_config_path in enumerate(local_config_files):
-        station_id = local_config_path.stem.replace('config_wind_', '')
+        if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+            test_end = test_end.replace(hour=23, minute=0, second=0)
 
-        try:
-            with open(local_config_path, 'r') as f:
-                local_config = yaml.safe_load(f)
+        for i, local_config_path in enumerate(local_config_files):
+            station_id = local_config_path.stem.replace('config_wind_', '')
 
-            data_dir = local_config['data']['path']
-            dfs = preprocessing.get_data(
-                data_dir=data_dir,
-                config=local_config,
-                freq=global_config['data']['freq'],
-                features=features
-            )
+            try:
+                with open(local_config_path, 'r') as f:
+                    local_config = yaml.safe_load(f)
 
-            if len(dfs) == 0:
+                data_dir = local_config['data']['path']
+                dfs = preprocessing.get_data(
+                    data_dir=data_dir,
+                    config=local_config,
+                    freq=global_config['data']['freq'],
+                    features=features
+                )
+
+                if len(dfs) == 0:
+                    continue
+
+                for key, df in dfs.items():
+                    df_temp = df.copy()
+                    if target_col in df_temp.columns:
+                        df_temp.drop(target_col, axis=1, inplace=True)
+
+                    t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
+                    df_train, _ = preprocessing.split_data(
+                        data=df_temp,
+                        train_frac=global_config['data']['train_frac'],
+                        test_start=test_start,
+                        test_end=test_end,
+                        t_0=t_0
+                    )
+                    global_scaler_x.partial_fit(df_train)
+                    del df_temp, df_train
+
+                del dfs
+                gc.collect()
+
+                if (i + 1) % 10 == 0:
+                    logger.info(f"  Fitted scaler on {i+1}/{len(local_config_files)} stations")
+            except Exception as e:
+                logger.warning(f"Could not fit scaler on station {station_id}: {e}")
                 continue
 
-            for key, df in dfs.items():
-                df_temp = df.copy()
-                if target_col in df_temp.columns:
-                    df_temp.drop(target_col, axis=1, inplace=True)
-
-                t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
-                df_train, _ = preprocessing.split_data(
-                    data=df_temp,
-                    train_frac=global_config['data']['train_frac'],
-                    test_start=test_start,
-                    test_end=test_end,
-                    t_0=t_0
-                )
-                global_scaler_x.partial_fit(df_train)
-                del df_temp, df_train
-
-            del dfs
-            gc.collect()
-
-            if (i + 1) % 10 == 0:
-                logger.info(f"  Fitted scaler on {i+1}/{len(local_config_files)} stations")
-        except Exception as e:
-            logger.warning(f"Could not fit scaler on station {station_id}: {e}")
-            continue
-
-    logger.info(f"Global scaler fitted on {len(local_config_files)} stations")
-    logger.info("="*80)
+        logger.info(f"Global scaler fitted on {len(local_config_files)} stations")
+        logger.info("="*80)
 
     # Evaluate on each local dataset
     for i, local_config_path in enumerate(local_config_files):
@@ -1110,6 +1149,105 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
             continue
 
 
+def evaluate_model_chronos(config, chronos_pipeline, station_id, scaler_x=None):
+    """
+    Evaluate a Chronos-2 pipeline on test data for a single station.
+
+    config['data']['files'] must already be set to [station_id].
+    Returns (station_id, metrics_dict) or (station_id, None) on failure.
+    """
+    logger.info("="*80)
+    logger.info(f"Evaluating Chronos-2 | station: {station_id}")
+    logger.info("="*80)
+
+    try:
+        features = preprocessing.get_features(config=config)
+        data_dir = config['data']['path']
+        dfs = preprocessing.get_data(
+            data_dir=data_dir,
+            config=config,
+            freq=config['data']['freq'],
+            features=features,
+        )
+        logger.info(f"Loaded {len(dfs)} dataframe(s)")
+    except Exception as e:
+        logger.error(f"Error loading data: {e}")
+        return station_id, None
+
+    try:
+        if scaler_x is not None:
+            global_scaler_x = scaler_x
+        else:
+            global_scaler_x = StandardScaler()
+            target_col = config['data']['target_col']
+            test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+            test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+            if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+                test_end = test_end.replace(hour=23, minute=0, second=0)
+
+            t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+            for key, df in dfs.items():
+                df_temp = df.copy()
+                if target_col in df_temp.columns:
+                    df_temp.drop(target_col, axis=1, inplace=True)
+                df_train, _ = preprocessing.split_data(
+                    data=df_temp,
+                    train_frac=config['data']['train_frac'],
+                    test_start=test_start,
+                    test_end=test_end,
+                    t_0=t_0,
+                )
+                global_scaler_x.partial_fit(df_train)
+                del df_temp, df_train
+                gc.collect()
+    except Exception as e:
+        logger.error(f"Error fitting scaler: {e}")
+        return station_id, None
+
+    try:
+        data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x)
+        X_train, y_train, X_test, y_test, _ = tools.combine_datasets_efficiently(data_generator)
+        gc.collect()
+    except Exception as e:
+        logger.error(f"Error preparing data: {e}")
+        return station_id, None
+
+    try:
+        known_cols = config['params'].get('known_features', [])
+        scaler_y = None
+        if isinstance(X_test, dict):
+            scaler_y = X_test.get('scalers', {}).get('y', None) if 'scalers' in X_test else None
+        y_true, y_pred = tools.get_y_chronos2(
+            X_test=X_test,
+            y_test=y_test,
+            chronos_pipeline=chronos_pipeline,
+            config=config,
+            known_cols=known_cols,
+            scaler_y=scaler_y,
+        )
+        logger.info("Chronos-2 inference complete")
+    except Exception as e:
+        logger.error(f"Error during Chronos-2 inference: {e}")
+        return station_id, None
+
+    try:
+        r2, rmse, mae = calculate_metrics(y_true, y_pred)
+        metrics = {
+            'station_id': station_id,
+            'r2': float(r2),
+            'rmse': float(rmse),
+            'mae': float(mae),
+        }
+        logger.info(f"Metrics — R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+    except Exception as e:
+        logger.error(f"Error calculating metrics: {e}")
+        return station_id, None
+
+    del X_train, y_train, X_test, y_test, dfs
+    gc.collect()
+    return station_id, metrics
+
+
 def main():
     """Main function to evaluate all models."""
     parser = argparse.ArgumentParser(description='Evaluate TFT models on test data')
@@ -1121,6 +1259,14 @@ def main():
                         help='Evaluate global models on local datasets with daily R² per station (CSV format)')
     parser.add_argument('--localperformance', dest='local_performance', action='store_true',
                         help='Evaluate local station-specific models with daily R² per station (CSV format)')
+    parser.add_argument('--model', dest='model', default='tft',
+                        help='Model type to evaluate: "tft" (default) or "chronos"')
+    parser.add_argument('--config', dest='config_path', default=None,
+                        help='Path to config YAML (required for --model chronos)')
+    parser.add_argument('--zero-shot', dest='zero_shot', action='store_true',
+                        help='For Chronos: load from HuggingFace instead of local fine-tuned model')
+    parser.add_argument('--model-name', dest='model_name', default=None,
+                        help='Filter: only evaluate the global model whose filename contains this string')
     args = parser.parse_args()
 
     # Setup paths
@@ -1128,6 +1274,228 @@ def main():
     local_configs_dirs = [Path('configs/wind_50'), Path('configs/wind_100ex50')]
     output_dir = Path('data/test_results')
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── CHRONOS MODE ──────────────────────────────────────────────────────────
+    if args.model == 'chronos':
+        if args.config_path is None:
+            logger.error("--config is required when --model chronos is used")
+            return
+
+        from chronos import BaseChronosPipeline
+
+        config = load_config(Path(args.config_path))
+        config['model']['name'] = 'chronos'
+        chronos_cfg = config['model']['chronos']
+        repo_id = chronos_cfg.get('repo_id', 'amazon/chronos-2')
+        device_map = chronos_cfg.get('device_map', 'cuda')
+        station_ids = config['data']['files']
+
+        output_file = output_dir / 'test_results_chronos.csv'
+
+        # Pre-load a single zero-shot pipeline (reused for all stations)
+        zeroshot_pipeline = None
+        if args.zero_shot:
+            logger.info(f"Loading Chronos-2 zero-shot from {repo_id}")
+            zeroshot_pipeline = BaseChronosPipeline.from_pretrained(repo_id, device_map=device_map)
+
+        processed_ids: set = set()
+        if output_file.exists():
+            try:
+                existing_df = pd.read_csv(output_file)
+                processed_ids = set(existing_df['station_id'].unique())
+                logger.info(f"Already processed {len(processed_ids)} stations")
+            except Exception as e:
+                logger.warning(f"Could not read existing CSV: {e}")
+
+        for station_id in station_ids:
+            if station_id in processed_ids:
+                logger.info(f"Skipping {station_id} – already processed")
+                continue
+
+            # Determine which pipeline to use for this station
+            local_model_dir = models_dir / f'chronos_{station_id}'
+            if args.zero_shot:
+                pipeline_to_use = zeroshot_pipeline
+            elif local_model_dir.exists():
+                logger.info(f"Loading fine-tuned Chronos-2 from {local_model_dir}")
+                pipeline_to_use = BaseChronosPipeline.from_pretrained(
+                    str(local_model_dir), device_map=device_map
+                )
+            else:
+                logger.warning(
+                    f"No fine-tuned model found at {local_model_dir}. "
+                    f"Falling back to zero-shot from {repo_id}"
+                )
+                if zeroshot_pipeline is None:
+                    zeroshot_pipeline = BaseChronosPipeline.from_pretrained(repo_id, device_map=device_map)
+                pipeline_to_use = zeroshot_pipeline
+
+            station_config = {**config, 'data': {**config['data'], 'files': [station_id]}}
+
+            chronos_scaler = load_scaler_for_model(local_model_dir.name) if local_model_dir.exists() else None
+            station_id_val, metrics = evaluate_model_chronos(station_config, pipeline_to_use, station_id, scaler_x=chronos_scaler)
+
+            if metrics:
+                new_df = pd.DataFrame([metrics])
+                if not output_file.exists():
+                    new_df.to_csv(output_file, index=False, mode='w')
+                else:
+                    new_df.to_csv(output_file, index=False, mode='a', header=False)
+                processed_ids.add(station_id_val)
+
+            # Release fine-tuned pipeline from memory
+            if not args.zero_shot and local_model_dir.exists():
+                del pipeline_to_use
+                gc.collect()
+
+        logger.info("="*80)
+        logger.info("CHRONOS EVALUATION COMPLETE")
+        logger.info("="*80)
+        if output_file.exists():
+            try:
+                final_df = pd.read_csv(output_file)
+                logger.info(f"Results saved to {output_file}")
+                logger.info(f"  Stations: {len(final_df)}")
+                logger.info(f"  Mean R²:   {final_df['r2'].mean():.4f}")
+                logger.info(f"  Mean RMSE: {final_df['rmse'].mean():.4f}")
+                logger.info(f"  Mean MAE:  {final_df['mae'].mean():.4f}")
+            except Exception as e:
+                logger.error(f"Could not read final CSV: {e}")
+        return
+    # ── END CHRONOS MODE ──────────────────────────────────────────────────────
+
+    # ── EXPLICIT CONFIG MODE (TFT with --config) ──────────────────────────────
+    if args.config_path is not None and args.model != 'chronos':
+        import copy
+        config = load_config(Path(args.config_path))
+        config['model']['name'] = 'tft'
+        station_ids = config['data']['files']
+        logger.info(f"Config: {args.config_path}")
+        logger.info(f"Stations from config: {len(station_ids)}")
+
+        # Find global models, optionally filtered by --model-name
+        all_model_files = sorted([f for f in models_dir.glob('*.pt') if f.is_file()])
+        global_model_files = []
+        for f in all_model_files:
+            model_id = extract_model_name(f.name)
+            if model_id:
+                parts = model_id.split('_')
+                last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
+                if not (last_part.isdigit() and len(last_part) == 5):
+                    if args.model_name is None or args.model_name in f.name:
+                        global_model_files.append(f)
+
+        logger.info(f"Found {len(global_model_files)} global model(s) to evaluate")
+
+        for model_path in global_model_files:
+            global_model_id = extract_model_name(model_path.name)
+
+            if args.eval_local:
+                # Per-station evaluation: fit global scaler once, then one row per station
+                output_file = output_dir / f'test_results_{global_model_id}.csv'
+                logger.info(f"Per-station evaluation → {output_file}")
+
+                processed_stations = set()
+                if output_file.exists():
+                    try:
+                        existing_df = pd.read_csv(output_file)
+                        processed_stations = set(existing_df['station_id'].unique())
+                        logger.info(f"Already processed {len(processed_stations)} stations")
+                    except Exception as e:
+                        logger.warning(f"Could not read existing CSV: {e}")
+
+                # Try to load saved scaler, fall back to fitting from data
+                features = preprocessing.get_features(config=config)
+                global_scaler_x = load_scaler_for_model(model_path)
+
+                if global_scaler_x is None:
+                    logger.info("Fitting global scaler on all stations from config...")
+                    global_scaler_x = StandardScaler()
+                    target_col = config['data']['target_col']
+                    test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+                    test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+                    if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+                        test_end = test_end.replace(hour=23, minute=0, second=0)
+                    t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+
+                    for j, sid in enumerate(station_ids):
+                        try:
+                            station_config = copy.deepcopy(config)
+                            station_config['data']['files'] = [sid]
+                            dfs = preprocessing.get_data(
+                                data_dir=config['data']['path'],
+                                config=station_config,
+                                freq=config['data']['freq'],
+                                features=features
+                            )
+                            for key, df in dfs.items():
+                                df_temp = df.copy()
+                                if target_col in df_temp.columns:
+                                    df_temp.drop(target_col, axis=1, inplace=True)
+                                df_train, _ = preprocessing.split_data(
+                                    data=df_temp,
+                                    train_frac=config['data']['train_frac'],
+                                    test_start=test_start,
+                                    test_end=test_end,
+                                    t_0=t_0
+                                )
+                                global_scaler_x.partial_fit(df_train)
+                                del df_temp, df_train
+                            del dfs
+                            gc.collect()
+                            if (j + 1) % 10 == 0:
+                                logger.info(f"  Fitted scaler on {j+1}/{len(station_ids)} stations")
+                        except Exception as e:
+                            logger.warning(f"Could not fit scaler on station {sid}: {e}")
+
+                    logger.info("Global scaler fitted.")
+
+                # Evaluate each station with the shared scaler
+                for sid in station_ids:
+                    if sid in processed_stations:
+                        logger.info(f"Skipping {sid} – already processed")
+                        continue
+                    station_config = copy.deepcopy(config)
+                    station_config['data']['files'] = [sid]
+                    _, metrics = evaluate_model(
+                        model_path, models_dir,
+                        identifier_key='station_id',
+                        identifier_value=sid,
+                        config=station_config,
+                        scaler_x=global_scaler_x
+                    )
+                    if metrics:
+                        new_df = pd.DataFrame([metrics])
+                        if not output_file.exists():
+                            new_df.to_csv(output_file, index=False, mode='w')
+                        else:
+                            new_df.to_csv(output_file, index=False, mode='a', header=False)
+                        processed_stations.add(sid)
+
+            else:
+                # Aggregate evaluation: single row for all stations combined
+                output_file = output_dir / f'test_results_{global_model_id}_agg.csv'
+                logger.info(f"Aggregate evaluation → {output_file}")
+
+                if output_file.exists():
+                    logger.info("Output file already exists, skipping.")
+                    continue
+
+                _, metrics = evaluate_model(
+                    model_path, models_dir,
+                    identifier_key='model',
+                    identifier_value=global_model_id,
+                    config=config
+                )
+                if metrics:
+                    pd.DataFrame([metrics]).to_csv(output_file, index=False)
+                    logger.info(f"Saved aggregate result to {output_file}")
+
+        logger.info("="*80)
+        logger.info("CONFIG-BASED EVALUATION COMPLETE")
+        logger.info("="*80)
+        return
+    # ── END EXPLICIT CONFIG MODE ───────────────────────────────────────────────
 
     # MODE 0: Evaluate local station-specific models - DAILY R² CSV
     if args.local_performance:
@@ -1177,7 +1545,8 @@ def main():
                 parts = model_id.split('_')
                 last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
                 if not (last_part.isdigit() and len(last_part) == 5):
-                    global_model_files.append(f)
+                    if args.model_name is None or args.model_name in f.name:
+                        global_model_files.append(f)
 
         logger.info(f"Found {len(global_model_files)} global models")
 
@@ -1246,7 +1615,8 @@ def main():
                 parts = model_id.split('_')
                 last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
                 if not (last_part.isdigit() and len(last_part) == 5):
-                    global_model_files.append(f)
+                    if args.model_name is None or args.model_name in f.name:
+                        global_model_files.append(f)
 
         logger.info(f"Found {len(global_model_files)} global models")
 
@@ -1321,7 +1691,8 @@ def main():
                 parts = model_id.split('_')
                 last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
                 if not (last_part.isdigit() and len(last_part) == 5):
-                    model_files.append(f)
+                    if args.model_name is None or args.model_name in f.name:
+                        model_files.append(f)
         logger.info(f"Found {len(model_files)} global models")
     else:
         model_files = []
@@ -1360,11 +1731,13 @@ def main():
 
         logger.info(f"[{i+1}/{total_models}]")
         try:
+            saved_scaler = load_scaler_for_model(model_path)
             identifier_value, metrics = evaluate_model(
                 model_path,
                 models_dir,
                 identifier_key=identifier_key,
-                identifier_value=temp_identifier
+                identifier_value=temp_identifier,
+                scaler_x=saved_scaler
             )
 
             if metrics:

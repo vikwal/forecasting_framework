@@ -121,6 +121,7 @@ model:
   tft:
     n_heads: 8
     hidden_dim: 40
+    rnn_type: 'lstm'
     dropout: 0.1
     n_lstm_layers: 1  # Same for encoder and decoder
     static_embedding_dim: 128  # Separate dimension for static feature embeddings (null = use hidden_dim)
@@ -184,9 +185,6 @@ hpo:
     num_quantiles: [1]
     clipnorm: [0, 10.0]
   fl:
-    strategy: 'fedadam'
-    personalize: True
-    n_rounds: [1,20]
     server_lr: [0.0001, 0.1]
     beta_1: [0,1]
     beta_2: [0,1]
@@ -238,11 +236,11 @@ fl:
     clientH: ['07412', '03379', '05349', '07341', '03028',
               '13674', '01684', '02925', '04177', '07368']
   strategy: 'fedadam'
-  n_rounds: 20
+  n_rounds: 500
   n_local_epochs: 1
-  personalize: True
+  personalize: False
   fine_tune: False
-  # handles whether during FL early stopping is applied
+  # handles whether during FL early stopping is applied (local, per client, per round)
   early_stopping:
     enabled: False
     patience: 10
@@ -250,6 +248,13 @@ fl:
     monitor: 'val_rmse'
     mode: 'min'
     restore_best_weights: True
+  # handles early stopping across global FL rounds (stops FL if global val_rmse doesn't improve)
+  global_early_stopping:
+    enabled: True
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
   fedopt:
     server_lr: 0.0005
     beta_1: 0.9
