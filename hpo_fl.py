@@ -449,13 +449,18 @@ def main() -> None:
             accuracies = []
 
             for fold_idx, fold_partitions in enumerate(kfolds_partitions):
-                # Convert fold partitions list to dict with client IDs for run_simulation
+                # Convert fold partitions list to dict with client IDs for run_simulation.
+                # Keep the k-fold val splits on the clients (useful for local early stopping).
+                # When val_files is set and personalize=False, global evaluation happens once
+                # server-side via global_val_data instead of redundantly on every client.
                 partitions_for_fold = {}
                 for i, client_id in enumerate(client_ids_ordered):
                     X_train_fold, y_train_fold, X_val_fold, y_val_fold = fold_partitions[i]
-                    if val_files_chunks is not None:
-                        X_val_fold, y_val_fold = val_files_chunks[fold_idx]
                     partitions_for_fold[client_id] = (X_train_fold, y_train_fold, X_val_fold, y_val_fold)
+
+                global_val_data = None
+                if val_files_chunks is not None and not personalize:
+                    global_val_data = val_files_chunks[fold_idx]
 
                 # Config model name for callbacks
                 config['model_name'] = (
@@ -471,7 +476,8 @@ def main() -> None:
                     history, _ = federated.run_simulation(
                         partitions=partitions_for_fold,
                         hyperparameters=hyperparameters,
-                        config=config
+                        config=config,
+                        global_val_data=global_val_data
                     )
                 finally:
                     root_logger.setLevel(original_level)

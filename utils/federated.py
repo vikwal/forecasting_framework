@@ -658,10 +658,73 @@ def get_kfolds_partitions(n_splits, partitions):
     return kfolds_partitions
 
 
+def evaluate_model_globally(model, X_val, y_val, config, hyperparameters):
+    """
+    Evaluate a model once on a global validation set (server-side, no Ray).
+    Returns a metrics dict with the same keys as ClientActor.evaluate().
+    """
+    from torch.utils.data import TensorDataset, DataLoader
+
+    device = next(model.parameters()).device
+    batch_size = hyperparameters.get('batch_size', 128)
+    is_tft = config['model']['name'] in ('tft', 'tcn-tft')
+    quantiles = config['model'].get('tft', {}).get('quantiles', None)
+    median_idx = None
+    if quantiles:
+        median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
+
+    if isinstance(X_val, dict):
+        val_tensors = [torch.from_numpy(X_val['observed']).float(),
+                       torch.from_numpy(X_val['known']).float()]
+        if 'static' in X_val:
+            val_tensors.append(torch.from_numpy(X_val['static']).float())
+        val_tensors.append(torch.from_numpy(y_val).float())
+        val_dataset = TensorDataset(*val_tensors)
+    else:
+        val_dataset = TensorDataset(
+            torch.from_numpy(X_val).float(),
+            torch.from_numpy(y_val).float()
+        )
+
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
+
+    model.eval()
+    val_preds, val_targets_list = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            if is_tft:
+                if len(batch) == 4:
+                    obs, known, static, targets = [b.to(device) for b in batch]
+                    predictions = model(obs, known, static)
+                elif len(batch) == 3:
+                    obs, known, targets = [b.to(device) for b in batch]
+                    predictions = model(obs, known)
+            else:
+                inputs, targets = [b.to(device) for b in batch]
+                predictions = model(inputs)
+            val_preds.append(predictions.cpu().numpy())
+            val_targets_list.append(targets.cpu().numpy())
+
+    val_preds = np.concatenate(val_preds)
+    val_targets = np.concatenate(val_targets_list)
+    if median_idx is not None and val_preds.ndim == 3:
+        val_preds = val_preds[..., median_idx]
+
+    mse = float(np.mean((val_targets - val_preds) ** 2))
+    mae = float(np.mean(np.abs(val_targets - val_preds)))
+    rmse = float(np.sqrt(mse))
+    ss_res = np.sum((val_targets - val_preds) ** 2)
+    ss_tot = np.sum((val_targets - np.mean(val_targets)) ** 2)
+    r2 = float(1 - (ss_res / ss_tot)) if ss_tot != 0 else 0.0
+
+    return {'loss': mse, 'mae': mae, 'rmse': rmse, 'r^2': r2}
+
+
 def run_simulation(partitions: Any,
                    config: Dict[str, Any],
                    hyperparameters: Dict[str, Any],
-                   client_ids = None):
+                   client_ids = None,
+                   global_val_data = None):
     """
     Perform FL simulation using Ray and PyTorch.
 
@@ -670,6 +733,9 @@ def run_simulation(partitions: Any,
         config: Configuration dictionary
         hyperparameters: Training hyperparameters
         client_ids: Optional list of client IDs
+        global_val_data: Optional (X_val, y_val) tuple for server-side global evaluation.
+            When provided and personalize=False, the global model is evaluated once
+            server-side instead of running evaluate() on every client actor.
 
     Returns:
         history: Training history
@@ -831,14 +897,20 @@ def run_simulation(partitions: Any,
         else:
             logging.warning("[Server] Nothing to aggregate.")
 
-        # Local evaluation
-        logging.debug(f'[Server] Start local evaluation.')
-        results_refs = [actor.evaluate.remote(global_weights) for actor in client_actors]
-        client_results = ray.get(results_refs)
-
-        # Aggregate evaluation metrics
-        val_metrics_agg = aggregate_metrics(client_results)
-        logging.debug(f'[Server] Evaluation metrics aggregated.')
+        # Evaluation: server-side (once) when global_val_data is provided and no personalization,
+        # otherwise distributed across all client actors.
+        personalize_eval = config.get('fl', {}).get('personalize', False)
+        if global_val_data is not None and not personalize_eval:
+            logging.debug('[Server] Global evaluation on server (single pass).')
+            X_val_g, y_val_g = global_val_data
+            val_metrics_agg = evaluate_model_globally(global_model, X_val_g, y_val_g, config, hyperparameters)
+            logging.debug('[Server] Global evaluation completed.')
+        else:
+            logging.debug(f'[Server] Start local evaluation.')
+            results_refs = [actor.evaluate.remote(global_weights) for actor in client_actors]
+            client_results = ray.get(results_refs)
+            val_metrics_agg = aggregate_metrics(client_results)
+            logging.debug(f'[Server] Evaluation metrics aggregated.')
 
         # Global early stopping check
         if global_es_enabled and val_metrics_agg is not None:
