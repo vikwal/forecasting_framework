@@ -26,7 +26,8 @@ from . import meteo
 def _get_data_from_config_files(config: dict,
                                 freq: str,
                                 features: dict = None,
-                                target_col: str = 'power') -> Dict[str, pd.DataFrame]:
+                                target_col: str = 'power',
+                                files_key: str = 'files') -> Dict[str, pd.DataFrame]:
     """
     Load data based on parks specified in config.
 
@@ -35,16 +36,19 @@ def _get_data_from_config_files(config: dict,
         freq: Frequency for resampling
         rel_features: Relevant features to include
         target_col: Target column name
+        files_key: Key in config['data'] to read the file list from.
+                   Use 'files' (default) for training data or 'val_files' for separate
+                   validation/test data sources.
 
     Returns:
         Dictionary mapping client names to DataFrames
     """
     data_config = config.get('data', {})
     base_path = data_config.get('path', '')
-    files = data_config.get('files', [])
+    files = data_config.get(files_key, [])
 
     if not files:
-        raise ValueError("Files list is empty in config")
+        raise ValueError(f"Files list is empty in config (key: '{files_key}')")
 
     if not base_path:
         raise ValueError("Path is not specified in config")
@@ -58,7 +62,7 @@ def _get_data_from_config_files(config: dict,
 
     # Load station-turbine assignments CSV for deterministic turbine mapping
     assignments_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                    'data', 'station_turbine_assignments.csv')
+                                    'data', 'station_turbine_assignments_160.csv')
     station_turbine_map = {}
     if os.path.exists(assignments_path):
         try:
@@ -196,11 +200,18 @@ def get_data(data_dir: str,
              freq: str,
              config: dict,
              features: dict = None,
-             target_col: str = 'power') -> Dict[str, pd.DataFrame]:
+             target_col: str = 'power',
+             files_key: str = 'files') -> Dict[str, pd.DataFrame]:
+    """Load station data.
 
+    Args:
+        files_key: Which key in config['data'] holds the file list.
+                   'files' (default) for training stations, 'val_files' for a
+                   separate validation/test set whose scaler is fitted on 'files'.
+    """
     # Check if parks are specified in config - if so, use config-based loading
-    if 'files' in config.get('data', {}):
-        return _get_data_from_config_files(config, freq, features, target_col)
+    if files_key in config.get('data', {}):
+        return _get_data_from_config_files(config, freq, features, target_col, files_key=files_key)
 
     # Otherwise, use the existing dataset_name-based loading
     elif 'wind' in data_dir:
@@ -299,6 +310,7 @@ def pipeline(data: pd.DataFrame,
 
     if config['model']['name'] in ('tft', 'tcn-tft'):
         #logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
+        scale_target = config['data']['scale_y'] if target_col == 'power' else True
         prepared_data = prepare_data_for_tft(data=df,
                                              history_length=config['model']['lookback'], # e.g., 72 (for 3 days history)
                                              future_horizon=config['model']['horizon'], # e.g., 24 (for 24 hours forecast)
@@ -311,7 +323,10 @@ def pipeline(data: pd.DataFrame,
                                              test_start=pd.Timestamp(config['data'].get('test_start', None)),
                                              test_end=pd.Timestamp(config['data'].get('test_end', None)),
                                              t_0=t_0,
-                                             scaler_x=config.get('scaler_x', None))
+                                             target_col=target_col,
+                                             scale_target=scale_target,
+                                             scaler_x=config.get('scaler_x', None),
+                                             scaler_y=config.get('scaler_y', None))
     elif config['model']['name'] == 'chronos':
         prepared_data = prepare_data_for_chronos2(
             data=df,
@@ -326,6 +341,7 @@ def pipeline(data: pd.DataFrame,
             test_start=pd.Timestamp(config['data'].get('test_start', None)),
             test_end=pd.Timestamp(config['data'].get('test_end', None)),
             t_0=t_0,
+            target_col=target_col,
             scaler_x=config.get('scaler_x', None),
         )
     elif config['model']['name'] == 'stemgnn':
@@ -360,17 +376,21 @@ def pipeline(data: pd.DataFrame,
                     gc.collect()
 
         #logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
+        # 'power' is pre-normalized to [0,1] via installed_capacity, so scale_y can stay False.
+        # All other targets (e.g. 'wind_speed') are raw physical quantities and need scaling.
+        scale_y = config['data']['scale_y'] if target_col == 'power' else True
         prepared_data = prepare_data(data=df,
                                      output_dim=config['model']['output_dim'],
                                      step_size=config['model']['step_size'],
                                      train_frac=config['data']['train_frac'],
-                                     scale_y=config['data']['scale_y'],
+                                     scale_y=scale_y,
                                      t_0=t_0,
                                      train_start=pd.Timestamp(config['data'].get('train_start', None), tz='UTC'),
                                      test_start=pd.Timestamp(config['data'].get('test_start', None), tz='UTC'),
                                      test_end=pd.Timestamp(config['data'].get('test_end', None), tz='UTC'),
                                      target_col=target_col,
-                                     scaler_x=config.get('scaler_x', None))
+                                     scaler_x=config.get('scaler_x', None),
+                                     scaler_y=config.get('scaler_y', None))
 
     # MEMORY CLEANUP: Force garbage collection after processing
     gc.collect()
@@ -566,7 +586,8 @@ def prepare_data(data: pd.DataFrame,
                  test_start: pd.Timestamp = None,
                  test_end: pd.Timestamp = None,
                  seq2seq: bool = False,
-                 scaler_x: StandardScaler = None):
+                 scaler_x: StandardScaler = None,
+                 scaler_y: StandardScaler = None):
     df = data.copy()
     df.dropna(inplace=True)
     index = data.index
@@ -608,9 +629,11 @@ def prepare_data(data: pd.DataFrame,
         X_train = df_train.values
         X_test = df_test.values
     if scale_y:
-        Y_train, Y_test, scaler_y = apply_scaling(target_train,
-                                                  target_test,
-                                                  StandardScaler)
+        Y_train, Y_test, scaler_y = apply_scaling(
+            target_train, target_test,
+            scaler_type=scaler_y if scaler_y is not None else StandardScaler,
+            fit=(scaler_y is None)
+        )
         scalers['y'] = scaler_y
     else:
         Y_train = target_train
@@ -891,6 +914,166 @@ def _process_csv_file(args):
         return None, i, csv_file
 
 
+def _select_grid_points_relative_position(file_distances, station_lat, station_lon, next_n_grid_points):
+    """
+    Select NWP grid points by their consistent relative spatial position around the station.
+
+    Unlike the geodesic_next method (which simply takes the N nearest points), this method
+    identifies the enclosing quad using np.searchsorted on sorted 1D lat/lon grid arrays and
+    assigns each returned point a fixed directional label (e.g. "NW", "SE"). This ensures that
+    the model always sees the same feature channel for the same compass direction, regardless of
+    where the station sits within the quad.
+
+    Convention:
+        lat_idx  — index of the first grid latitude >= station_lat  (first point *north* of station)
+        lon_idx  — index of the first grid longitude >= station_lon (first point *east* of station)
+
+    Inner 2×2 quad (used for both n=4 and n=12):
+        NW: grid_lats[lat_idx],     grid_lons[lon_idx - 1]
+        NE: grid_lats[lat_idx],     grid_lons[lon_idx]
+        SW: grid_lats[lat_idx - 1], grid_lons[lon_idx - 1]
+        SE: grid_lats[lat_idx - 1], grid_lons[lon_idx]
+
+    Args:
+        file_distances: list of (csv_file, distance_km, grid_lat, grid_lon) for ALL available files
+        station_lat: station latitude
+        station_lon: station longitude
+        next_n_grid_points: must be 1, 4, or 12
+
+    Returns:
+        labeled_points: list of (csv_file, distance_km, grid_lat, grid_lon, label)
+        station_rel_lat: float in [0,1] or None for n=1
+        station_rel_lon: float in [0,1] or None for n=1
+
+    Raises:
+        ValueError: if next_n_grid_points not in {1, 4, 12}
+    """
+    if next_n_grid_points == 1:
+        # Fall back to geodesic_next: single nearest point, no spatial labeling
+        file_distances_sorted = sorted(file_distances, key=lambda x: x[1])
+        csv_file, distance, grid_lat, grid_lon = file_distances_sorted[0]
+        return [(csv_file, distance, grid_lat, grid_lon, "1")], None, None
+
+    if next_n_grid_points not in (4, 12):
+        raise ValueError(
+            f"relative_position method only supports next_n_grid_points in {{1, 4, 12}}, "
+            f"got {next_n_grid_points}."
+        )
+
+    # Build sorted unique 1D lat/lon arrays from all available grid points.
+    # Use plain Python lists so that indexing returns Python floats (same type as in
+    # coord_to_file), avoiding any numpy.float64 vs float mismatch in dict lookups.
+    grid_lats = sorted(set(fd[2] for fd in file_distances))
+    grid_lons = sorted(set(fd[3] for fd in file_distances))
+
+    # Find lat_idx: first index where grid_lats[lat_idx] >= station_lat  (first point north)
+    # Find lon_idx: first index where grid_lons[lon_idx] >= station_lon  (first point east)
+    # np.searchsorted accepts Python lists directly.
+    lat_idx = int(np.searchsorted(grid_lats, station_lat, side='left'))
+    lon_idx = int(np.searchsorted(grid_lons, station_lon, side='left'))
+
+    if next_n_grid_points == 4:
+        # Need lat_idx - 1 >= 0  and  lat_idx <= len - 1
+        lat_idx = int(np.clip(lat_idx, 1, len(grid_lats) - 1))
+        lon_idx = int(np.clip(lon_idx, 1, len(grid_lons) - 1))
+
+        # Inner 2×2 enclosing quad
+        point_definitions = [
+            ( 0, -1, "NW"),  ( 0,  0, "NE"),
+            (-1, -1, "SW"),  (-1,  0, "SE"),
+        ]
+
+    else:  # next_n_grid_points == 12
+        # 4×4 grid minus the 4 corners.  Offsets span [-2, +1] in lat and [-2, +1] in lon,
+        # so we need lat_idx - 2 >= 0  and  lat_idx + 1 <= len - 1  →  clip to [2, len - 2]
+        lat_idx = int(np.clip(lat_idx, 2, len(grid_lats) - 2))
+        lon_idx = int(np.clip(lon_idx, 2, len(grid_lons) - 2))
+
+        # Layout (station sits inside the inner NW/NE/SW/SE quad):
+        #       NNW  NNE
+        # WNW  NW   NE   ENE
+        # WSW  SW   SE   ESE
+        #       SSW  SSE
+        point_definitions = [
+            # Inner 4 (the enclosing quad)
+            ( 0, -1, "NW"),  ( 0,  0, "NE"),
+            (-1, -1, "SW"),  (-1,  0, "SE"),
+            # North row
+            ( 1, -1, "NNW"), ( 1,  0, "NNE"),
+            # South row
+            (-2, -1, "SSW"), (-2,  0, "SSE"),
+            # West column
+            ( 0, -2, "WNW"), (-1, -2, "WSW"),
+            # East column
+            ( 0,  1, "ENE"), (-1,  1, "ESE"),
+        ]
+
+    # Build a lookup dict (grid_lat, grid_lon) -> (csv_file, distance) for fast O(1) access
+    coord_to_file = {
+        (fd[2], fd[3]): (fd[0], fd[1]) for fd in file_distances
+    }
+
+    # Resolve each defined point to the corresponding CSV file.
+    # Primary: exact coordinate lookup.
+    # Fallback: nearest available file by geodesic distance (handles gaps in rotated-grid data,
+    # where not every lat × lon combination from grid_lats × grid_lons has a file).
+    # Deduplication: each file is assigned to at most one label.
+    used_files: set = set()
+    labeled_points = []
+    for lat_offset, lon_offset, label in point_definitions:
+        # Apply offset relative to the enclosing-quad corner (lat_idx, lon_idx)
+        target_lat_i = int(np.clip(lat_idx + lat_offset, 0, len(grid_lats) - 1))
+        target_lon_i = int(np.clip(lon_idx + lon_offset, 0, len(grid_lons) - 1))
+
+        target_lat = grid_lats[target_lat_i]  # Python float — exact match with coord_to_file keys
+        target_lon = grid_lons[target_lon_i]
+
+        if (target_lat, target_lon) in coord_to_file:
+            csv_file, distance = coord_to_file[(target_lat, target_lon)]
+            if csv_file not in used_files:
+                labeled_points.append((csv_file, distance, target_lat, target_lon, label))
+                used_files.add(csv_file)
+                continue
+
+        # Fallback: nearest unused file by geodesic distance.
+        # Needed when the rotated ICON-D2 grid does not cover every lat×lon intersection.
+        # Single-pass minimum scan (O(M)) avoids sorting the full file list per label.
+        best_fd = None
+        best_dist = float('inf')
+        for fd in file_distances:
+            if fd[0] not in used_files:
+                d = geodesic((fd[2], fd[3]), (target_lat, target_lon)).kilometers
+                if d < best_dist:
+                    best_dist = d
+                    best_fd = fd
+        if best_fd is not None:
+            logging.debug(
+                f"relative_position: exact point ({target_lat:.4f}, {target_lon:.4f}) "
+                f"for '{label}' not available; using nearest ({best_fd[2]:.4f}, {best_fd[3]:.4f}) "
+                f"at {best_dist:.4f} km."
+            )
+            labeled_points.append((best_fd[0], best_fd[1], best_fd[2], best_fd[3], label))
+            used_files.add(best_fd[0])
+        else:
+            logging.warning(f"relative_position: no unique file left for label '{label}' — skipping.")
+
+    # Compute relative position of the station within the inner 2×2 quad.
+    # SW corner:  (grid_lats[lat_idx - 1], grid_lons[lon_idx - 1])
+    # NW corner:  (grid_lats[lat_idx],     grid_lons[lon_idx - 1])   (same lon as SW)
+    # SE corner:  (grid_lats[lat_idx - 1], grid_lons[lon_idx])        (same lat as SW)
+    sw_lat = grid_lats[lat_idx - 1]
+    nw_lat = grid_lats[lat_idx]        # == SW lat + one grid step north
+    sw_lon = grid_lons[lon_idx - 1]
+    se_lon = grid_lons[lon_idx]        # == SW lon + one grid step east
+
+    # station_rel_lat: 0 = southern edge of quad, 1 = northern edge
+    station_rel_lat = float((station_lat - sw_lat) / (nw_lat - sw_lat))
+    # station_rel_lon: 0 = western edge of quad, 1 = eastern edge
+    station_rel_lon = float((station_lon - sw_lon) / (se_lon - sw_lon))
+
+    return labeled_points, station_rel_lat, station_rel_lon
+
+
 def _process_forecast_hour(args):
     """
     Process a single forecast hour for Icon-D2 data.
@@ -908,36 +1091,85 @@ def _process_forecast_hour(args):
         # Get all CSV files for this station
         csv_files = [f for f in os.listdir(icon_d2_base_path) if f.endswith('_ML.csv')]
 
-        # Extract coordinates from filenames and calculate distances
-        file_distances = []
+        # Parse coordinates from filenames. Geodesic distance computation is deferred to
+        # after grid point selection so that it is only called for the N selected files,
+        # not for every file in the directory (which can be 50+ for a single station).
+        file_coords = []  # (csv_file, grid_lat, grid_lon)
         for csv_file in csv_files:
-            # Extract coordinates from filename: lat_lon_lat_lon_ML.csv
             parts = csv_file.replace('_ML.csv', '').split('_')
             if len(parts) >= 4:
                 try:
                     grid_lat = float(f"{parts[0]}.{parts[1]}")
                     grid_lon = float(f"{parts[2]}.{parts[3]}")
-
-                    # Calculate distance to station
-                    distance = geodesic((station_lat, station_lon), (grid_lat, grid_lon)).kilometers
-                    # distance = math.sqrt((grid_lat - station_lat) ** 2 + (grid_lon - station_lon) ** 2)
-                    file_distances.append((csv_file, distance, grid_lat, grid_lon))
+                    file_coords.append((csv_file, grid_lat, grid_lon))
                 except (ValueError, IndexError):
                     continue
 
-        # Sort by distance and take the nearest n points
-        file_distances.sort(key=lambda x: x[1])
-        nearest_files = file_distances[:next_n_grid_points]
+        # --- Grid point selection: branch on configured method ---
+        get_method = config['params'].get('get_next_grid_points_method', 'geodesic_next')
+        station_rel_lat = None
+        station_rel_lon = None
 
-        if not nearest_files:
-            logging.warning(f"No valid files found for forecast hour {forecast_hour}")
-            return None, forecast_hour
+        if get_method == 'geodesic_next':
+            # ---- existing behavior: rank by geodesic distance, completely unchanged ----
+            # Geodesic is computed for all files because the ranking over all of them is needed.
+            file_distances = [
+                (csv_file, geodesic((station_lat, station_lon), (lat, lon)).kilometers, lat, lon)
+                for csv_file, lat, lon in file_coords
+            ]
+            file_distances.sort(key=lambda x: x[1])
+            nearest_files = file_distances[:next_n_grid_points]
 
-        # Prepare arguments for parallel CSV processing
-        csv_args = []
-        for i, (csv_file, distance, grid_lat, grid_lon) in enumerate(nearest_files, 1):
-            csv_path = os.path.join(icon_d2_base_path, csv_file)
-            csv_args.append((csv_file, distance, grid_lat, grid_lon, csv_path, config, i, turbines))
+            if not nearest_files:
+                logging.warning(f"No valid files found for forecast hour {forecast_hour}")
+                return None, forecast_hour
+
+            # The nearest point always gets rank i=1, so its column suffix is '1'.
+            nearest_label = '1'
+
+            # Prepare arguments for parallel CSV processing
+            # i is the 1-based distance rank; used as column suffix (e.g. wind_speed_h78_1)
+            csv_args = []
+            for i, (csv_file, distance, grid_lat, grid_lon) in enumerate(nearest_files, 1):
+                csv_path = os.path.join(icon_d2_base_path, csv_file)
+                csv_args.append((csv_file, distance, grid_lat, grid_lon, csv_path, config, i, turbines))
+
+        elif get_method == 'relative_position':
+            # ---- new behavior: assign consistent compass-direction labels (NW, NE, …) ----
+            # Pass dummy distances (0.0) — spatial selection uses coordinates only.
+            file_distances = [(csv_file, 0.0, lat, lon) for csv_file, lat, lon in file_coords]
+            labeled_points, station_rel_lat, station_rel_lon = _select_grid_points_relative_position(
+                file_distances, station_lat, station_lon, next_n_grid_points
+            )
+
+            if not labeled_points:
+                logging.warning(f"No valid files found for forecast hour {forecast_hour}")
+                return None, forecast_hour
+
+            # Now compute geodesic only for the N selected files (not all M files in directory).
+            labeled_points = [
+                (f, geodesic((station_lat, station_lon), (lat, lon)).kilometers, lat, lon, label)
+                for f, _, lat, lon, label in labeled_points
+            ]
+
+            # The geodesically nearest labeled point determines the NWP baseline column.
+            nearest_label = str(min(labeled_points, key=lambda x: x[1])[4])
+
+            # nearest_files keeps the plain 4-tuple format expected by the IDW aggregation
+            # code below (distances are at index [1])
+            nearest_files = [(f, d, lat, lon) for f, d, lat, lon, _ in labeled_points]
+
+            # label is used as column suffix (e.g. wind_speed_h78_NW) instead of an int rank
+            csv_args = []
+            for csv_file, distance, grid_lat, grid_lon, label in labeled_points:
+                csv_path = os.path.join(icon_d2_base_path, csv_file)
+                csv_args.append((csv_file, distance, grid_lat, grid_lon, csv_path, config, label, turbines))
+
+        else:
+            raise ValueError(
+                f"Unknown get_next_grid_points_method: '{get_method}'. "
+                f"Must be 'geodesic_next' or 'relative_position'."
+            )
 
         # Process CSV files in parallel using ThreadPoolExecutor (I/O bound)
         dfs_list = []
@@ -1024,13 +1256,93 @@ def _process_forecast_hour(args):
                 cols_to_keep = [c for c in cols_to_keep if c in df_forecast_hour.columns]
                 df_forecast_hour = df_forecast_hour[cols_to_keep]
 
-            return df_forecast_hour, forecast_hour
+            # Return station_rel_lat/lon (relative_position only) and the nearest NWP label
+            # so the caller can store them as metadata on the final DataFrame.
+            return df_forecast_hour, forecast_hour, station_rel_lat, station_rel_lon, nearest_label
         else:
             return None, forecast_hour
 
     except Exception as e:
         logging.error(f"Error processing forecast hour {forecast_hour}: {str(e)}")
         return None, forecast_hour
+
+
+def extrapolate_to_hub_height(df: pd.DataFrame, source_col_prefix: str, hub_height: float) -> pd.Series:
+    """
+    Extrapoliert Windgeschwindigkeit von Messhöhe auf Nabenhöhe mittels Power Law.
+
+    Alpha (Scherungsexponent) wird per Zeitschritt aus der Quellspalte (als untere Referenz)
+    und wind_speed_h127 (als obere Referenz) geschätzt:
+        alpha = ln(v127 / v_source) / ln(127 / h_source)
+
+    Spalten ohne _h<N>-Suffix (z.B. 'wind_speed') werden als h_source=10m angenommen.
+
+    Extrapolation:
+        v_hub = v_source * (hub_height / h_source) ** alpha
+
+    Args:
+        df:                DataFrame mit NWP- und/oder Messspalten.
+        source_col_prefix: Spaltenname ohne Gitterpunkt-Suffix (z.B. 'wind_speed_h10' oder 'wind_speed').
+                           Quellhöhe wird aus _h<N> extrahiert; ohne Suffix wird h_source=10m angenommen.
+        hub_height:        Zielhöhe in Metern (Nabenhöhe).
+
+    Returns:
+        pd.Series mit extrapolierten Werten bei hub_height, benannt 'wind_speed_hub'.
+
+    Raises:
+        ValueError: Wenn Quellspalte oder wind_speed_h127* nicht gefunden.
+    """
+    # Quellhöhe aus Spaltenname extrahieren; Fallback 10m für Spalten ohne _h<N>
+    h_match = re.search(r'_h(\d+)', source_col_prefix)
+    if h_match:
+        h_source = float(h_match.group(1))
+    else:
+        h_source = 10.0
+        logging.info(
+            f"extrapolate: Keine Höhe in Spaltenname '{source_col_prefix}' gefunden — "
+            f"h_source=10m wird angenommen."
+        )
+
+    # Quellspalte finden: exakter Match oder Gitterpunkt-Suffix _<N> (z.B. wind_speed_h10_1)
+    # Kein beliebiges startswith, um z.B. 'wind_speed' nicht auf 'wind_speed_h10_1' zu matchen
+    source_pattern = re.compile(f"^{re.escape(source_col_prefix)}(_\\d+)?$")
+    source_candidates = [c for c in df.columns if source_pattern.match(c)]
+    if not source_candidates:
+        raise ValueError(
+            f"Keine Spalte für '{source_col_prefix}' im DataFrame gefunden. "
+            f"Verfügbare Spalten: {list(df.columns)}"
+        )
+    source_col = next((c for c in source_candidates if c == source_col_prefix),  # exakter Match bevorzugt
+                      next((c for c in source_candidates if c.endswith('_1')), source_candidates[0]))
+
+    # Obere Referenzspalte für Alpha-Schätzung: wind_speed_h127 (nächster Gitterpunkt)
+    v127_candidates = [c for c in df.columns if c.startswith('wind_speed_h127')]
+    if not v127_candidates:
+        raise ValueError(
+            "Alpha-Schätzung erfordert Spalten 'wind_speed_h127*' im DataFrame. "
+            "Sicherstellen, dass diese Höhe in den NWP-Daten vorhanden ist."
+        )
+    v127_col = next((c for c in v127_candidates if c.endswith('_1')), v127_candidates[0])
+
+    v_source = df[source_col].clip(lower=0.01)
+    v127 = df[v127_col].clip(lower=0.01)
+
+    # Per-Zeitschritt Scherungsexponent; physikalisch sinnvoll auf [0, 1] clippen
+    # Sonderfall: h_source == 127m → kein Höhenunterschied, alpha=0, v_hub=v_source
+    if h_source == 127.0:
+        logging.warning("extrapolate: h_source == 127m == h_ref_high → alpha=0, keine Extrapolation.")
+        alpha = pd.Series(0.0, index=df.index)
+    else:
+        alpha = (np.log(v127 / v_source) / np.log(127.0 / h_source)).clip(0.0, 1.0)
+
+    v_hub = df[source_col] * (hub_height / h_source) ** alpha
+    v_hub.name = 'wind_speed_hub_extrap'
+
+    logging.info(
+        f"Extrapoliere '{source_col}' (h={h_source:.0f}m) → Nabenhöhe {hub_height:.1f}m "
+        f"via Power Law. Mean alpha={alpha.mean():.3f}, alpha-Referenz: '{source_col}' und '{v127_col}'."
+    )
+    return v_hub
 
 
 def preprocess_synth_wind_icond2(path: str,
@@ -1172,6 +1484,10 @@ def preprocess_synth_wind_icond2(path: str,
     station_lat = station_info['latitude'].iloc[0]
     station_lon = station_info['longitude'].iloc[0]
 
+    if static_features:
+        static_data['latitude'] = station_lat
+        static_data['longitude'] = station_lon
+
     # Parameters from config
     next_n_grid_points = config['params'].get('next_n_grid_points', 12)
     forecast_hours = ['06', '09', '12', '15']  # Available forecast hours
@@ -1185,6 +1501,10 @@ def preprocess_synth_wind_icond2(path: str,
     # Process forecast hours in parallel using ProcessPoolExecutor (CPU bound)
     all_forecast_dfs = []
     max_workers = min(len(forecast_hours), mp.cpu_count())
+    # Relative-position scalars are the same for every forecast hour; capture from first result
+    _station_rel_lat = None
+    _nearest_label = None
+    _station_rel_lon = None
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_hour = {executor.submit(_process_forecast_hour, arg): arg[0] for arg in forecast_args}
@@ -1194,6 +1514,19 @@ def preprocess_synth_wind_icond2(path: str,
             result = future.result()
             if result[0] is not None:
                 all_forecast_dfs.append((result[0], hour))
+                # Capture relative-position scalars (index 2/3) and nearest NWP label (index 4).
+                # Take the first non-None value across forecast hours — they should be identical
+                # for a given station since its position relative to the grid doesn't change.
+                if len(result) > 2 and result[2] is not None and _station_rel_lat is None:
+                    _station_rel_lat = result[2]
+                    _station_rel_lon = result[3]
+                if len(result) > 4 and result[4] is not None and _nearest_label is None:
+                    _nearest_label = result[4]
+
+    # If relative_position method returned relative scalars, store them as static features
+    if _station_rel_lat is not None:
+        static_data['station_rel_lat'] = _station_rel_lat
+        static_data['station_rel_lon'] = _station_rel_lon
 
     # Sort by forecast hour to maintain consistent order
     hour_order = {'06': 0, '09': 1, '12': 2, '15': 3}
@@ -1231,6 +1564,43 @@ def preprocess_synth_wind_icond2(path: str,
     # Merge on timestamp
     # df_synth has timestamp as index
     df_merged = df_final.merge(df_synth, left_on='timestamp', right_index=True, how='left')
+
+    # 3b. Load neighbor station data for '_next' features if next_n_stations > 0
+    _next_n_stations = config['params'].get('next_n_stations') or 0
+    _next_features_requested = [f for f in (features.get('known', []) + features.get('observed', []))
+                                 if f.endswith('_next')] if features else []
+
+    if _next_n_stations > 0 and _next_features_requested:
+        _base_next_features = [f[:-5] for f in _next_features_requested]  # strip '_next'
+        _station_coords = (station_lat, station_lon)
+        _other_stations = wind_parameter[wind_parameter['park_id'] != station_id].copy()
+        _other_stations['_distance_km'] = _other_stations.apply(
+            lambda row: geodesic(_station_coords, (row['latitude'], row['longitude'])).km, axis=1
+        )
+        _nearest = _other_stations.nsmallest(_next_n_stations, '_distance_km')
+
+        for _rank, (_, _neighbor_row) in enumerate(_nearest.iterrows(), start=1):
+            _neighbor_id = str(_neighbor_row['park_id'])
+            _neighbor_synth_path = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.csv')
+            if not os.path.exists(_neighbor_synth_path):
+                logging.warning(f"next_n_stations: synth file for neighbor {_neighbor_id} not found, skipping.")
+                continue
+
+            _df_neighbor = pd.read_csv(_neighbor_synth_path, sep=';')
+            _df_neighbor['timestamp'] = pd.to_datetime(_df_neighbor['timestamp'], utc=True)
+            _df_neighbor.set_index('timestamp', inplace=True)
+
+            for _base_feat in _base_next_features:
+                _col_name = f'{_base_feat}_next_{_rank}'
+                if _base_feat in _df_neighbor.columns:
+                    df_merged = df_merged.merge(
+                        _df_neighbor[[_base_feat]].rename(columns={_base_feat: _col_name}),
+                        left_on='timestamp', right_index=True, how='left'
+                    )
+                else:
+                    logging.warning(f"next_n_stations: feature '{_base_feat}' not in neighbor {_neighbor_id}, skipping.")
+
+        logging.debug(f"Station {station_id}: loaded '{_next_features_requested}' from {_next_n_stations} nearest neighbors")
 
     # 4. Set MultiIndex strictly: ['starttime', 'forecasttime', 'timestamp']
     if 'starttime' in df_merged.columns and 'forecasttime' in df_merged.columns and 'timestamp' in df_merged.columns:
@@ -1282,8 +1652,11 @@ def preprocess_synth_wind_icond2(path: str,
                 cols_to_drop.append(col)
 
 
-    # Always drop generic wind_speed (without suffix)
-    if 'wind_speed' in df_merged.columns and 'wind_speed' not in rel_features:
+    # Always drop generic wind_speed (without suffix), unless it's the target column
+    # or used as extrapolation source (must survive until after extrapolation)
+    if ('wind_speed' in df_merged.columns and 'wind_speed' not in rel_features
+            and config['data'].get('target_col') != 'wind_speed'
+            and config['params'].get('extrapolate') != 'wind_speed'):
         cols_to_drop.append('wind_speed')
 
     # Drop the unwanted columns
@@ -1302,6 +1675,19 @@ def preprocess_synth_wind_icond2(path: str,
             for col in wind_speed_t_cols:
                 df_merged.rename(columns={col: 'wind_speed_hub'}, inplace=True)
 
+    # Extrapolate wind speed to hub height (Power Law)
+    extrapolate_col = config['params'].get('extrapolate')
+    if extrapolate_col:
+        hub_height_val = float(np.mean(heights)) if len(heights) > 0 else None
+        if hub_height_val is None:
+            logging.warning("extrapolate: Nabenhöhe nicht verfügbar — Extrapolation übersprungen.")
+        else:
+            df_merged['wind_speed_hub_extrap'] = extrapolate_to_hub_height(
+                df=df_merged,
+                source_col_prefix=extrapolate_col,
+                hub_height=hub_height_val
+            )
+
     # Add Icon-D2 features
     if rel_features:
         # Create list of all possible feature combinations with suffixes
@@ -1309,7 +1695,7 @@ def preprocess_synth_wind_icond2(path: str,
 
         # Create regex patterns for strict matching
         # Matches exactly the feature name, optionally followed by _<digits> (for grid points)
-        patterns = [re.compile(f"^{re.escape(feat)}(_\d+)?$") for feat in rel_features]
+        patterns = [re.compile(f"^{re.escape(feat)}(_[A-Z0-9]+)?$") for feat in rel_features]
 
         for col in df_merged.columns:
 
@@ -1332,10 +1718,31 @@ def preprocess_synth_wind_icond2(path: str,
                 matching_key = next(key for key in static_data.keys() if static_feature in key)
                 df_merged[static_feature] = static_data[matching_key]
 
+        # Keep wind_speed_h10* for NWP baseline evaluation when target is wind_speed
+        if config['data'].get('target_col') == 'wind_speed':
+            for col in df_merged.columns:
+                if col.startswith('wind_speed_h10') and col not in available_cols:
+                    available_cols.append(col)
+
+        # Auto-include wind_speed_hub_extrap when extrapolation was applied
+        if config['params'].get('extrapolate') and 'wind_speed_hub_extrap' in df_merged.columns:
+            if 'wind_speed_hub_extrap' not in available_cols:
+                available_cols.append('wind_speed_hub_extrap')
+
         # Remove duplicates and filter
         available_cols = list(dict.fromkeys(available_cols))
         available_cols = [col for col in available_cols if col in df_merged.columns]
         df_merged = df_merged[available_cols]
+
+    # Sin/cos encode all wind direction columns (cyclical feature, 0-359 degrees)
+    wind_dir_cols = [col for col in df_merged.columns if 'wind_direction' in col]
+    if wind_dir_cols:
+        for col in wind_dir_cols:
+            rad = np.deg2rad(df_merged[col])
+            df_merged[f'{col}_sin'] = np.sin(rad)
+            df_merged[f'{col}_cos'] = np.cos(rad)
+        df_merged.drop(columns=wind_dir_cols, inplace=True)
+        logging.debug(f"Sin/cos encoded wind direction columns: {wind_dir_cols}")
 
     # # Resample if needed
     # if freq.upper() != '1H':
@@ -1351,7 +1758,7 @@ def preprocess_synth_wind_icond2(path: str,
         original_known_features = features.get('known', [])
 
         # Create regex patterns for known features, including grid point suffixes
-        known_feature_patterns = [re.compile(f"^{re.escape(feat)}(_\d+)?$") for feat in original_known_features]
+        known_feature_patterns = [re.compile(f"^{re.escape(feat)}(_[A-Z0-9]+)?$") for feat in original_known_features]
 
         pca_known_cols = []
         for col in df_merged.columns:
@@ -1401,6 +1808,12 @@ def preprocess_synth_wind_icond2(path: str,
 
     # Ensure index is sorted (should already be, but safe is safe)
     df_merged.sort_index(inplace=True)
+
+    # Store the nearest NWP grid point label as DataFrame metadata so that
+    # compute_skill_nwp can select the correct baseline column without guessing.
+    # For geodesic_next: always '1'. For relative_position: geodesically nearest label (e.g. 'SW').
+    if _nearest_label is not None:
+        df_merged.attrs['nwp_nearest_label'] = _nearest_label
 
     # We removed the manual timestamp filtering because we now strictly filter for complete 48h forecasts per starttime
     # This is more robust and fits the MultiIndex structure better.
@@ -1702,7 +2115,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          test_end: pd.Timestamp = None,
                          t_0: int = 0,
                          scale_target: bool = False,
-                         scaler_x: StandardScaler = None): # New flag to control lag feature
+                         scaler_x: StandardScaler = None,
+                         scaler_y: StandardScaler = None):
     """
     Prepares data for a Temporal Fusion Transformer, creating a lagged target input.
     Args:
@@ -1851,11 +2265,13 @@ def prepare_data_for_tft(data: pd.DataFrame,
     target_train_raw = train_df[[target_col]].values
     target_test_raw = test_df[[target_col]].values
     if scale_target:
-        target_train_scaled, target_test_scaled, target_scaler = apply_scaling(target_train_raw,
-                                                                               target_test_raw,
-                                                                               StandardScaler)
+        target_train_scaled, target_test_scaled, target_scaler = apply_scaling(
+            target_train_raw, target_test_raw,
+            scaler_type=scaler_y if scaler_y is not None else StandardScaler,
+            fit=(scaler_y is None)
+        )
         scalers['y'] = target_scaler
-        logging.info(f"Target variable '{target_col}' scaled separately.")
+        logging.debug(f"Target variable '{target_col}' scaled ({'global' if scaler_y is not None else 'per-station'} scaler).")
     else:
         target_train_scaled = target_train_raw
         target_test_scaled = target_test_raw
@@ -1881,8 +2297,9 @@ def prepare_data_for_tft(data: pd.DataFrame,
         step_size
     )
 
-    num_train_samples = X_observed_train.shape[0] # z.B. 24918
-    num_test_samples = X_observed_test.shape[0]
+    has_observed = X_observed_train.ndim == 3 and X_observed_train.shape[-1] > 0
+    num_train_samples = X_observed_train.shape[0] if has_observed else X_known_train.shape[0]
+    num_test_samples = X_observed_test.shape[0] if has_observed else X_known_test.shape[0]
 
     if X_static_train.size > 0 and num_train_samples > 0:
         X_static_train = np.tile(X_static_train, (num_train_samples, 1))
@@ -2150,8 +2567,12 @@ def create_tft_sequences(known_data: np.ndarray,
             # Preserve DatetimeIndex/MultiIndex type
             index_list = indices[index_positions] if len(index_positions) > 0 else indices[[]]
 
+        n_samples = len(y_list)
+        X_observed_arr = (np.zeros((n_samples, history_len, 0))
+                          if not X_observed_list
+                          else np.array(X_observed_list))
         return (np.array(X_known_list),
-                np.array(X_observed_list),
+                X_observed_arr,
                 np.array(y_list),
                 index_list)
 

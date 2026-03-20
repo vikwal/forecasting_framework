@@ -144,9 +144,14 @@ def evaluate_models(pred: pd.DataFrame,
     results.set_index('Models', inplace=True)
     # skill factor
     results['Skill'] = 0.0
+    results['Skill_NWP'] = np.nan
     if 'Persistence' in results.index:
         for model in evaluation['Models']:
             results.loc[model, 'Skill'] = 1 - results.loc[model].RMSE / results.loc['Persistence'].RMSE
+    nwp_key = 'NWP (wind_speed_h10)'
+    if nwp_key in results.index:
+        for model in evaluation['Models']:
+            results.loc[model, 'Skill_NWP'] = 1 - results.loc[model].RMSE / results.loc[nwp_key].RMSE
     # drop all models except main model
     if drop_except_main:
         results = results.loc[[main_model_name]]
@@ -266,6 +271,25 @@ def evaluation_pipeline(data: pd.DataFrame,
                             index=index_test,
                             t_0=None if evaluate_on_all_test_data else t_0)
     pers['Persistence'] = df_pers
+
+    # NWP baseline: use wind_speed_h10_1 (nearest grid point) when target is wind_speed
+    nwp_cols = [c for c in data.columns if c.startswith('wind_speed_h10')]
+    nwp_col = next((c for c in nwp_cols if c.endswith('_1')), nwp_cols[0] if nwp_cols else None)
+    if target_col == 'wind_speed' and nwp_col is not None:
+        y_nwp = data[nwp_col]
+        if isinstance(y_nwp.index, pd.MultiIndex):
+            y_nwp = y_nwp.reset_index().groupby('timestamp').mean().iloc[:, -1]
+        y_nwp = y_nwp[test_start_ts:]
+        y_nwp_windows = preprocessing.make_windows(data=y_nwp,
+                                                   seq_len=y_pred.shape[-1],
+                                                   step_size=1,
+                                                   indices=test_indices)
+        df_nwp = tools.y_to_df(y=y_nwp_windows,
+                                output_dim=output_dim,
+                                horizon=horizon,
+                                index=index_test,
+                                t_0=None if evaluate_on_all_test_data else t_0)
+        pers['NWP (wind_speed_h10)'] = df_nwp
 
     # get physical persistence
     if get_physical_persistence:

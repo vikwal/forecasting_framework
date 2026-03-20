@@ -1,0 +1,45 @@
+data:
+  path: '/mnt/nvme1/synthetic/wind/era5_fric_wind_hourly_age'
+  files: ['00298', '02907', '02564', '05930', '15813', '02932', '01759', '07403', '05404', '00662', # A
+          '00596', '03098', '04642', '03366', '03158', '03362', '03032', '00591', '02812', '03946', # B
+          '00303', '00891', '04336', '15000', '01694', '05490', '01605', '04271', '00656', '00691', # C
+          '03761', '00198', '01443', '06163', '04464', '03513', '01975', '00427', '01691', '07394', # D
+          '07370', '05906', '03093', '03268', '15444', '00282', '05440', '05779', '00460', '00856', # E
+          '00963', '00704', '04745', '00342', '01766', '01544', '05516', '04466', '01200', '02171', # F
+          '00880', '02794', '04393', '07369', '03126', '00232', '00164', '02261', '07393', '05158', # G
+          '07412', '03379', '05349', '07341', '03028', '13674', '01684', '02925', '04177', '07368', # H
+          '01303', '07395', '03015', '04280', '01262', '00183', '05546', '01587', '07410', '03631', # I
+          '00433', '02712', '05029', '06197', '07374', '03660', '02597', '05800', '03196', '00867', # J
+          '03668', '05100', '05347', '02961', '07351', '04024', '02115', '07396', '01270', '03730', # K
+          '01832', '15207', '02483', '07367', '02928', '02044', '01001', '01580', '04911', '01503', # L
+          '01612', '02601', '01639', '03166', '00096', '05371', '02023', '03086', '03821', '01078', # M
+          '02559', '05705', '02014', '00722', '02667', '05792', '03987', '00161', '02485', '02638', # N
+          '03231', '04104', '05856', '00953', '05109', '01358', '04928', '05142', '02429', '02290', # O
+          '01346', '01048', '05397', '04371', '00840', '03287', '04887', '02985', '03897', '00701'] # P
+  # Optional: restrict to a time window for evaluation (comment out to use all data)
+  test_start: '2024-01-01'
+  test_end:   '2024-12-31'
+
+interpolation:
+  k_neighbors: 8          # number of nearest neighbours used for each prediction
+  idw_power: 2.0          # IDW exponent (weight = 1 / dist^power)
+  variogram_model: 'gaussian'   # spherical | gaussian | exponential
+  n_variogram_lags: 30    # number of lag bins for empirical semivariance
+  max_variogram_dist: 1000 # km; null = half of max pairwise dist (~430 km for this network)
+  interpolate_uv: true    # also interpolate u/v wind components (requires wind_direction column)
+  variogram_segments: 0   # 1=global (one variogram), 0=per-timestamp, N=N equal time blocks
+  anisotropy:
+    enabled: true        # set to true to use anisotropic distances in the kriging system
+    angle: 0            # major axis direction (geographic degrees, clockwise from North)
+    ratio: 0.2            # range_minor / range_major  (< 1 = more correlated along major axis)
+  rk_features:            # covariates for the OLS trend in Regression Kriging
+    - altitude            # static (from wind_parameter.csv)
+    - relative_humidity   # dynamic
+    #- temperature_2m      # dynamic (from synth_*.csv, per timestamp)
+  azimuths: [0, 45, 90, 135]  # directional variogram angles in degrees (geographic: 0=N, 90=E); tolerance fixed at ±22.5°
+  #azimuths: [22.5, 67.5, 112.5, 157.5]
+  #azimuths: [0, 30, 60, 90, 120, 150]
+
+output:
+  path: 'results/geostatistics'
+  prefix: 'spatial_interp'   # prepended to all output filenames

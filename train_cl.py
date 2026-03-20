@@ -38,21 +38,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Model Training")
     parser.add_argument('-m', '--model', type=str, default='tft', help='Select Model (default: tft)')
     parser.add_argument('-c', '--config', type=str, help='Select config')
-    parser.add_argument('-i', '--index', type=str, default='', help='Define index')
+    parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix for study name (default: empty)')
     parser.add_argument('--save_model', action='store_true', default=False, help='Save trained model to models directory (default: False)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
-    index = ''
-    if args.index:
-        index = f'_{args.index}'
+    suffix = ''
+    if args.suffix:
+        suffix = f'_{args.suffix}'
     if '.yaml' in args.config:
         args.config = args.config.split('.')[0]
     if '/' in args.config:
         config_name = args.config.split('/')[-1]
     else:
         config_name = args.config
-    log_file = f'logs/train_cl_m-{args.model}_{("_").join(config_name.split("_")[1:])}{index}.log'
+    log_file = f'logs/train_cl_m-{args.model}_{("_").join(config_name.split("_")[1:])}{suffix}.log'
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -126,6 +126,8 @@ def main() -> None:
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
     study_name_suffix = '_'.join(config_name.split('_')[1:])
+    if args.suffix:
+        study_name_suffix += f'_{args.suffix}'
     study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}' # .yaml delete later when renamed the hpo studies
 
     # Load data - REUSE EXISTING PREPROCESSING
@@ -135,6 +137,23 @@ def main() -> None:
         freq=freq,
         features=features
     )
+
+    # Optional separate validation/test stations (val_files).
+    # When present: training sequences come from dfs (up to test_start) and
+    # test/validation sequences come from val_dfs (test_start → test_end),
+    # scaled with the scaler fitted on dfs training data.
+    val_dfs = None
+    if config['data'].get('val_files'):
+        logging.info("val_files found — loading separate validation/test stations.")
+        val_dfs = preprocessing.get_data(
+            data_dir=data_dir,
+            config=config,
+            freq=freq,
+            features=features,
+            files_key='val_files'
+        )
+        logging.info(f"Loaded {len(val_dfs)} val stations, {len(dfs)} training stations.")
+
     logging.info(f'Config: {json.dumps(params, indent=2)}')
 
     # Calculate test periods for evaluation
@@ -201,6 +220,7 @@ def main() -> None:
 
     # --- GLOBAL SCALING (same as TensorFlow version) ---
     global_scaler_x = StandardScaler()
+    global_scaler_y = StandardScaler()
 
     # Get features for lag feature creation
     features = preprocessing.get_features(config=config)
@@ -259,12 +279,14 @@ def main() -> None:
         if should_train:
             logging.debug(f"Fitting global scaler for period {period_idx + 1}...")
 
-            # Reset scaler for each period when retraining (fresh start each time)
+            # Reset scalers for each period when retraining (fresh start each time)
             global_scaler_x = StandardScaler()
+            global_scaler_y = StandardScaler()
+            target_col = period_config['data']['target_col']
+            fit_scaler_y = target_col != 'power'  # power is pre-normalised to [0,1]
 
             for key, df in tqdm(dfs.items(), desc="Fitting Global Scaler"):
                 df_temp = df.copy()
-                target_col = period_config['data']['target_col']
 
                 # For non-TFT models, create lag features before fitting scaler
                 if period_config['model']['name'] not in ['tft', 'tcn-tft', 'stemgnn', 'chronos']:
@@ -283,10 +305,6 @@ def main() -> None:
                             if new_col != target_col and new_col not in features['known']:
                                 df_temp.drop(new_col, axis=1, inplace=True, errors='ignore')
 
-                # Drop target column
-                if target_col in df_temp.columns:
-                    df_temp.drop(target_col, axis=1, inplace=True)
-
                 t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
                 df_train, _ = preprocessing.split_data(
                     data=df_temp,
@@ -295,19 +313,46 @@ def main() -> None:
                     test_end=pd.Timestamp(period_config['data']['test_end'], tz='UTC'),
                     t_0=t_0
                 )
-                global_scaler_x.partial_fit(df_train.values)
 
-                del df_temp, df_train
+                # Fit X scaler (exclude target)
+                df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                global_scaler_x.partial_fit(df_train_x.values)
+
+                # Fit Y scaler on target column
+                if fit_scaler_y and target_col in df_train.columns:
+                    global_scaler_y.partial_fit(df_train[[target_col]].values)
+
+                del df_temp, df_train, df_train_x
                 gc.collect()
 
-            logging.debug("Global scaler fitted.")
+            logging.debug("Global scalers fitted.")
 
         # Prepare data for training and/or evaluation
         if should_train:
             # Use memory-efficient data processing (REUSE existing functions)
             logging.debug("Starting memory-efficient data processing...")
-            data_generator = tools.create_data_generator(dfs, period_config, features, scaler_x=global_scaler_x)
-            X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+            scaler_y_arg = global_scaler_y if fit_scaler_y else None
+
+            if val_dfs is not None:
+                # Separate sources: train sequences from dfs, test sequences from val_dfs.
+                # Scalers were fitted on dfs training data only; val_dfs is scaled with
+                # the same pre-fitted scalers (no re-fitting on val data).
+                train_generator = tools.create_data_generator(
+                    dfs, period_config, features,
+                    scaler_x=global_scaler_x, scaler_y=scaler_y_arg
+                )
+                val_generator = tools.create_data_generator(
+                    val_dfs, period_config, features,
+                    scaler_x=global_scaler_x, scaler_y=scaler_y_arg
+                )
+                X_train, y_train, _, _, _ = tools.combine_datasets_efficiently(train_generator)
+                _, _, X_test, y_test, test_data = tools.combine_datasets_efficiently(val_generator)
+            else:
+                data_generator = tools.create_data_generator(
+                    dfs, period_config, features,
+                    scaler_x=global_scaler_x, scaler_y=scaler_y_arg
+                )
+                X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
 
             # Note: Don't delete dfs yet - needed for evaluation pipeline later
             gc.collect()
@@ -369,12 +414,14 @@ def main() -> None:
                     steps_per_epoch=steps_per_epoch,
                 )
 
+                has_observed_features = X_train['observed'].shape[2] > 0
                 chronos_pipeline = chronos_pipeline.fit(
                     inputs=inputs_fit,
                     prediction_length=period_config['model']['horizon'],
                     finetune_mode=finetune_mode,
                     lora_config=lora_config,
                     context_length=period_config['model']['lookback'],
+                    min_past=period_config['model']['horizon'] if has_observed_features else 0,
                     learning_rate=lr,
                     num_steps=num_steps,
                     batch_size=batch_size,
@@ -410,7 +457,8 @@ def main() -> None:
                 eval_period_config['data']['test_end'] = eval_test_end
                 # Regenerate test data with evaluation boundaries
                 logging.debug("Preparing evaluation data for first period...")
-                eval_data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x)
+                eval_data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x,
+                                                                   scaler_y=global_scaler_y if fit_scaler_y else None)
                 _, _, _, _, test_data = tools.combine_datasets_efficiently(eval_data_generator)
                 gc.collect()
 
@@ -427,12 +475,40 @@ def main() -> None:
             eval_period_config = config.copy()
             eval_period_config['data']['test_start'] = eval_test_start
             eval_period_config['data']['test_end'] = eval_test_end
-            data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x)
+            data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x,
+                                                           scaler_y=global_scaler_y if fit_scaler_y else None)
             _, _, _, _, test_data = tools.combine_datasets_efficiently(data_generator)
             model = trained_model
             history = None  # No training history for evaluation-only periods
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             gc.collect()
+
+    # Save model if requested
+    if args.save_model:
+        os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
+
+        if is_chronos:
+            model_path = os.path.join('models', f'chronos_{study_name}')
+            chronos_pipeline.save_pretrained(model_path)
+            logging.info(f"Chronos-2 model saved to: {model_path}/")
+
+            scaler_path = os.path.join('models', 'scaler', f'scaler_chronos_{study_name}.pkl')
+        else:
+            model_path = os.path.join('models', f'{study_name}.pt')
+            torch.save(model.state_dict(), model_path)
+            logging.info(f"Model saved to: {model_path}")
+
+            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}.pkl')
+
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(global_scaler_x, f)
+        logging.info(f"Scaler saved to: {scaler_path}")
+
+        if config['data']['target_col'] != 'power':
+            scaler_y_path = scaler_path.replace('scaler_', 'scaler_y_')
+            with open(scaler_y_path, 'wb') as f:
+                pickle.dump(global_scaler_y, f)
+            logging.info(f"Scaler Y saved to: {scaler_y_path}")
 
         # --- GENERATE PREDICTIONS AND EVALUATE PER PARK ---
         logging.info('Start evaluation pipeline...')
@@ -596,27 +672,6 @@ def main() -> None:
         pickle.dump(results, f)
 
     logging.info(f"\nTraining completed! Results saved to: {path_to_pkl}")
-
-    # Save model if requested
-    if args.save_model:
-        os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
-
-        if is_chronos:
-            model_path = os.path.join('models', f'chronos_{study_name}')
-            chronos_pipeline.save_pretrained(model_path)
-            logging.info(f"Chronos-2 model saved to: {model_path}/")
-
-            scaler_path = os.path.join('models', 'scaler', f'scaler_chronos_{study_name}.pkl')
-        else:
-            model_path = os.path.join('models', f'{study_name}.pt')
-            torch.save(model.state_dict(), model_path)
-            logging.info(f"Model saved to: {model_path}")
-
-            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}.pkl')
-
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(global_scaler_x, f)
-        logging.info(f"Scaler saved to: {scaler_path}")
 
     # Log final metrics (handle both single dict and list of dicts, or None)
     metrics_data = []

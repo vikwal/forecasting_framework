@@ -78,22 +78,36 @@ logger = setup_logging()
 
 
 def load_scaler_for_model(model_path, models_dir=None):
-    """Try to load a saved scaler for the given model. Returns scaler or None."""
+    """Try to load a saved scaler for the given model. Returns (scaler_x, scaler_y)."""
     if models_dir is None:
         models_dir = Path('models')
     model_stem = Path(model_path).stem
     scaler_path = Path(models_dir) / 'scaler' / f'scaler_{model_stem}.pkl'
+    scaler_y_path = Path(models_dir) / 'scaler' / f'scaler_y_{model_stem}.pkl'
+
+    scaler_x = None
     if scaler_path.exists():
         try:
             with open(scaler_path, 'rb') as f:
-                scaler = pickle.load(f)
+                scaler_x = pickle.load(f)
             logger.info(f"Loaded scaler from: {scaler_path}")
-            return scaler
         except Exception as e:
             logger.warning(f"Could not load scaler from {scaler_path}: {e}")
     else:
         logger.debug(f"No saved scaler found at {scaler_path}, will fit from data")
-    return None
+
+    scaler_y = None
+    if scaler_y_path.exists():
+        try:
+            with open(scaler_y_path, 'rb') as f:
+                scaler_y = pickle.load(f)
+            logger.info(f"Loaded scaler_y from: {scaler_y_path}")
+        except Exception as e:
+            logger.warning(f"Could not load scaler_y from {scaler_y_path}: {e}")
+    else:
+        logger.warning(f"scaler_y not found at {scaler_y_path} — will fall back to fitting from data.")
+
+    return scaler_x, scaler_y
 
 
 def get_config_path_from_model_name(model_name):
@@ -170,13 +184,89 @@ def calculate_metrics(y_true, y_pred):
     return r2, rmse, mae
 
 
-def evaluate_model(model_path, models_dir, identifier_key='station_id', identifier_value=None, config=None, scaler_x=None):
+def compute_skill_nwp(dfs, test_data, y_test_np, rmse_model, config_data, target_col):
+    """
+    Compute Skill_NWP = 1 - RMSE_model / RMSE_NWP.
+
+    RMSE_NWP is the direct RMSE between the nearest NWP grid point's wind_speed_h10
+    column and the measured wind_speed column over the test period.
+    No windowing or aggregation across forecast runs — timestamps are deduplicated
+    so each observed value is counted once.
+
+    Column priority for NWP baseline:
+      1. '_1' suffix (geodesic_next method, nearest point by construction)
+      2. Inner quad labels '_NW', '_NE', '_SW', '_SE' (relative_position method)
+      3. First available wind_speed_h10_* column
+
+    Returns float or None (None when target_col != 'wind_speed' or data is missing).
+    """
+    if target_col != 'wind_speed':
+        return None
+
+    test_start_ts = pd.Timestamp(config_data['test_start'], tz='UTC')
+    test_end_ts   = pd.Timestamp(config_data['test_end'],   tz='UTC')
+
+    y_nwp_all  = []
+    y_true_all = []
+
+    for key in test_data:
+        if key not in dfs:
+            continue
+        df_raw = dfs[key]
+
+        # --- select NWP baseline column ---
+        # The nearest grid point label is stored in df.attrs during preprocessing.
+        # For geodesic_next: label='1' → column 'wind_speed_h10_1'.
+        # For relative_position: label=compass direction of geodesically nearest point (e.g. 'SW').
+        if 'wind_speed' not in df_raw.columns:
+            continue
+
+        nearest_label = df_raw.attrs.get('nwp_nearest_label')
+        if nearest_label is None:
+            logger.warning(f"nwp_nearest_label not set in df.attrs for {key} — skipping Skill_NWP")
+            continue
+
+        nwp_col = f'wind_speed_h10_{nearest_label}'
+        if nwp_col not in df_raw.columns:
+            logger.warning(f"Expected NWP baseline column '{nwp_col}' not found for {key} — skipping")
+            continue
+
+        # --- flatten MultiIndex to unique timestamps (no averaging) ---
+        if isinstance(df_raw.index, pd.MultiIndex):
+            df_flat = (df_raw[[nwp_col, 'wind_speed']]
+                       .reset_index()
+                       .drop_duplicates('timestamp')
+                       .set_index('timestamp'))
+        else:
+            df_flat = df_raw[[nwp_col, 'wind_speed']]
+
+        df_test = df_flat.loc[test_start_ts:test_end_ts]
+        if df_test.empty:
+            continue
+
+        mask = df_test[nwp_col].notna() & df_test['wind_speed'].notna()
+        y_nwp_all.append(df_test.loc[mask, nwp_col].values)
+        y_true_all.append(df_test.loc[mask, 'wind_speed'].values)
+
+    if not y_nwp_all:
+        return None
+
+    y_nwp  = np.concatenate(y_nwp_all)
+    y_true = np.concatenate(y_true_all)
+    rmse_nwp = float(np.sqrt(mean_squared_error(y_true, y_nwp)))
+    if rmse_nwp == 0:
+        return None
+    return 1.0 - rmse_model / rmse_nwp
+
+
+def evaluate_model(model_path, models_dir, identifier_key='station_id', identifier_value=None, config=None, scaler_x=None, scaler_y=None):
     """
     Evaluate a single model on test data.
 
     Args:
         config:   Optional pre-loaded config dict. If None, derived from model filename.
-        scaler_x: Optional pre-fitted StandardScaler. If None, fitted internally.
+        scaler_x: Optional pre-fitted StandardScaler for features. If None, fitted internally.
+        scaler_y: Optional pre-fitted StandardScaler for target. Required when target_col != 'power'.
 
     Returns:
         Tuple of (identifier_value, metrics_dict)
@@ -245,12 +335,12 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
         return identifier_value, None
 
     # Fit global scaler (or use provided one)
+    target_col = config['data']['target_col']
     try:
         if scaler_x is not None:
             global_scaler_x = scaler_x
         else:
             global_scaler_x = StandardScaler()
-            target_col = config['data']['target_col']
             test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
             test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
 
@@ -273,13 +363,37 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
                 global_scaler_x.partial_fit(df_train)
                 del df_temp, df_train
                 gc.collect()
+
+        # Fit scaler_y on target column if needed (when target is not pre-normalised)
+        global_scaler_y = scaler_y
+        if global_scaler_y is None and target_col != 'power':
+            logger.warning("No saved scaler_y found — fitting global scaler_y from training data as fallback.")
+            global_scaler_y = StandardScaler()
+            test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+            test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+            if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+                test_end = test_end.replace(hour=23, minute=0, second=0)
+            t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+            for key, df in dfs.items():
+                if target_col not in df.columns:
+                    continue
+                df_train, _ = preprocessing.split_data(
+                    data=df[[target_col]],
+                    train_frac=config['data']['train_frac'],
+                    test_start=test_start,
+                    test_end=test_end,
+                    t_0=t_0
+                )
+                global_scaler_y.partial_fit(df_train)
+                gc.collect()
     except Exception as e:
         logger.error(f"Error fitting scaler: {e}")
         return identifier_value, None
 
     # Prepare data
     try:
-        data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x)
+        data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x,
+                                                     scaler_y=global_scaler_y if target_col != 'power' else None)
         X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
 
         # Extract feature dimensions
@@ -361,19 +475,33 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
         # Reshape if needed (to match train_cl.py)
         predictions_np = predictions_np.reshape(-1, y_test_np.shape[-1])
 
-        # Clip negative values to 0 (power cannot be negative)
-        predictions_np[predictions_np < 0] = 0
+        # Inverse-transform if target was scaled (e.g. wind_speed)
+        if global_scaler_y is not None:
+            predictions_np = global_scaler_y.inverse_transform(predictions_np)
+            y_test_np = global_scaler_y.inverse_transform(y_test_np.reshape(-1, predictions_np.shape[-1]))
+
+        # Clip negative values to 0 (only meaningful for power)
+        if target_col == 'power':
+            predictions_np[predictions_np < 0] = 0
 
         r2, rmse, mae = calculate_metrics(y_test_np, predictions_np)
+
+        try:
+            skill_nwp = compute_skill_nwp(dfs, test_data, y_test_np, rmse, config['data'], target_col)
+        except Exception as e_nwp:
+            logger.warning(f"Could not compute Skill_NWP: {e_nwp}")
+            skill_nwp = None
 
         metrics = {
             identifier_key: identifier_value,
             'r2': float(r2),
             'rmse': float(rmse),
-            'mae': float(mae)
+            'mae': float(mae),
+            'skill_nwp': float(skill_nwp) if skill_nwp is not None else None
         }
 
-        logger.info(f"Metrics - R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+        skill_nwp_str = f"{skill_nwp:.4f}" if skill_nwp is not None else "N/A"
+        logger.info(f"Metrics - R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, Skill_NWP: {skill_nwp_str}")
     except Exception as e:
         logger.error(f"Error calculating metrics: {e}")
         return identifier_value, None
@@ -469,7 +597,8 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
         return None
 
     # Try to load saved scaler, fall back to fitting
-    global_scaler_x = load_scaler_for_model(model_path)
+    global_scaler_x, global_scaler_y = load_scaler_for_model(model_path)
+    target_col = global_config['data']['target_col']
 
     if global_scaler_x is None:
         logger.info("="*80)
@@ -477,7 +606,6 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
         logger.info("="*80)
 
         global_scaler_x = StandardScaler()
-        target_col = global_config['data']['target_col']
         test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
         test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
 
@@ -530,6 +658,31 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
         logger.info(f"Global scaler fitted on {len(local_config_files)} stations")
         logger.info("="*80)
 
+    if global_scaler_y is None and target_col != 'power':
+        logger.warning("No saved scaler_y — fitting global scaler_y from training data as fallback.")
+        global_scaler_y = StandardScaler()
+        test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
+        test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
+        if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+            test_end = test_end.replace(hour=23, minute=0, second=0)
+        t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
+        for local_config_path in local_config_files:
+            try:
+                with open(local_config_path, 'r') as f:
+                    local_config = yaml.safe_load(f)
+                dfs = preprocessing.get_data(data_dir=local_config['data']['path'], config=local_config,
+                                             freq=global_config['data']['freq'], features=features)
+                for key, df in dfs.items():
+                    if target_col not in df.columns:
+                        continue
+                    df_train, _ = preprocessing.split_data(data=df[[target_col]],
+                                                           train_frac=global_config['data']['train_frac'],
+                                                           test_start=test_start, test_end=test_end, t_0=t_0)
+                    global_scaler_y.partial_fit(df_train)
+                gc.collect()
+            except Exception:
+                continue
+
     # Dictionary to collect R² values per forecast date and station
     # Structure: {forecast_date: {station_id: r2_value}}
     daily_r2_data = {}
@@ -556,7 +709,8 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
                 continue
 
             # Prepare data with GLOBAL scaler
-            data_generator = tools.create_data_generator(dfs, global_config, features, scaler_x=global_scaler_x)
+            data_generator = tools.create_data_generator(dfs, global_config, features, scaler_x=global_scaler_x,
+                                                         scaler_y=global_scaler_y if target_col != 'power' else None)
             X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
 
             # Extract feature dimensions
@@ -608,8 +762,14 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
             # Reshape if needed
             predictions_np = predictions_np.reshape(-1, y_test_np.shape[-1])
 
-            # Clip negative values to 0
-            predictions_np[predictions_np < 0] = 0
+            # Inverse-transform if target was scaled
+            if global_scaler_y is not None:
+                predictions_np = global_scaler_y.inverse_transform(predictions_np)
+                y_test_np = global_scaler_y.inverse_transform(y_test_np.reshape(-1, predictions_np.shape[-1]))
+
+            # Clip negative values to 0 (only meaningful for power)
+            if target_col == 'power':
+                predictions_np[predictions_np < 0] = 0
 
             # Extract forecast dates from test_data
             # test_data is a dict with key -> (X_test, y_test, index_test, scaler_y)
@@ -736,11 +896,11 @@ def evaluate_local_models_daily_r2(models_dir, local_configs_dirs):
                 continue
 
             # Try to load saved scaler, fall back to fitting
-            global_scaler_x = load_scaler_for_model(model_path)
+            global_scaler_x, global_scaler_y = load_scaler_for_model(model_path)
+            target_col = config['data']['target_col']
 
             if global_scaler_x is None:
                 global_scaler_x = StandardScaler()
-                target_col = config['data']['target_col']
                 test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
                 test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
 
@@ -763,8 +923,24 @@ def evaluate_local_models_daily_r2(models_dir, local_configs_dirs):
                     global_scaler_x.partial_fit(df_train)
                     del df_temp, df_train
 
+            if global_scaler_y is None and target_col != 'power':
+                global_scaler_y = StandardScaler()
+                test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+                test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+                if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+                    test_end = test_end.replace(hour=23, minute=0, second=0)
+                t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+                for key, df in dfs.items():
+                    if target_col not in df.columns:
+                        continue
+                    df_train, _ = preprocessing.split_data(data=df[[target_col]],
+                                                           train_frac=config['data']['train_frac'],
+                                                           test_start=test_start, test_end=test_end, t_0=t_0)
+                    global_scaler_y.partial_fit(df_train)
+
             # Prepare data
-            data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x)
+            data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x,
+                                                         scaler_y=global_scaler_y if target_col != 'power' else None)
             X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
 
             # Extract feature dimensions
@@ -854,7 +1030,14 @@ def evaluate_local_models_daily_r2(models_dir, local_configs_dirs):
 
             # Reshape
             predictions_np = predictions_np.reshape(-1, y_test_np.shape[-1])
-            predictions_np[predictions_np < 0] = 0
+
+            # Inverse-transform if target was scaled
+            if global_scaler_y is not None:
+                predictions_np = global_scaler_y.inverse_transform(predictions_np)
+                y_test_np = global_scaler_y.inverse_transform(y_test_np.reshape(-1, predictions_np.shape[-1]))
+
+            if target_col == 'power':
+                predictions_np[predictions_np < 0] = 0
 
             # Calculate R² for each forecast run
             num_forecasts = predictions_np.shape[0]
@@ -988,7 +1171,8 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
         return
 
     # Try to load saved scaler, fall back to fitting
-    global_scaler_x = load_scaler_for_model(model_path)
+    global_scaler_x, global_scaler_y = load_scaler_for_model(model_path)
+    target_col = global_config['data']['target_col']
 
     if global_scaler_x is None:
         logger.info("="*80)
@@ -996,7 +1180,6 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
         logger.info("="*80)
 
         global_scaler_x = StandardScaler()
-        target_col = global_config['data']['target_col']
         test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
         test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
 
@@ -1049,6 +1232,31 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
         logger.info(f"Global scaler fitted on {len(local_config_files)} stations")
         logger.info("="*80)
 
+    if global_scaler_y is None and target_col != 'power':
+        logger.warning("No saved scaler_y — fitting global scaler_y from training data as fallback.")
+        global_scaler_y = StandardScaler()
+        test_start = pd.Timestamp(global_config['data']['test_start'], tz='UTC')
+        test_end = pd.Timestamp(global_config['data']['test_end'], tz='UTC')
+        if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
+            test_end = test_end.replace(hour=23, minute=0, second=0)
+        t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
+        for local_config_path in local_config_files:
+            try:
+                with open(local_config_path, 'r') as f:
+                    local_config = yaml.safe_load(f)
+                dfs = preprocessing.get_data(data_dir=local_config['data']['path'], config=local_config,
+                                             freq=global_config['data']['freq'], features=features)
+                for key, df in dfs.items():
+                    if target_col not in df.columns:
+                        continue
+                    df_train, _ = preprocessing.split_data(data=df[[target_col]],
+                                                           train_frac=global_config['data']['train_frac'],
+                                                           test_start=test_start, test_end=test_end, t_0=t_0)
+                    global_scaler_y.partial_fit(df_train)
+                gc.collect()
+            except Exception:
+                continue
+
     # Evaluate on each local dataset
     for i, local_config_path in enumerate(local_config_files):
         station_id = local_config_path.stem.replace('config_wind_', '')
@@ -1071,7 +1279,8 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
                 continue
 
             # Prepare data with GLOBAL scaler
-            data_generator = tools.create_data_generator(dfs, global_config, features, scaler_x=global_scaler_x)
+            data_generator = tools.create_data_generator(dfs, global_config, features, scaler_x=global_scaler_x,
+                                                         scaler_y=global_scaler_y if target_col != 'power' else None)
             X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
 
             # Extract feature dimensions
@@ -1123,20 +1332,34 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
             # Reshape if needed (to match train_cl.py)
             predictions_np = predictions_np.reshape(-1, y_test_np.shape[-1])
 
-            # Clip negative values to 0 (power cannot be negative)
-            predictions_np[predictions_np < 0] = 0
+            # Inverse-transform if target was scaled
+            if global_scaler_y is not None:
+                predictions_np = global_scaler_y.inverse_transform(predictions_np)
+                y_test_np = global_scaler_y.inverse_transform(y_test_np.reshape(-1, predictions_np.shape[-1]))
+
+            # Clip negative values to 0 (only meaningful for power)
+            if target_col == 'power':
+                predictions_np[predictions_np < 0] = 0
 
             # Calculate metrics
             r2, rmse, mae = calculate_metrics(y_test_np, predictions_np)
+
+            try:
+                skill_nwp = compute_skill_nwp(dfs, test_data, y_test_np, rmse, global_config['data'], target_col)
+            except Exception as e_nwp:
+                logger.warning(f"Could not compute Skill_NWP: {e_nwp}")
+                skill_nwp = None
 
             metrics = {
                 'station_id': station_id,
                 'r2': float(r2),
                 'rmse': float(rmse),
-                'mae': float(mae)
+                'mae': float(mae),
+                'skill_nwp': float(skill_nwp) if skill_nwp is not None else None
             }
 
-            logger.info(f"Metrics - R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+            skill_nwp_str = f"{skill_nwp:.4f}" if skill_nwp is not None else "N/A"
+            logger.info(f"Metrics - R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, Skill_NWP: {skill_nwp_str}")
 
             yield (station_id, metrics)
 
@@ -1332,8 +1555,8 @@ def main():
 
             station_config = {**config, 'data': {**config['data'], 'files': [station_id]}}
 
-            chronos_scaler = load_scaler_for_model(local_model_dir.name) if local_model_dir.exists() else None
-            station_id_val, metrics = evaluate_model_chronos(station_config, pipeline_to_use, station_id, scaler_x=chronos_scaler)
+            chronos_scaler_x, _ = load_scaler_for_model(local_model_dir.name) if local_model_dir.exists() else (None, None)
+            station_id_val, metrics = evaluate_model_chronos(station_config, pipeline_to_use, station_id, scaler_x=chronos_scaler_x)
 
             if metrics:
                 new_df = pd.DataFrame([metrics])
@@ -1406,7 +1629,7 @@ def main():
 
                 # Try to load saved scaler, fall back to fitting from data
                 features = preprocessing.get_features(config=config)
-                global_scaler_x = load_scaler_for_model(model_path)
+                global_scaler_x, global_scaler_y = load_scaler_for_model(model_path)
 
                 if global_scaler_x is None:
                     logger.info("Fitting global scaler on all stations from config...")
@@ -1462,7 +1685,8 @@ def main():
                         identifier_key='station_id',
                         identifier_value=sid,
                         config=station_config,
-                        scaler_x=global_scaler_x
+                        scaler_x=global_scaler_x,
+                        scaler_y=global_scaler_y
                     )
                     if metrics:
                         new_df = pd.DataFrame([metrics])
@@ -1731,13 +1955,14 @@ def main():
 
         logger.info(f"[{i+1}/{total_models}]")
         try:
-            saved_scaler = load_scaler_for_model(model_path)
+            saved_scaler_x, saved_scaler_y = load_scaler_for_model(model_path)
             identifier_value, metrics = evaluate_model(
                 model_path,
                 models_dir,
                 identifier_key=identifier_key,
                 identifier_value=temp_identifier,
-                scaler_x=saved_scaler
+                scaler_x=saved_scaler_x,
+                scaler_y=saved_scaler_y
             )
 
             if metrics:

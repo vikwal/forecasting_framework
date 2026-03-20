@@ -43,10 +43,13 @@ class DataCache:
         hash_data = {
             'data_path': config['data']['path'],
             'files': sorted(config['data'].get('files', [])),
+            'val_files': sorted(config['data'].get('val_files', [])),
             'freq': config['data']['freq'],
             'target_col': config['data']['target_col'],
+            'test_start': config['data'].get('test_start', None),
             'features': features,
-            'next_n_grid_points': config['params']['next_n_grid_points'], # newly added 15.12.25
+            'next_n_grid_points': config['params']['next_n_grid_points'],
+            'get_next_grid_points_method': config['params'].get('get_next_grid_points_method', None),
             'model': {
                 'name': model_name,
                 'lookback': config['model']['lookback'],
@@ -373,6 +376,76 @@ class LazyFoldLoader:
             return info
 
 
+def _replace_val_with_val_files(combined_kfolds, config, features, logger):
+    """
+    Replace the val portion of each k-fold with data from val_files stations.
+
+    Val stations are processed for the full training period (X_train, before test_start).
+    The sequences are split into n_splits+1 equal temporal chunks; fold k gets chunk k+1,
+    mirroring the TimeSeriesSplit structure used for training stations.
+    """
+    freq = config['data']['freq']
+    data_dir = config['data']['path']
+    n_splits = config['hpo']['kfolds']
+
+    val_dfs = preprocessing.get_data(
+        data_dir=data_dir,
+        config=config,
+        freq=freq,
+        features=features,
+        files_key='val_files'
+    )
+
+    X_vals, y_vals = [], []
+    for key, df in val_dfs.items():
+        prepared_data, _ = preprocessing.pipeline(
+            data=df,
+            config=config,
+            known_cols=features['known'],
+            observed_cols=features['observed'],
+            static_cols=features['static'],
+            target_col=config['data']['target_col']
+        )
+        if prepared_data is None:
+            continue
+        X_tr = prepared_data.get('X_train')
+        y_tr = prepared_data.get('y_train')
+        if X_tr is None or y_tr is None or len(y_tr) == 0:
+            continue
+        X_vals.append(X_tr)
+        y_vals.append(y_tr)
+
+    if not X_vals:
+        logger.warning("val_files produced no training-period samples — k-fold val unchanged.")
+        return combined_kfolds
+
+    if isinstance(X_vals[0], dict):
+        X_val_full = {k: np.concatenate([x[k] for x in X_vals], axis=0) for k in X_vals[0]}
+    else:
+        X_val_full = np.concatenate(X_vals, axis=0)
+    y_val_full = np.concatenate(y_vals, axis=0)
+
+    n_val = len(y_val_full)
+    n_chunks = n_splits + 1
+    chunk_size = n_val // n_chunks
+
+    modified_kfolds = []
+    for k, (train, _) in enumerate(combined_kfolds):
+        start = (k + 1) * chunk_size
+        end = (k + 2) * chunk_size if k < n_splits - 1 else n_val
+        if isinstance(X_val_full, dict):
+            X_chunk = {key: arr[start:end] for key, arr in X_val_full.items()}
+        else:
+            X_chunk = X_val_full[start:end]
+        modified_kfolds.append((train, (X_chunk, y_val_full[start:end])))
+
+    logger.info(
+        f"Val portions replaced with val_files data: {n_splits} chunks "
+        f"(~{chunk_size} samples each) from {len(val_dfs)} val stations."
+    )
+    return modified_kfolds
+
+
 def create_or_load_preprocessed_data(config: Dict,
                                    features: Dict,
                                    model_name: str = None,
@@ -463,6 +536,15 @@ def create_or_load_preprocessed_data(config: Dict,
             val_split=config['hpo']['val_split'],
             min_train_date=min_train_date
         )
+
+        # If val_files is specified, replace each fold's val portion with data from val stations.
+        # Val stations are processed for the training period (before test_start) so their
+        # temporal windows align with the k-fold val windows from the training stations.
+        # TimeSeriesSplit with n_splits folds divides into n_splits+1 parts; fold k uses
+        # part k+1. We mirror this: split val_files sequences into n_splits+1 chunks and
+        # assign chunk k+1 to fold k. Result is embedded in combined_kfolds before caching.
+        if config['data'].get('val_files'):
+            combined_kfolds = _replace_val_with_val_files(combined_kfolds, config, features, logger)
 
         # Save to cache
         cache_id = cache.save_preprocessed_data(config, features, prepared_datasets, combined_kfolds, model_name)

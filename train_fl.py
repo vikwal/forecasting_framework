@@ -34,14 +34,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Federated Learning Training")
     parser.add_argument('-m', '--model', type=str, default='tft', help='Select Model (default: tft)')
     parser.add_argument('-c', '--config', type=str, help='Select config')
-    parser.add_argument('-i', '--index', type=str, default='', help='Define index')
+    parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix for study name (default: empty)')
     parser.add_argument('--save_model', action='store_true', default=False, help='Save trained model to models directory (default: False)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
-    index = ''
-    if args.index:
-        index = f'_{args.index}'
+    suffix = ''
+    if args.suffix:
+        suffix = f'_{args.suffix}'
     if '.yaml' in args.config:
         args.config = args.config.split('.')[0]
     if '/' in args.config:
@@ -51,7 +51,9 @@ def main() -> None:
 
     # FL-specific log naming
     study_name_suffix = '_'.join(config_name.split('_')[1:])
-    log_file = f'logs/train_fl_m-{args.model}_{study_name_suffix}{index}.log'
+    if args.suffix:
+        study_name_suffix += f'_{args.suffix}'
+    log_file = f'logs/train_fl_m-{args.model}_{study_name_suffix}.log'
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -196,7 +198,7 @@ def main() -> None:
     study = None
     if config['model'].get('lookup_hpo', False):
         logging.info(f"Looking up hyperparameters for study: {study_name}")
-        study = hpo.load_study(config['hpo']['studies_path'], study_name)
+        study = None #hpo.load_study(config['hpo']['studies_path'], study_name)
     hyperparameters = hpo.get_hyperparameters(config=config, study=study)
 
     # Add FL-specific hyperparameters
@@ -267,6 +269,23 @@ def main() -> None:
 
     logging.info(f"Loaded data for {len(clients_data)} clients.")
 
+    # Optional separate validation/test stations (val_files), analogous to train_cl.py.
+    # When present: training sequences stay per-client (from fl.clients / data.files),
+    # and the final evaluation uses the global FL model (weights before fine-tuning)
+    # applied to these unseen stations — allowing out-of-sample generalisation testing.
+    val_dfs = None
+    if config['data'].get('val_files'):
+        logging.info("val_files found — loading separate validation/test stations for FL evaluation.")
+        val_config = copy.deepcopy(config)
+        val_config['data']['files'] = config['data']['val_files']
+        val_dfs = preprocessing.get_data(
+            data_dir=data_dir,
+            config=val_config,
+            freq=freq,
+            features=features
+        )
+        logging.info(f"Loaded {len(val_dfs)} val stations.")
+
     # Loop over test periods (training and/or evaluation)
     for period_idx, (current_test_start, current_test_end) in enumerate(test_periods):
         logging.info(f"\n{'='*80}")
@@ -306,14 +325,17 @@ def main() -> None:
 
         # Phase 1: Fit local scalers for all clients
         if should_train:
+            target_col = period_config['data']['target_col']
+            fit_scaler_y = target_col != 'power'  # power is pre-normalised to [0, 1]
+
             for client_id, client_info in clients_data.items():
                 logging.info(f"Preparing data for client: {client_id}")
                 logging.debug(f"Fitting scaler for client {client_id}...")
                 scaler_x = StandardScaler()
+                scaler_y = StandardScaler()
 
                 for key, df in tqdm(client_info['dfs'].items(), desc=f"Fitting Scaler for {client_id}"):
                     df_temp = df.copy()
-                    target_col = period_config['data']['target_col']
 
                     # For non-TFT models, create lag features before fitting scaler
                     if period_config['model']['name'] not in ['tft', 'tcn-tft', 'stemgnn']:
@@ -330,10 +352,6 @@ def main() -> None:
                                 if new_col != target_col and new_col not in features['known']:
                                     df_temp.drop(new_col, axis=1, inplace=True, errors='ignore')
 
-                    # Drop target column
-                    if target_col in df_temp.columns:
-                        df_temp.drop(target_col, axis=1, inplace=True)
-
                     t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
                     df_train, _ = preprocessing.split_data(
                         data=df_temp,
@@ -342,39 +360,73 @@ def main() -> None:
                         test_end=pd.Timestamp(period_config['data']['test_end'], tz='UTC'),
                         t_0=t_0
                     )
-                    scaler_x.partial_fit(df_train.values)
 
-                    del df_temp, df_train
+                    # Fit Y scaler on target before dropping it
+                    if fit_scaler_y and target_col in df_train.columns:
+                        scaler_y.partial_fit(df_train[[target_col]].values)
+
+                    # Fit X scaler on all features except target
+                    df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                    scaler_x.partial_fit(df_train_x.values)
+
+                    del df_temp, df_train, df_train_x
                     gc.collect()
 
                 client_info['scaler_x'] = scaler_x
+                client_info['scaler_y'] = scaler_y if fit_scaler_y else None
                 logging.debug(f"Scaler fitted for client {client_id}.")
 
             # Phase 2: Aggregate scalers if global_scaler is enabled
             if period_config['fl'].get('global_scaler', False):
                 logging.info("Aggregating local scalers into a global scaler...")
-                client_stats = []
+
+                # Aggregate scaler_x
+                client_stats_x = []
                 for client_id, client_info in clients_data.items():
                     local_scaler = client_info['scaler_x']
-                    client_stats.append({
+                    client_stats_x.append({
                         'n': local_scaler.n_samples_seen_,
                         'mu': local_scaler.mean_,
                         'var': local_scaler.var_
                     })
 
-                mu_global, std_global = federated.aggregate_scalers(client_stats)
+                mu_global, std_global = federated.aggregate_scalers(client_stats_x)
 
-                global_scaler = StandardScaler()
-                global_scaler.mean_ = mu_global
-                global_scaler.scale_ = std_global
-                global_scaler.var_ = std_global ** 2
-                global_scaler.n_samples_seen_ = sum(s['n'] for s in client_stats)
-                global_scaler.n_features_in_ = len(mu_global)
+                global_scaler_x = StandardScaler()
+                global_scaler_x.mean_ = mu_global
+                global_scaler_x.scale_ = std_global
+                global_scaler_x.var_ = std_global ** 2
+                global_scaler_x.n_samples_seen_ = sum(s['n'] for s in client_stats_x)
+                global_scaler_x.n_features_in_ = len(mu_global)
 
                 for client_id, client_info in clients_data.items():
-                    client_info['scaler_x'] = global_scaler
+                    client_info['scaler_x'] = global_scaler_x
 
-                logging.info(f"Global scaler applied to all {len(clients_data)} clients.")
+                # Aggregate scaler_y (1-dimensional target)
+                if fit_scaler_y:
+                    client_stats_y = []
+                    for client_id, client_info in clients_data.items():
+                        local_sy = client_info['scaler_y']
+                        if local_sy is not None and local_sy.n_samples_seen_ is not None:
+                            client_stats_y.append({
+                                'n': local_sy.n_samples_seen_,
+                                'mu': local_sy.mean_,
+                                'var': local_sy.var_
+                            })
+
+                    if client_stats_y:
+                        mu_y, std_y = federated.aggregate_scalers(client_stats_y)
+                        global_scaler_y = StandardScaler()
+                        global_scaler_y.mean_ = mu_y
+                        global_scaler_y.scale_ = std_y
+                        global_scaler_y.var_ = std_y ** 2
+                        global_scaler_y.n_samples_seen_ = sum(s['n'] for s in client_stats_y)
+                        global_scaler_y.n_features_in_ = len(mu_y)
+
+                        for client_id, client_info in clients_data.items():
+                            client_info['scaler_y'] = global_scaler_y
+
+                logging.info(f"Global scalers (X and Y) applied to all {len(clients_data)} clients.")
 
         # Phase 3: Process data with the assigned scaler
         for client_id, client_info in clients_data.items():
@@ -386,7 +438,8 @@ def main() -> None:
                 client_info['dfs'],
                 period_config,
                 features,
-                scaler_x=client_info['scaler_x']
+                scaler_x=client_info['scaler_x'],
+                scaler_y=client_info.get('scaler_y')
             )
             X_train, y_train, X_test, y_test, client_test_data = tools.combine_datasets_efficiently(data_generator)
 
@@ -410,6 +463,27 @@ def main() -> None:
 
             del X_train, y_train, X_test, y_test, data_generator
             gc.collect()
+
+        # Generate test data from val_files (uses global scaler, fitted on clients' data only).
+        # Val stations are held out from FL training entirely — their data is only used here.
+        val_test_data = None
+        if val_dfs is not None:
+            # All clients share the same scaler when global_scaler=True.
+            # If global_scaler=False, we use the first client's scaler as best approximation
+            # (a warning is logged to make this explicit).
+            representative_scaler = list(clients_data.values())[0]['scaler_x']
+            if not period_config['fl'].get('global_scaler', False):
+                logging.warning(
+                    "val_files is set but global_scaler=False: val stations will be scaled "
+                    "with the first client's local scaler. Consider enabling global_scaler=True "
+                    "for consistent scaling across all stations (especially with static features)."
+                )
+            val_generator = tools.create_data_generator(
+                val_dfs, period_config, features,
+                scaler_x=representative_scaler
+            )
+            _, _, _, _, val_test_data = tools.combine_datasets_efficiently(val_generator)
+            logging.info(f"Generated test data for {len(val_test_data)} val stations.")
 
         # Log data shapes for first client
         first_client = list(partitions.keys())[0]
@@ -456,6 +530,10 @@ def main() -> None:
             logging.info("Evaluation only (using previously trained model)...")
             clients_weights = trained_clients_weights
             history = None
+
+        # Save the global FL weights (last aggregation round) before any per-client fine-tuning.
+        # These are used to evaluate val stations, which have no client-specific weights.
+        global_fl_weights = copy.deepcopy(list(clients_weights.values())[0]) if clients_weights else None
 
         # --- OPTIONAL FINE-TUNING ---
         # Fine-tune the global model on each client's local data with early stopping
@@ -627,6 +705,47 @@ def main() -> None:
             del model
             gc.collect()
 
+        # --- EVALUATE VAL STATIONS (out-of-sample generalisation) ---
+        # Uses the global FL model (weights before fine-tuning), since val stations
+        # were never part of any client's training data.
+        if val_test_data is not None and global_fl_weights is not None:
+            logging.info("Evaluating val stations with global FL model (pre-fine-tune weights)...")
+            val_model = models.get_model(config=period_config, hyperparameters=hyperparameters)
+            val_model.load_state_dict(global_fl_weights)
+            val_model = val_model.to(device)
+
+            t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
+            test_start_str = eval_test_start if train_once_eval_multiple else period_config['data']['test_start']
+
+            for park_key, (X_test_park, y_test_park, index_test_park, scaler_y_park) in val_test_data.items():
+                park_df = val_dfs[park_key]
+                park_eval = eval.evaluation_pipeline(
+                    data=park_df,
+                    model=val_model,
+                    model_name=f'{args.model.upper()}',
+                    X_test=X_test_park,
+                    y_test=y_test_park,
+                    scaler_y=scaler_y_park,
+                    output_dim=output_dim,
+                    horizon=horizon,
+                    index_test=index_test_park,
+                    test_start=test_start_str,
+                    t_0=t_0,
+                    park_id=park_key,
+                    synth_dir=None,
+                    get_physical_persistence=False,
+                    target_col=period_config['data']['target_col'],
+                    evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
+                    device=device
+                )
+                park_eval['key'] = park_key
+                park_eval['client_id'] = 'val'
+                eval_results.append(park_eval)
+
+            del val_model
+            gc.collect()
+            logging.info(f"Val station evaluation completed: {len(val_test_data)} stations.")
+
         # Combine all evaluations for this period
         if eval_results:
             period_evaluation = pd.concat(eval_results, ignore_index=False)
@@ -740,6 +859,12 @@ def main() -> None:
                 with open(scaler_path, 'wb') as f:
                     pickle.dump(clients_data[client_id]['scaler_x'], f)
                 logging.info(f"Client {client_id} scaler saved to: {scaler_path}")
+
+                if clients_data[client_id].get('scaler_y') is not None:
+                    scaler_y_path = scaler_path.replace('scaler_', 'scaler_y_')
+                    with open(scaler_y_path, 'wb') as f:
+                        pickle.dump(clients_data[client_id]['scaler_y'], f)
+                    logging.info(f"Client {client_id} scaler_y saved to: {scaler_y_path}")
         else:
             # Global model: all clients share the same weights, save once
             first_client_id = list(clients_weights.keys())[0]
@@ -753,6 +878,12 @@ def main() -> None:
             with open(scaler_path, 'wb') as f:
                 pickle.dump(clients_data[first_client_id]['scaler_x'], f)
             logging.info(f"Global scaler saved to: {scaler_path}")
+
+            if clients_data[first_client_id].get('scaler_y') is not None:
+                scaler_y_path = scaler_path.replace('scaler_', 'scaler_y_')
+                with open(scaler_y_path, 'wb') as f:
+                    pickle.dump(clients_data[first_client_id]['scaler_y'], f)
+                logging.info(f"Global scaler_y saved to: {scaler_y_path}")
 
     # Log final metrics
     if results['history'] is not None:

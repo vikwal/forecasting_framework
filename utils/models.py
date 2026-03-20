@@ -702,15 +702,6 @@ class TFT(nn.Module):
         known_past = known[:, :self.lookback, :]  # (batch, lookback, known_dim)
         known_future = known[:, self.lookback:, :]  # (batch, horizon, known_dim)
 
-        # Embed observed features (time-varying, unknown future)
-        # observed: (batch, lookback, observed_dim)
-        observed_embedded = []
-        for i in range(self.observed_dim):
-            feat = observed[..., i:i+1]  # (batch, lookback, 1)
-            embedded = self.observed_embed[i](feat)  # (batch, lookback, hidden_dim)
-            observed_embedded.append(embedded)
-        observed_embedded = torch.stack(observed_embedded, dim=-2) # (batch, lookback, observed_dim, hidden_dim)
-
         # Embed known_past features (time-varying, known future)
         # known_past: (batch, lookback, known_dim)
         known_past_embedded = []
@@ -729,8 +720,18 @@ class TFT(nn.Module):
             known_future_embedded.append(embedded)
         known_future_embedded = torch.stack(known_future_embedded, dim=-2) # (batch, horizon, known_dim, hidden_dim)
 
-        # Concatenate observed and known_past embedded features for past VSN
-        past_input_embedded = torch.cat([observed_embedded, known_past_embedded], dim=-2) # (batch, lookback, observed+known, hidden_dim)
+        # Embed observed features (time-varying, unknown future) and combine with known_past for past VSN.
+        # If observed_dim=0, the encoder operates on known_past only.
+        if self.observed_dim > 0:
+            observed_embedded = []
+            for i in range(self.observed_dim):
+                feat = observed[..., i:i+1]  # (batch, lookback, 1)
+                embedded = self.observed_embed[i](feat)  # (batch, lookback, hidden_dim)
+                observed_embedded.append(embedded)
+            observed_embedded = torch.stack(observed_embedded, dim=-2) # (batch, lookback, observed_dim, hidden_dim)
+            past_input_embedded = torch.cat([observed_embedded, known_past_embedded], dim=-2) # (batch, lookback, observed+known, hidden_dim)
+        else:
+            past_input_embedded = known_past_embedded  # (batch, lookback, known_dim, hidden_dim)
 
         # ===================================================================
         # STEP 3: TEMPORAL VARIABLE SELECTION (ξ_temporal → V_temporal)

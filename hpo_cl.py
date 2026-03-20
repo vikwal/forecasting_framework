@@ -24,15 +24,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Hyperparameter Optimization")
     parser.add_argument('-m', '--model', type=str, default='tft', help='Select Model (default: tft)')
     parser.add_argument('-c', '--config', type=str, help='Select config')
-    parser.add_argument('-i', '--index', type=str, default='', help='Define index')
+    parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix')
     parser.add_argument('--no-cache', action='store_true', help='Disable caching for small datasets')
     parser.add_argument('--gpu', type=int, default=None, help='GPU to use (default: auto-select)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
-    index = ''
-    if args.index:
-        index = f'_{args.index}'
+    suffix = ''
+    if args.suffix:
+        suffix = f'_{args.suffix}'
     if '.yaml' in args.config:
         args.config = args.config.split('.')[0]
     if '/' in args.config:
@@ -41,7 +41,7 @@ def main() -> None:
             config_name = '_'.join(config_name.split('_')[1:])
     else:
         config_name = args.config
-    log_file = f'logs/hpo_cl_m-{args.model}_c-{config_name}{index}.log'
+    log_file = f'logs/hpo_cl_m-{args.model}_c-{config_name}{suffix}.log'
 
     # Configure logging
     logging.getLogger().handlers.clear()
@@ -98,7 +98,7 @@ def main() -> None:
     base_dir = os.path.basename(data_dir)
     target_dir = os.path.join('results', base_dir)
     os.makedirs(target_dir, exist_ok=True)
-    study_name_suffix = config_name
+    study_name_suffix = config_name + suffix
     study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
     config['model']['name'] = args.model
 
@@ -139,6 +139,10 @@ def main() -> None:
     else:
         logging.info("Using data directly from memory (no cache)")
     logging.info(f"Available folds: {len(lazy_fold_loader)}")
+
+    # val_files handling is done inside create_or_load_preprocessed_data (data_cache.py):
+    # when val_files is present in config, the val portion of each cached fold is already
+    # replaced with fold-aligned data from val_files stations before caching.
 
     # Log fold information
     for i in range(min(3, len(lazy_fold_loader))):

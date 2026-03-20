@@ -27,14 +27,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Federated Learning Hyperparameter Optimization")
     parser.add_argument('-m', '--model', type=str, default='tft', help='Select Model (default: tft)')
     parser.add_argument('-c', '--config', type=str, help='Select config')
-    parser.add_argument('-i', '--index', type=str, default='', help='Define index')
+    parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix')
     parser.add_argument('--gpu', type=int, default=None, help='GPU to use (default: auto-select)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
-    index = ''
-    if args.index:
-        index = f'_{args.index}'
+    suffix = ''
+    if args.suffix:
+        suffix = f'_{args.suffix}'
     if '.yaml' in args.config:
         args.config = args.config.split('.')[0]
     if '/' in args.config:
@@ -43,7 +43,7 @@ def main() -> None:
             config_name = '_'.join(config_name.split('_')[1:])
     else:
         config_name = args.config
-    log_file = f'logs/hpo_fl_m-{args.model}_c-{config_name}{index}.log'
+    log_file = f'logs/hpo_fl_m-{args.model}_c-{config_name}{suffix}.log'
 
     # Configure logging
     logging.getLogger().handlers.clear()
@@ -78,7 +78,7 @@ def main() -> None:
     fl_strategy = config['fl']['strategy']
 
     # Update log file name to include strategy (now that config is loaded)
-    log_file_new = f'logs/hpo_fl_a-{fl_strategy}_m-{args.model}_c-{config_name}{index}.log'
+    log_file_new = f'logs/hpo_fl_a-{fl_strategy}_m-{args.model}_c-{config_name}{suffix}.log'
     if log_file_new != log_file:
         # Replace the file handler with the updated filename
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -117,10 +117,9 @@ def main() -> None:
     os.makedirs(target_dir, exist_ok=True)
 
     study_name_suffix = config_name
-    suffix = ''
-    if config['fl'].get('personalize', False):
-        suffix += '_pers'
-    study_name = f'fl_a-{fl_strategy}_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}{suffix}'
+    if args.suffix:
+        study_name_suffix += f'_{args.suffix}'
+    study_name = f'fl_a-{fl_strategy}_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
     logging.info(f'Starting HPO for Federated Study: {study_name}')
 
     # Create study with config (supports both single and multi-objective)
@@ -187,13 +186,16 @@ def main() -> None:
 
     # --- FIT SCALERS PER CLIENT ---
     logging.info("Fitting scalers per client...")
+    target_col = config['data']['target_col']
+    fit_scaler_y = target_col != 'power'  # power is pre-normalised to [0, 1]
+
     for client_id, client_info in clients_data.items():
         logging.debug(f"Fitting scaler for client {client_id}...")
         scaler_x = StandardScaler()
+        scaler_y = StandardScaler()
 
         for key, df in tqdm(client_info['dfs'].items(), desc=f"Fitting Scaler for {client_id}"):
             df_temp = df.copy()
-            target_col = config['data']['target_col']
 
             # For non-TFT models, create lag features before fitting scaler
             if config['model']['name'] not in ['tft', 'stemgnn']:
@@ -210,10 +212,6 @@ def main() -> None:
                         if new_col != target_col and new_col not in features['known']:
                             df_temp.drop(new_col, axis=1, inplace=True, errors='ignore')
 
-            # Drop target column
-            if target_col in df_temp.columns:
-                df_temp.drop(target_col, axis=1, inplace=True)
-
             t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
             df_train, _ = preprocessing.split_data(
                 data=df_temp,
@@ -222,39 +220,72 @@ def main() -> None:
                 test_end=pd.Timestamp(config['data'].get('test_end', '2099-12-31'), tz='UTC'),
                 t_0=t_0
             )
-            scaler_x.partial_fit(df_train.values)
 
-            del df_temp, df_train
+            # Fit Y scaler on target before dropping it
+            if fit_scaler_y and target_col in df_train.columns:
+                scaler_y.partial_fit(df_train[[target_col]].values)
+
+            df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+            scaler_x.partial_fit(df_train_x.values)
+
+            del df_temp, df_train, df_train_x
             gc.collect()
 
         client_info['scaler_x'] = scaler_x
+        client_info['scaler_y'] = scaler_y if fit_scaler_y else None
         logging.debug(f"Scaler fitted for client {client_id}.")
 
     # --- AGGREGATE SCALERS IF global_scaler IS ENABLED ---
     if config['fl'].get('global_scaler', False):
         logging.info("Aggregating local scalers into a global scaler...")
-        client_stats = []
+
+        # Aggregate scaler_x
+        client_stats_x = []
         for client_id, client_info in clients_data.items():
             local_scaler = client_info['scaler_x']
-            client_stats.append({
+            client_stats_x.append({
                 'n': local_scaler.n_samples_seen_,
                 'mu': local_scaler.mean_,
                 'var': local_scaler.var_
             })
 
-        mu_global, std_global = federated.aggregate_scalers(client_stats)
+        mu_global, std_global = federated.aggregate_scalers(client_stats_x)
 
-        global_scaler = StandardScaler()
-        global_scaler.mean_ = mu_global
-        global_scaler.scale_ = std_global
-        global_scaler.var_ = std_global ** 2
-        global_scaler.n_samples_seen_ = sum(s['n'] for s in client_stats)
-        global_scaler.n_features_in_ = len(mu_global)
+        global_scaler_x = StandardScaler()
+        global_scaler_x.mean_ = mu_global
+        global_scaler_x.scale_ = std_global
+        global_scaler_x.var_ = std_global ** 2
+        global_scaler_x.n_samples_seen_ = sum(s['n'] for s in client_stats_x)
+        global_scaler_x.n_features_in_ = len(mu_global)
 
         for client_id, client_info in clients_data.items():
-            client_info['scaler_x'] = global_scaler
+            client_info['scaler_x'] = global_scaler_x
 
-        logging.info(f"Global scaler applied to all {len(clients_data)} clients.")
+        # Aggregate scaler_y
+        if fit_scaler_y:
+            client_stats_y = []
+            for client_id, client_info in clients_data.items():
+                local_sy = client_info['scaler_y']
+                if local_sy is not None and local_sy.n_samples_seen_ is not None:
+                    client_stats_y.append({
+                        'n': local_sy.n_samples_seen_,
+                        'mu': local_sy.mean_,
+                        'var': local_sy.var_
+                    })
+
+            if client_stats_y:
+                mu_y, std_y = federated.aggregate_scalers(client_stats_y)
+                global_scaler_y = StandardScaler()
+                global_scaler_y.mean_ = mu_y
+                global_scaler_y.scale_ = std_y
+                global_scaler_y.var_ = std_y ** 2
+                global_scaler_y.n_samples_seen_ = sum(s['n'] for s in client_stats_y)
+                global_scaler_y.n_features_in_ = len(mu_y)
+
+                for client_id, client_info in clients_data.items():
+                    client_info['scaler_y'] = global_scaler_y
+
+        logging.info(f"Global scalers (X and Y) applied to all {len(clients_data)} clients.")
 
     # --- PROCESS DATA WITH SCALER AND CREATE TRAINING PARTITIONS ---
     logging.info("Processing data and creating training partitions...")
@@ -268,7 +299,8 @@ def main() -> None:
             client_info['dfs'],
             config,
             features,
-            scaler_x=client_info['scaler_x']
+            scaler_x=client_info['scaler_x'],
+            scaler_y=client_info.get('scaler_y')
         )
         X_train, y_train, X_test, y_test, _ = tools.combine_datasets_efficiently(data_generator)
 
@@ -280,6 +312,60 @@ def main() -> None:
 
         del X_test, y_test, data_generator
         gc.collect()
+
+    # --- LOAD VAL SET FROM val_files (optional) ---
+    # Val stations are loaded for the full TRAINING period (X_train, before test_start) so
+    # that the temporal structure matches the k-fold splits on training stations:
+    # TimeSeriesSplit creates an expanding training window with a rolling val window.
+    # We mirror this by splitting val_files sequences into n_splits equal temporal chunks
+    # and assigning chunk k to fold k.  Scaler comes from client 0 (= global scaler when
+    # global_scaler=True, otherwise client-0 local scaler).
+    val_files_chunks = None  # list of (X_val_chunk, y_val_chunk) per fold
+    if config['data'].get('val_files'):
+        logging.info("val_files found — loading val stations for training period (k-fold aligned).")
+        first_client_id_for_scaler = client_ids_ordered[0]
+        val_scaler_x = clients_data[first_client_id_for_scaler]['scaler_x']
+        val_scaler_y = clients_data[first_client_id_for_scaler].get('scaler_y')
+
+        val_dfs = preprocessing.get_data(
+            data_dir=data_dir,
+            config=config,
+            freq=freq,
+            features=features,
+            files_key='val_files'
+        )
+        val_generator = tools.create_data_generator(
+            val_dfs, config, features,
+            scaler_x=val_scaler_x,
+            scaler_y=val_scaler_y
+        )
+        # Take the TRAINING portion (before test_start) — mirrors the fold time windows
+        X_val_full, y_val_full, _, _, _ = tools.combine_datasets_efficiently(val_generator)
+
+        n_val = len(y_val_full)
+        if n_val > 0:
+            # TimeSeriesSplit with n_splits folds divides data into n_splits+1 equal parts.
+            # Fold k uses the k-th part as val (0-indexed from part 1, i.e. parts 1..n_splits).
+            # We mirror this: split val_files into n_splits+1 chunks and assign chunk k+1 to fold k,
+            # so val_files temporal windows are aligned with the training fold val windows.
+            n_splits = config['hpo']['kfolds']
+            n_chunks = n_splits + 1
+            chunk_size = n_val // n_chunks
+            val_files_chunks = []
+            for k in range(n_splits):
+                start = (k + 1) * chunk_size  # chunk k+1 (skip chunk 0 = first training part)
+                end = (k + 2) * chunk_size if k < n_splits - 1 else n_val
+                if isinstance(X_val_full, dict):
+                    X_chunk = {key: arr[start:end] for key, arr in X_val_full.items()}
+                else:
+                    X_chunk = X_val_full[start:end]
+                val_files_chunks.append((X_chunk, y_val_full[start:end]))
+            logging.info(
+                f"Val sequences split into {n_splits} chunks (~{chunk_size} samples each, "
+                f"aligned to fold val windows) from {len(val_dfs)} val stations."
+            )
+        else:
+            logging.warning("val_files produced no training-period samples — falling back to k-fold val.")
 
     # --- GET FEATURE DIM ---
     first_client_id = client_ids_ordered[0]
@@ -367,6 +453,8 @@ def main() -> None:
                 partitions_for_fold = {}
                 for i, client_id in enumerate(client_ids_ordered):
                     X_train_fold, y_train_fold, X_val_fold, y_val_fold = fold_partitions[i]
+                    if val_files_chunks is not None:
+                        X_val_fold, y_val_fold = val_files_chunks[fold_idx]
                     partitions_for_fold[client_id] = (X_train_fold, y_train_fold, X_val_fold, y_val_fold)
 
                 # Config model name for callbacks

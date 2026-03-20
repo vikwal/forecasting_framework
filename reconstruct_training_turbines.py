@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Load config
-with open('configs/config_wind_100.yaml', 'r') as f:
+with open('configs/config_wind_160cl.yaml', 'r') as f:
     config = yaml.safe_load(f)
 
 # Get turbine types from config
@@ -87,6 +87,6 @@ print(f"\nTurbine type distribution:")
 print(df_station_turbines['turbine_type'].value_counts())
 
 # Save to CSV
-output_file = 'data/station_turbine_assignments.csv'
+output_file = 'data/station_turbine_assignments_160.csv'
 df_station_turbines.to_csv(output_file, index=False)
 print(f"\nSaved to {output_file}")

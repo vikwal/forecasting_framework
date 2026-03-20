@@ -197,16 +197,23 @@ def build_chronos_fit_inputs(X_dict: dict, y: np.ndarray, known_cols: list) -> l
       'past_covariates'   : {col: array(lookback+horizon)} — NWP full window
       'future_covariates' : {col: None} — signals known-future to the model
     """
-    observed = X_dict['observed']           # (n, lookback, 1)
+    observed = X_dict['observed']           # (n, lookback, n_obs) — n_obs may be 0
     known_full = X_dict.get('known', None)  # (n, lookback+horizon, n_known)
+    has_observed = observed.shape[2] > 0
     inputs = []
     for i in range(observed.shape[0]):
+        if has_observed:
+            target = np.concatenate([observed[i, :, 0], y[i, :]])
+        else:
+            target = y[i, :]
         entry = {
-            'target': np.concatenate([observed[i, :, 0], y[i, :]]),
+            'target': target,
         }
         if known_full is not None and len(known_cols) > 0:
+            lookback = observed.shape[1]
+            cov_start = 0 if has_observed else lookback
             entry['past_covariates'] = {
-                col: known_full[i, :, k].astype(np.float32)
+                col: known_full[i, cov_start:, k].astype(np.float32)
                 for k, col in enumerate(known_cols)
             }
             entry['future_covariates'] = {col: None for col in known_cols}
@@ -766,7 +773,7 @@ def concatenate_data(old, new):
         return result
 
 
-def create_data_generator(dfs, config, features, scaler_x=None):
+def create_data_generator(dfs, config, features, scaler_x=None, scaler_y=None):
     """
     Generator for memory-efficient data processing - framework agnostic.
     Reuses preprocessing.pipeline from TensorFlow version.
@@ -775,6 +782,8 @@ def create_data_generator(dfs, config, features, scaler_x=None):
 
     if scaler_x:
         config['scaler_x'] = scaler_x
+    if scaler_y:
+        config['scaler_y'] = scaler_y
 
     for key, df in dfs.items():
         logging.debug(f'Processing {key} in generator.')

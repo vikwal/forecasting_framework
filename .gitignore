@@ -21,7 +21,6 @@ federated/
 logs/
 GEMINI.md
 data_cache/
-configs/
 
 # Distribution / packaging
 .Python

@@ -1,19 +1,32 @@
 #!/bin/bash
-# Define list of 5-digit strings for config names
-#configs=("00164" "03362" "03631" "07370")
-#configs=("03631" "07370")
-model="tft"
-start_from_gpu=0
+# Usage: ./start_sessions.sh <config_dir> [model] [start_from_gpu]
+N_GPUS=8  # <-- hier anpassen
 
-# Use array index directly
-for i in {1..4}; do
-    config_suffix="${configs[$i]:-100}"
-    gpu_id=$((i+start_from_gpu))
-    screen -dmS ${model}_$i bash -c "
+config_dir="${1:?Usage: $0 <config_dir> [model] [start_from_gpu]}"
+model="${2:-tft}"
+start_from_gpu="${3:-0}"
+n_gpus=$N_GPUS
+
+# Collect all yaml configs from the directory, sorted
+mapfile -t configs < <(ls "$config_dir"/*.yaml 2>/dev/null | sort)
+
+if [ ${#configs[@]} -eq 0 ]; then
+    echo "No .yaml configs found in '$config_dir'"
+    exit 1
+fi
+
+for i in "${!configs[@]}"; do
+    config_path="${configs[$i]}"
+    config_name="$(basename "${config_path}" .yaml)"
+    config_arg="${config_path%.yaml}"
+    gpu_id=$(( (i % n_gpus) + start_from_gpu ))
+    session="${model}_$((i+1))"
+
+    screen -dmS "$session" bash -c "
         cd ~/Work/forecasting_framework
         source frcst/bin/activate
-        echo 'Starting HPO for ${model}_$i on GPU $gpu_id...'
-        CUDA_VISIBLE_DEVICES=$gpu_id python hpo_cl.py -m $model -c config_wind_${config_suffix} -i $i
+        echo 'Starting HPO for $session on GPU $gpu_id...'
+        CUDA_VISIBLE_DEVICES=$gpu_id python hpo_cl.py -m $model -c $config_arg
         exit_code=\$?
         echo '================================================'
         if [ \$exit_code -eq 0 ]; then
@@ -21,10 +34,10 @@ for i in {1..4}; do
         else
             echo 'Script failed with exit code: '\$exit_code
         fi
-        echo 'Session ${model}_$i finished. Press any key to close...'
+        echo 'Session $session finished. Press any key to close...'
         read -n 1
         exec bash
     "
-    echo "Started screen session ${model}_$i on GPU $gpu_id with config config_wind_${config_suffix}"
-    sleep 300
+    echo "Started screen session $session on GPU $gpu_id with config $config_name"
+    sleep 600
 done

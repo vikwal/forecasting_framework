@@ -79,6 +79,7 @@ Detaillierte Feature-Dokumentation in `docs/`:
 - [fine_tuning_feature.md](docs/fine_tuning_feature.md) — Fine-Tuning nach FL
 - [global_early_stopping.md](docs/global_early_stopping.md) — Early Stopping über globale FL-Runden
 - [preprocess_icond2_wind.md](docs/preprocess_icond2_wind.md) — ICON-D2 Wind Preprocessing: Datenstruktur, Features, Luftdichte, Lookback/Horizon-Zusammenhang, bekannte Limitierungen
+- [predict_wind.md](docs/predict_wind.md) — Wind-Zielgrößen (`wind_speed` & `power`), `extrapolate`-Parameter (Power Law auf Nabenhöhe, `wind_speed_hub_extrap`), NWP-Baseline, Skill_NWP, MultiIndex-Handling, bekannte Fallstricke
 
 ## Wichtige Hinweise
 

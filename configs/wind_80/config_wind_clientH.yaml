@@ -1,29 +1,5 @@
 data:
   path: '/mnt/nvme1/synthetic/wind/era5_fric_wind_hourly_age' # wind_hourly_age_20251103'  # Base path where client CSV files are located
-  files: ['00298', '02907', '02564', '05930', '15813',
-          '02932', '01759', '07403', '05404', '00662', # A
-          '00596', '03098', '04642', '03366', '03158',
-          '03362', '03032', '00591', '02812', '03946', # B
-          '00303', '00891', '04336', '15000', '01694',
-          '05490', '01605', '04271', '00656', '00691', # C
-          '03761', '00198', '01443', '06163', '04464',
-          '03513', '01975', '00427', '01691', '07394', # D
-          '07370', '05906', '03093', '03268', '15444',
-          '00282', '05440', '05779', '00460', '00856', # E
-          '00963', '00704', '04745', '00342', '01766',
-          '01544', '05516', '04466', '01200', '02171', # F
-          '00880', '02794', '04393', '07369', '03126',
-          '00232', '00164', '02261', '07393', '05158', # G
-          '07412', '03379', '05349', '07341', '03028',
-          '13674', '01684', '02925', '04177', '07368'] # H
-  # files: ['01303', '07395', '03015', '04280', '01262', '00183', '05546', '01587', '07410', '03631', # I
-  #         '00433', '02712', '05029', '06197', '07374', '03660', '02597', '05800', '03196', '00867', # J
-  #         '03668', '05100', '05347', '02961', '07351', '04024', '02115', '07396', '01270', '03730', # K
-  #         '01832', '15207', '02483', '07367', '02928', '02044', '01001', '01580', '04911', '01503', # L
-  #         '01612', '02601', '01639', '03166', '00096', '05371', '02023', '03086', '03821', '01078', # M
-  #         '02559', '05705', '02014', '00722', '02667', '05792', '03987', '00161', '02485', '02638', # N
-  #         '03231', '04104', '05856', '00953', '05109', '01358', '04928', '05142', '02429', '02290', # O
-  #         '01346', '01048', '05397', '04371', '00840', '03287', '04887', '02985', '03897', '00701'] # P
   # files: ['00298', '02907', '02564', '05930', '15813',
   #         '02932', '01759', '07403', '05404', '00662'] # A
   # files: ['00596', '03098', '04642', '03366', '03158',
@@ -38,8 +14,8 @@ data:
   #         '01544', '05516', '04466', '01200', '02171'] # F
   # files: ['00880', '02794', '04393', '07369', '03126',
   #         '00232', '00164', '02261', '07393', '05158'] # G
-  # files: ['07412', '03379', '05349', '07341', '03028',
-  #         '13674', '01684', '02925', '04177', '07368'] # H
+  files: ['07412', '03379', '05349', '07341', '03028',
+          '13674', '01684', '02925', '04177', '07368'] # H
   power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
   nwp_path: '/mnt/nvme1/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
   #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
@@ -51,9 +27,9 @@ data:
   test_end: '2025-10-31'
   retrain_interval: 1
   eval_interval: 1
-  target_col: 'wind_speed'
+  target_col: 'power'
   scale_x: True
-  scale_y: True
+  scale_y: False
   use_pca: False
   pca_components: 3
   lag_in_col: False
@@ -74,34 +50,28 @@ params:
     # 'temperature_h10', 'temperature_h38', 'temperature_h78', 'temperature_h127', 'temperature_h184', 'temperature_h247',
     # 'pressure_h10', 'pressure_h38', 'pressure_h78', 'pressure_h127', 'pressure_h184', 'pressure_h247',
     # 'relative_humidity_h10', 'relative_humidity_h38', 'relative_humidity_h78', 'relative_humidity_h127', 'relative_humidity_h184', 'relative_humidity_h247'
-    #'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184' #, 'wind_speed_hub_extrap' #'wind_speed_h247',
+    'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184',
     #'density_h78', 'density_h127', 'density_h184',
     #'wind_speed_h127', 'temperature_h127', 'pressure_h127', 'relative_humidity_h127',
     #'wind_speed_h184', 'temperature_h184', 'pressure_h184', 'relative_humidity_h184',
     #'wind_speed_h127', 'density_h127'
-    'wind_speed_h10', 'wind_speed_h38'
-    #'density_rotor_eq', # 'wind_speed_rotor_eq',
+    #'wind_speed_h10'
+    'density_rotor_eq', # 'wind_speed_rotor_eq',
     #'wind_speed_80m', 'wind_speed_120m','wind_speed_180m', # 'wind_speed_10m',
     #'density_80m', 'density_120m', 'density_180m', # 'density_10m'
     #'wind_speed_hub'
                    ]
   observed_features: [
-                      #'power'
-                      #'wind_speed_next'
+                      'power'
                       ] # lag features
   static_features: [
-    # 'park_age',
-    # 'cut_in',
-    # 'cut_out',
-    # 'rated_wind_speed',
-    # 'hub_height',
-    # 'rotor_diameter',
-    'altitude',
-    'latitude',
-    'longitude',
-    'station_rel_lat',
-    'station_rel_lon'
-
+    'park_age',
+    'cut_in',
+    'cut_out',
+    'rated_wind_speed',
+    'hub_height',
+    'rotor_diameter',
+    'altitude'
   ]
   aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
   get_density: True
@@ -110,21 +80,18 @@ params:
   turbines_per_park: 1
   #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
   random_seed: 42
-  next_n_grid_points: 4 # Number of nearest grid points to include
-  next_n_stations: 0 # Number of nearest stations whose features to include (0 = disabled)
+  next_n_grid_points: 1 # Number of nearest grid points to include
   aggregate_grid_points: False
-  get_next_grid_points_method: 'relative_position' # options: 'geodesic_next', 'relative_position'
-  extrapolate: null #'wind_speed_h10' # Spaltenname für Power-Law-Extrapolation auf Nabenhöhe (z.B. 'wind_speed_h10'), nur wenn target_col='power'
 
 model:
   num_workers: 0 # 'auto' for all physical cores
-  epochs: 1
+  epochs: 10
   output_dim: 48
   lookback: 48
   horizon: 48
   step_size: 48
   batch_size: 64
-  lr: 0.0001
+  lr: 0.0002
   optimizer: 'adam'
   loss: 'mse'
   metrics: ['mae', 'rmse', 'r^2']
@@ -132,9 +99,9 @@ model:
     units: 128
     n_layers: 2
   cnn:
-    filters: 40
+    filters: 128
     kernel_size: 3
-    n_cnn_layers: 5
+    n_cnn_layers: 10
     increase_filters: False
   rnn:
     n_rnn_layers: 2
@@ -150,25 +117,10 @@ model:
     n_heads: 8
     hidden_dim: 40
     dropout: 0.1
-    rnn_type: 'lstm'
     n_lstm_layers: 1  # Same for encoder and decoder
     static_embedding_dim: 128  # Separate dimension for static feature embeddings (null = use hidden_dim)
-    quantiles: [0.5]  # Set to [0.5] for deterministic point forecast, or specify multiple quantiles for probabilistic forecasting
+    quantiles: [0.5]
     clipnorm: 7
-  chronos:
-    repo_id: 'amazon/chronos-2'
-    device_map: 'cuda'
-    fine_tune_mode: 'lora'   # 'full' or 'lora'
-    lora_config: null        # only relevant if fine_tune_mode: 'lora'
-    num_steps: null          # null → falls back to model.epochs
-    quantile_levels: [0.5]   # median = deterministic point forecast
-    cross_learning: false
-    output_dir: 'models/'
-    finetuned_ckpt_name: 'finetuned-ckpt'
-    # prediction_length → model.horizon
-    # batch_size        → model.batch_size
-    # context_length    → model.lookback
-    # learning_rate     → model.lr
   callbacks: False
   shuffle: True
   force_retrain: True
@@ -186,7 +138,7 @@ model:
 
 
 hpo:
-  studies_path: '/mnt/nas/optuna_studies/optuna_viktor.db'
+  studies_path: '/mnt/nvme1/optuna_studies/era5_fric.db'
   objectives:
     # - metric: 'val_r2'
     #   direction: 'maximize'
@@ -224,7 +176,7 @@ hpo:
     dropout: [0.01, 0.8]
     n_lstm_layers: [1, 5]  # Same for both encoder and decoder
     static_embedding_dim: [8, 128]  # Separate dimension for static feature embeddings (null = use hidden_dim)
-    num_quantiles: [1]
+    quantiles: [0.5]
     clipnorm: [0, 10.0]
   fl:
     strategy: 'fedavg'
