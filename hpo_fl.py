@@ -96,8 +96,7 @@ def main() -> None:
     output_dim = config['model']['output_dim']
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
-    config['model']['fl'] = True
-    config['model']['shuffle'] = False  # Usually False for HPO to reduce variance
+    config['model']['fl'] = True  # Usually False for HPO to reduce variance
     test_start = pd.Timestamp(config.get('data').get('test_start', 0))
 
     logging.info(
@@ -287,39 +286,93 @@ def main() -> None:
 
         logging.info(f"Global scalers (X and Y) applied to all {len(clients_data)} clients.")
 
-    # --- PROCESS DATA WITH SCALER AND CREATE TRAINING PARTITIONS ---
-    logging.info("Processing data and creating training partitions...")
-    client_partitions = {}  # {client_id: (X_train, y_train)}
+    # --- PROCESS DATA, APPLY min_train_date, AND CREATE K-FOLD PARTITIONS ---
+    # Mirrors hpo_cl.py / data_cache.py: data before min_train_date is always included
+    # in every fold's training set (as a mandatory "min_block"), so all folds have
+    # comparable training size and fold 0 is not disadvantaged vs. later folds.
+    n_splits = config['hpo']['kfolds']
+    min_train_date = config['hpo'].get('min_train_date', None)
+    logging.info(
+        f"Processing data and creating {n_splits}-fold partitions "
+        f"(min_train_date={min_train_date}) for {len(clients_data)} clients..."
+    )
     client_ids_ordered = []
+    client_kfolds = {}  # {client_id: [((X_tr, y_tr), (X_val, y_val)), ...]}
 
     for client_id, client_info in clients_data.items():
-        logging.info(f"Processing data for client: {client_id}")
+        logging.debug(f"Processing data for client: {client_id}")
 
-        data_generator = tools.create_data_generator(
-            client_info['dfs'],
-            config,
-            features,
-            scaler_x=client_info['scaler_x'],
-            scaler_y=client_info.get('scaler_y')
+        # Set scalers into config so preprocessing.pipeline() picks them up
+        # (same pattern as tools.create_data_generator)
+        config['scaler_x'] = client_info['scaler_x']
+        if client_info.get('scaler_y'):
+            config['scaler_y'] = client_info['scaler_y']
+        else:
+            config.pop('scaler_y', None)
+
+        # Run preprocessing.pipeline() per station to obtain prepared_data including
+        # index_train, which kfolds_with_per_file_min_train_len needs for date-based splitting
+        client_prepared = []
+        for key, df in client_info['dfs'].items():
+            prepared_data, _ = preprocessing.pipeline(
+                data=df,
+                config=config,
+                known_cols=features['known'],
+                observed_cols=features['observed'],
+                static_cols=features['static'],
+                target_col=config['data']['target_col']
+            )
+            if prepared_data is not None and len(prepared_data.get('y_train', [])) > 0:
+                client_prepared.append(prepared_data)
+
+        if not client_prepared:
+            logging.warning(f"Client {client_id}: no training data after preprocessing — skipping.")
+            continue
+
+        # Build k-folds with min_train_date — identical approach to hpo_cl.py / data_cache.py
+        fold_data = hpo.kfolds_with_per_file_min_train_len(
+            prepared_datasets=client_prepared,
+            n_splits=n_splits,
+            val_split=config['hpo']['val_split'],
+            min_train_date=min_train_date
         )
-        X_train, y_train, X_test, y_test, _ = tools.combine_datasets_efficiently(data_generator)
-
-        # For HPO we only need training data
-        client_partitions[client_id] = (X_train, y_train)
+        client_kfolds[client_id] = fold_data
         client_ids_ordered.append(client_id)
 
-        logging.info(f"  Client {client_id}: {len(y_train)} train samples")
-
-        del X_test, y_test, data_generator
+        del client_prepared
         gc.collect()
 
+    # Clean up scaler keys added to config
+    config.pop('scaler_x', None)
+    config.pop('scaler_y', None)
+
+    # Restructure into kfolds_partitions[fold_idx] = [(X_tr, y_tr, X_val, y_val), ...] per client
+    kfolds_partitions = []
+    for fold_idx in range(n_splits):
+        fold_clients = []
+        for client_id in client_ids_ordered:
+            (X_tr, y_tr), (X_val, y_val) = client_kfolds[client_id][fold_idx]
+            fold_clients.append((X_tr, y_tr, X_val, y_val))
+        kfolds_partitions.append(fold_clients)
+
+    logging.info(f"Created {len(kfolds_partitions)} folds, each with {len(client_ids_ordered)} client partitions")
+
+    # Log fold sizes for first client
+    for fold_idx, fold_partitions in enumerate(kfolds_partitions):
+        X_train_fold, y_train_fold, X_val_fold, y_val_fold = fold_partitions[0]
+        logging.info(
+            f"  Fold {fold_idx}: {len(y_train_fold)} train, {len(y_val_fold)} val samples"
+            f" (client {client_ids_ordered[0]})"
+        )
+
+    del client_kfolds
+    gc.collect()
+
     # --- LOAD VAL SET FROM val_files (optional) ---
-    # Val stations are loaded for the full TRAINING period (X_train, before test_start) so
-    # that the temporal structure matches the k-fold splits on training stations:
-    # TimeSeriesSplit creates an expanding training window with a rolling val window.
-    # We mirror this by splitting val_files sequences into n_splits equal temporal chunks
-    # and assigning chunk k to fold k.  Scaler comes from client 0 (= global scaler when
-    # global_scaler=True, otherwise client-0 local scaler).
+    # Val stations are loaded for the full TRAINING period (before test_start).
+    # Split into n_splits+1 equal chunks; fold k uses chunk k+1, consistent with
+    # the approach in data_cache.py (_replace_val_with_val_files).
+    # Scaler comes from client 0 (= global scaler when global_scaler=True).
     val_files_chunks = None  # list of (X_val_chunk, y_val_chunk) per fold
     if config['data'].get('val_files'):
         logging.info("val_files found — loading val stations for training period (k-fold aligned).")
@@ -339,21 +392,15 @@ def main() -> None:
             scaler_x=val_scaler_x,
             scaler_y=val_scaler_y
         )
-        # Take the TRAINING portion (before test_start) — mirrors the fold time windows
         X_val_full, y_val_full, _, _, _ = tools.combine_datasets_efficiently(val_generator)
 
         n_val = len(y_val_full)
         if n_val > 0:
-            # TimeSeriesSplit with n_splits folds divides data into n_splits+1 equal parts.
-            # Fold k uses the k-th part as val (0-indexed from part 1, i.e. parts 1..n_splits).
-            # We mirror this: split val_files into n_splits+1 chunks and assign chunk k+1 to fold k,
-            # so val_files temporal windows are aligned with the training fold val windows.
-            n_splits = config['hpo']['kfolds']
             n_chunks = n_splits + 1
             chunk_size = n_val // n_chunks
             val_files_chunks = []
             for k in range(n_splits):
-                start = (k + 1) * chunk_size  # chunk k+1 (skip chunk 0 = first training part)
+                start = (k + 1) * chunk_size
                 end = (k + 2) * chunk_size if k < n_splits - 1 else n_val
                 if isinstance(X_val_full, dict):
                     X_chunk = {key: arr[start:end] for key, arr in X_val_full.items()}
@@ -361,15 +408,14 @@ def main() -> None:
                     X_chunk = X_val_full[start:end]
                 val_files_chunks.append((X_chunk, y_val_full[start:end]))
             logging.info(
-                f"Val sequences split into {n_splits} chunks (~{chunk_size} samples each, "
-                f"aligned to fold val windows) from {len(val_dfs)} val stations."
+                f"Val sequences split into {n_splits} chunks (~{chunk_size} samples each) "
+                f"from {len(val_dfs)} val stations."
             )
         else:
             logging.warning("val_files produced no training-period samples — falling back to k-fold val.")
 
     # --- GET FEATURE DIM ---
-    first_client_id = client_ids_ordered[0]
-    X_sample = client_partitions[first_client_id][0]
+    X_sample = kfolds_partitions[0][0][0]  # fold 0, first client, X_train
     feature_dim = tools.get_feature_dim(X_sample)
     config['model']['feature_dim'] = feature_dim
 
@@ -382,28 +428,6 @@ def main() -> None:
             logging.info(f'Data shape: X_train observed: {X_sample["observed"].shape}')
     else:
         logging.info(f'Data shape: X_train: {X_sample.shape}')
-
-    # --- CREATE K-FOLD PARTITIONS ---
-    n_splits = config['hpo']['kfolds']
-    logging.info(f"Creating {n_splits}-fold partitions for {len(client_partitions)} clients...")
-
-    # Prepare partitions as list of (X_train, y_train) tuples for get_kfolds_partitions
-    partitions_list = [client_partitions[cid] for cid in client_ids_ordered]
-    kfolds_partitions = federated.get_kfolds_partitions(n_splits=n_splits, partitions=partitions_list)
-
-    logging.info(f"Created {len(kfolds_partitions)} folds, each with {len(client_ids_ordered)} client partitions")
-
-    # Log fold sizes for first client
-    for fold_idx, fold_partitions in enumerate(kfolds_partitions):
-        first_part = fold_partitions[0]  # First client's partition
-        X_train_fold, y_train_fold, X_val_fold, y_val_fold = first_part
-        train_len = len(y_train_fold)
-        val_len = len(y_val_fold)
-        logging.info(f"  Fold {fold_idx}: {train_len} train, {val_len} val samples (client {client_ids_ordered[0]})")
-
-    # Free original partitions - we now have them in k-fold form
-    del client_partitions, partitions_list
-    gc.collect()
 
     # --- HPO LOOP ---
     len_trials = len(study.trials)

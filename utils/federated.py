@@ -176,19 +176,21 @@ class ClientActor:
         tools.initialize_gpu()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Create model within the actor
+        # Model stays on CPU at init; moved to GPU lazily in train()/evaluate()
+        # and returned to CPU afterwards so idle actors don't occupy GPU memory.
         self.model = models.get_model(config=self.config, hyperparameters=self.hyperparameters)
-        self.model = self.model.to(self.device)
 
         self.logger = logging.getLogger(f"ClientActor_{self.client_id}")
         self.logger.setLevel(logging.INFO)
-        logging.info(f"[ClientActor {self.client_id}] Initialized PyTorch model on {self.device}.")
+        logging.info(f"[ClientActor {self.client_id}] Initialized (CPU, will use {self.device} during train/eval).")
 
     def train(self, global_weights: Dict[str, torch.Tensor]):
         """Performs model training for a communication round using PyTorch."""
         from . import tools
         import copy
         from torch.utils.data import TensorDataset, DataLoader
+
+        self.model = self.model.to(self.device)
 
         verbose = self.config['fl'].get('verbose', False)
         personalize = self.config['fl'].get('personalize', False)
@@ -389,10 +391,17 @@ class ClientActor:
             'metrics': metrics,
             'history': history
         }
+
+        self.model = self.model.to('cpu')
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+
         return results
 
     def evaluate(self, global_weights: Dict[str, torch.Tensor]):
         """Performs local evaluation at the end of a communication round."""
+        self.model = self.model.to(self.device)
+
         personalize = self.config['fl'].get('personalize', False)
 
         if personalize:
@@ -455,6 +464,11 @@ class ClientActor:
             'metrics': metrics,
             'weights': self.model.state_dict()
         }
+
+        self.model = self.model.to('cpu')
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+
         return results
 
     def _split_weights_by_layer_name(self, state_dict, model_name):
@@ -757,9 +771,13 @@ def run_simulation(partitions: Any,
 
     # GPU configuration
     total_num_gpus = torch.cuda.device_count()
-    gpu_per_actor = min(1, total_num_gpus/n_clients) if total_num_gpus > 0 else 0
+    gpu_per_actor = min(1, total_num_gpus / n_clients) if total_num_gpus > 0 else 0
+    max_concurrent = config['fl'].get('max_concurrent_actors', n_clients)
 
-    logging.info(f"FL Simulation: {n_clients} clients, {n_rounds} rounds, {total_num_gpus} GPUs, strategy={strategy}")
+    logging.info(
+        f"FL Simulation: {n_clients} clients, {n_rounds} rounds, {total_num_gpus} GPUs, "
+        f"strategy={strategy}, max_concurrent_actors={max_concurrent}"
+    )
 
     # Initialize Ray
     ray.init(
@@ -788,9 +806,11 @@ def run_simulation(partitions: Any,
     logging.info("Start FL simulation using Ray and PyTorch.")
     start_time = time.time()
 
-    # Initialize global model
+    # Initialize global model — on GPU if available so server-side evaluation runs on GPU
     logging.debug('[Server] Global model is initialized.')
+    server_device = torch.device('cuda:0' if total_num_gpus > 0 else 'cpu')
     global_model = models.get_model(config=config, hyperparameters=hyperparameters)
+    global_model = global_model.to(server_device)
     global_weights = global_model.state_dict()
 
     # Initialize server optimizer if needed
@@ -840,10 +860,13 @@ def run_simulation(partitions: Any,
         logging.info(f"--- Round {round_num}/{n_rounds} ---")
         round_start_time = time.time()
 
-        # Client training
-        logging.debug("[Server] Start train jobs on clients.")
-        results_refs = [actor.train.remote(global_weights) for actor in client_actors]
-        client_results = ray.get(results_refs)
+        # Client training — processed in batches to limit concurrent GPU usage
+        logging.debug(f"[Server] Start train jobs on clients (batch_size={max_concurrent}).")
+        client_results = []
+        for batch_start in range(0, n_clients, max_concurrent):
+            batch_actors = client_actors[batch_start:batch_start + max_concurrent]
+            batch_results = ray.get([a.train.remote(global_weights) for a in batch_actors])
+            client_results.extend(batch_results)
         logging.debug(f"[Server] All clients trained. Start aggregation.")
 
         # Aggregate weights and metrics
@@ -901,7 +924,7 @@ def run_simulation(partitions: Any,
         # otherwise distributed across all client actors.
         personalize_eval = config.get('fl', {}).get('personalize', False)
         if global_val_data is not None and not personalize_eval:
-            logging.debug('[Server] Global evaluation on server (single pass).')
+            logging.debug(f'[Server] Global evaluation on server (single pass, device={server_device}).')
             X_val_g, y_val_g = global_val_data
             val_metrics_agg = evaluate_model_globally(global_model, X_val_g, y_val_g, config, hyperparameters)
             logging.debug('[Server] Global evaluation completed.')
