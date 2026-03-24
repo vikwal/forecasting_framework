@@ -42,10 +42,21 @@ def _pinball_loss(predictions: torch.Tensor, targets: torch.Tensor, quantiles: l
 
 
 
+def _env_var_constructor(loader, node):
+    var_name = loader.construct_scalar(node)
+    value = os.environ.get(var_name)
+    if value is None:
+        raise ValueError(f"Environment variable '{var_name}' not set (required by YAML !ENV tag)")
+    return value
+
+_env_loader = yaml.SafeLoader
+yaml.add_constructor('!ENV', _env_var_constructor, Loader=_env_loader)
+
+
 def load_config(path: str):
     """Load YAML configuration file - framework agnostic"""
     with open(path, 'r') as file_object:
-        config = yaml.load(file_object, Loader=yaml.SafeLoader)
+        config = yaml.load(file_object, Loader=_env_loader)
     return config
 
 

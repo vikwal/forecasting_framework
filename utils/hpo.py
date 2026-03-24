@@ -389,7 +389,10 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
     Returns:
         optuna.Study object
     """
-    storage = f'sqlite:///{path}'
+    if path.startswith('postgresql://') or path.startswith('postgres://'):
+        storage = path
+    else:
+        storage = f'sqlite:///{path}'
 
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=10,
@@ -470,7 +473,10 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
 
 def load_study(studies_path: str,
                study_name: str):
-    storage = f'sqlite:///{studies_path}'
+    if studies_path.startswith('postgresql://') or studies_path.startswith('postgres://'):
+        storage = studies_path
+    else:
+        storage = f'sqlite:///{studies_path}'
     try:
         study = optuna.load_study(
             study_name=study_name,
