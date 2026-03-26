@@ -1,0 +1,358 @@
+data:
+  path: '/mnt/nvme1/synthetic/wind/era5_fric_wind_hourly_age' # wind_hourly_age_20251103'  # Base path where client CSV files are located
+  files: ['00298', '02907', '02564', '01303', '03015', '00183', '01759', '07403', '05546', '00662',
+          '00596', '07410', '03631', '03366', '07374', '03362', '05800', '00591', '02812', '03946',
+          '03196', '00891', '00867', '02961', '01694', '05490', '01605', '07351', '00656', '04024',
+          '07396', '15207', '07367', '02928', '01001', '01612', '02601', '00427', '01639', '03166',
+          '07370', '03821', '02559', '03268', '05705', '00282', '02014', '00722', '02485', '00856',
+          '00963', '00704', '04745', '00342', '01766', '01544', '04104', '05109', '01200', '02171',
+          '00880', '02794', '04393', '07369', '03126', '00232', '00164', '02261', '01358', '01346',
+          '07412', '03379', '05349', '07341', '03028', '05397', '04371', '02925', '00840', '07368']
+  val_files: ['05930', '07395', '15813', '04280', '01262', '02932', '05404', '01587', '03098', '04642',
+            '00433', '02712', '05029', '06197', '03158', '03660', '02597', '03032', '00303', '04336',
+            '03668', '05100', '05347', '15000', '04271', '00691', '02115', '03761', '01270', '03730',
+            '01832', '00198', '02483', '01443', '06163', '02044', '04464', '01580', '04911', '01503',
+            '03513', '01975', '01691', '07394', '00096', '05371', '02023', '03086', '05906', '01078',
+            '03093', '15444', '05440', '05779', '02667', '05792', '03987', '00161', '00460', '02638',
+            '03231', '05516', '05856', '00953', '04466', '07393', '04928', '05142', '02429', '02290',
+            '05158', '01048', '13674', '01684', '04177', '03287', '04887', '02985', '03897', '00701']
+  power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
+  nwp_path: '/mnt/nvme1/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
+  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  stations_master: 'data/stations_master.csv'
+  freq: '1h'
+  train_frac: 1
+  val_frac: 0.25 # abs from train_frac
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
+  retrain_interval: 1
+  eval_interval: 1
+  target_col: 'wind_speed'
+  scale_x: True
+  scale_y: True
+  use_pca: False
+  pca_components: 3
+  lag_in_col: False
+  n_neighbors: 5
+
+params:
+  turbines: [
+             'Enercon E-70 E4 2.300',
+             'Enercon E-82 E2 2.000',
+             'Enercon E-115 2.500',
+             'Vestas V90',
+             'Vestas V112-3.45',
+             'Vestas V80-1.8'
+            ]
+  known_features: [
+    #'wind_speed_h10', 'wind_speed_h38', 'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184', 'wind_speed_h247',
+    # #'density_h10', 'density_h38', 'density_h78', 'density_h127', 'density_h184', 'density_h247',
+    # 'temperature_h10', 'temperature_h38', 'temperature_h78', 'temperature_h127', 'temperature_h184', 'temperature_h247',
+    # 'pressure_h10', 'pressure_h38', 'pressure_h78', 'pressure_h127', 'pressure_h184', 'pressure_h247',
+    # 'relative_humidity_h10', 'relative_humidity_h38', 'relative_humidity_h78', 'relative_humidity_h127', 'relative_humidity_h184', 'relative_humidity_h247'
+    #'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184' #, 'wind_speed_hub_extrap' #'wind_speed_h247',
+    #'density_h78', 'density_h127', 'density_h184',
+    #'wind_speed_h127', 'temperature_h127', 'pressure_h127', 'relative_humidity_h127',
+    #'wind_speed_h184', 'temperature_h184', 'pressure_h184', 'relative_humidity_h184',
+    #'wind_speed_h127', 'density_h127'
+    'u_wind_h10', 'v_wind_h10', 'wind_speed_h38', 'ecmwf_u_wind10m', 'ecmwf_v_wind10m'
+    #'density_rotor_eq', # 'wind_speed_rotor_eq',
+    #'wind_speed_80m', 'wind_speed_120m','wind_speed_180m', # 'wind_speed_10m',
+    #'density_80m', 'density_120m', 'density_180m', # 'density_10m'
+    #'wind_speed_hub'
+                   ]
+  observed_features: [
+                      #'power'
+                      #'wind_speed_next'
+                      ] # lag features
+  static_features: [
+    # 'park_age',
+    # 'cut_in',
+    # 'cut_out',
+    # 'rated_wind_speed',
+    # 'hub_height',
+    # 'rotor_diameter',
+    'altitude',
+    'latitude',
+    'longitude',
+    # 'station_rel_lat',
+    # 'station_rel_lon'
+
+  ]
+  aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
+  get_density: True
+  # openmeteo:
+  #   nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
+  turbines_per_park: 1
+  #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
+  random_seed: 42
+  next_n_grid_points: 4 # Number of nearest grid points to include (ICON-D2)
+  next_n_grid_ecmwf: 1 # falls back to next_n_grid_points if omitted
+  next_n_stations: 0
+  nwp_models: ['icon-d2', 'ecmwf']
+  ecmwf_features: ['u_wind10m', 'v_wind10m']
+  aggregate_grid_points: False
+  get_next_grid_points_method: 'geodesic_next' # options: 'geodesic_next', 'relative_position'
+  extrapolate: null #'wind_speed_h10' # Spaltenname für Power-Law-Extrapolation auf Nabenhöhe (z.B. 'wind_speed_h10'), nur wenn target_col='power'
+
+model:
+  num_workers: 0 # 'auto' for all physical cores
+  epochs: 1
+  output_dim: 48
+  lookback: 48
+  horizon: 48
+  step_size: 48
+  batch_size: 64
+  lr: 0.0001
+  optimizer: 'adam'
+  loss: 'mse'
+  metrics: ['mae', 'rmse', 'r^2']
+  fnn:
+    units: 128
+    n_layers: 2
+  cnn:
+    filters: 40
+    kernel_size: 3
+    n_cnn_layers: 5
+    increase_filters: False
+  rnn:
+    n_rnn_layers: 2
+    units: 64
+    dropout: 0.01
+  attention_heads: 32 # if attention is used in hybrid models
+  stemgnn:
+    units: 32
+    stack_cnt: 2
+    multi_layer: 5
+    dropout: 0.5
+  tft:
+    n_heads: 8
+    hidden_dim: 40
+    dropout: 0.8
+    rnn_type: 'lstm'
+    n_lstm_layers: 1  # Same for encoder and decoder
+    static_embedding_dim: 128  # Separate dimension for static feature embeddings (null = use hidden_dim)
+    quantiles: [0.5]  # Set to [0.5] for deterministic point forecast, or specify multiple quantiles for probabilistic forecasting
+    clipnorm: 7
+  chronos:
+    repo_id: 'amazon/chronos-2'
+    device_map: 'cuda'
+    fine_tune_mode: 'lora'   # 'full' or 'lora'
+    lora_config: null        # only relevant if fine_tune_mode: 'lora'
+    num_steps: null          # null → falls back to model.epochs
+    quantile_levels: [0.5]   # median = deterministic point forecast
+    cross_learning: false
+    output_dir: 'models/'
+    finetuned_ckpt_name: 'finetuned-ckpt'
+    # prediction_length → model.horizon
+    # batch_size        → model.batch_size
+    # context_length    → model.lookback
+    # learning_rate     → model.lr
+  callbacks: False
+  shuffle: True
+  force_retrain: True
+  # handles whether during fine tuning early stopping is applied
+  early_stopping:
+    enabled: True  # Set to True to enable early stopping
+    patience: 10  # Number of epochs to wait for improvement
+    min_delta: 0.0001  # Minimum change to qualify as improvement
+    monitor: 'val_rmse'  # Metric to monitor ('val_loss', 'val_rmse', 'val_mae', 'val_r2')
+    mode: 'min'  # 'min' for metrics to minimize (loss, rmse, mae), 'max' for metrics to maximize (r2)
+    restore_best_weights: True  # Restore model weights from the epoch with the best value
+  parallelize: False
+  lookup_hpo: True
+  verbose: 1
+
+
+hpo:
+  studies_path: '/mnt/nas/optuna_studies/optuna_viktor.db'
+  objectives:
+    # - metric: 'val_r2'
+    #   direction: 'maximize'
+    - metric: 'val_rmse'
+      direction: 'minimize'
+  trials: 1000
+  kfolds: 4
+  min_train_date: '2024-04-30'
+  val_split: 1
+  pruning:
+    use_median_pruner: True
+    n_startup_trials: 10
+    n_warmup_steps: 2
+    interval_steps: 1
+    disable_pruning: False
+  batch_size: [32, 1024]
+  epochs: [1, 150]
+  n_layers: [1, 4]
+  n_cnn_layers: [1, 10]
+  n_rnn_layers: [1, 7]
+  learning_rate: [0.0001, 0.01]
+  attention_heads: [1,64] # if attention is used in hybrid models
+  fnn:
+    units: [32, 256]
+  cnn:
+    filters: [16, 128]
+    kernel_size: [2, 5]
+    increase_filters: False
+  rnn:
+    units: [16, 100]
+    dropout: [0.0, 0.8]
+  tft:
+    n_heads: [1, 8]
+    hidden_dim: [16, 256]
+    dropout: [0.01, 0.8]
+    n_lstm_layers: [1, 5]  # Same for both encoder and decoder
+    static_embedding_dim: [8, 128]  # Separate dimension for static feature embeddings (null = use hidden_dim)
+    num_quantiles: [1]
+    clipnorm: [0, 10.0]
+  fl:
+    strategy: 'fedavg'
+    personalize: False
+    n_rounds: [1,20]
+    server_lr: [0.0001, 0.1]
+    beta_1: [0,1]
+    beta_2: [0,1]
+    tau: [0.0001, 0.1]
+
+eval:
+  results_path: 'results'
+  eval_on_all_test_data: True
+  retrain_interval: 0 # in hours - 0 if no retraining is wanted
+  t_0: 12
+  synth_wind:
+    h1: 10
+    p_s_model: 'huang'
+    v2_method: 'alphaI'
+    karman: 0.4
+    temp_gradient: 0.00649
+    interpol_method: 'polynomial'
+    polynom_grad: 3
+    noise: 0.0
+    annual_degradation: 0.0063
+    apply_ageing: True
+    hourly_resolution: True
+    random_seed: 42
+    turbine_dir: "/mnt/nas/synthetic/wind/power_curves"
+    turbine_power: 'turbine_power.csv'
+    turbine_specs: "turbine_specs.csv"
+    turbine_cp: "turbine_cp.csv"
+    turbine_names: "turbine_names.csv"
+    wind_ages: '/mnt/nas/synthetic/wind/wind_ages.npy'
+  synth_pv:
+    pv_ages: 'data/pv_ages.npy'
+
+fl:
+  clients:
+    # 80 clients, one station each — identical to data.files list.
+    # global_scaler: true is required here: with 1 station per client, static features
+    # (altitude, latitude, longitude, station_rel_lat, station_rel_lon) are constant
+    # within each client → local σ=0 → local scaler maps all values to 0.
+    # The global scaler aggregates variance across all 80 stations, so static features
+    # remain informative after scaling.
+    '00298': ['00298']
+    '02907': ['02907']
+    '02564': ['02564']
+    '01303': ['01303']
+    '03015': ['03015']
+    '00183': ['00183']
+    '01759': ['01759']
+    '07403': ['07403']
+    '05546': ['05546']
+    '00662': ['00662']
+    '00596': ['00596']
+    '07410': ['07410']
+    '03631': ['03631']
+    '03366': ['03366']
+    '07374': ['07374']
+    '03362': ['03362']
+    '05800': ['05800']
+    '00591': ['00591']
+    '02812': ['02812']
+    '03946': ['03946']
+    '03196': ['03196']
+    '00891': ['00891']
+    '00867': ['00867']
+    '02961': ['02961']
+    '01694': ['01694']
+    '05490': ['05490']
+    '01605': ['01605']
+    '07351': ['07351']
+    '00656': ['00656']
+    '04024': ['04024']
+    '07396': ['07396']
+    '15207': ['15207']
+    '07367': ['07367']
+    '02928': ['02928']
+    '01001': ['01001']
+    '01612': ['01612']
+    '02601': ['02601']
+    '00427': ['00427']
+    '01639': ['01639']
+    '03166': ['03166']
+    '07370': ['07370']
+    '03821': ['03821']
+    '02559': ['02559']
+    '03268': ['03268']
+    '05705': ['05705']
+    '00282': ['00282']
+    '02014': ['02014']
+    '00722': ['00722']
+    '02485': ['02485']
+    '00856': ['00856']
+    '00963': ['00963']
+    '00704': ['00704']
+    '04745': ['04745']
+    '00342': ['00342']
+    '01766': ['01766']
+    '01544': ['01544']
+    '04104': ['04104']
+    '05109': ['05109']
+    '01200': ['01200']
+    '02171': ['02171']
+    '00880': ['00880']
+    '02794': ['02794']
+    '04393': ['04393']
+    '07369': ['07369']
+    '03126': ['03126']
+    '00232': ['00232']
+    '00164': ['00164']
+    '02261': ['02261']
+    '01358': ['01358']
+    '01346': ['01346']
+    '07412': ['07412']
+    '03379': ['03379']
+    '05349': ['05349']
+    '07341': ['07341']
+    '03028': ['03028']
+    '05397': ['05397']
+    '04371': ['04371']
+    '02925': ['02925']
+    '00840': ['00840']
+    '07368': ['07368']
+  strategy: 'fedadam'
+  n_rounds: 1000
+  n_local_epochs: 1
+  personalize: False
+  fine_tune: False
+  early_stopping:
+    enabled: False
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
+    restore_best_weights: True
+  global_early_stopping:
+    enabled: True
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
+  fedopt:
+    server_lr: 0.001
+    beta_1: 0.9
+    beta_2: 0.99
+    tau: 0.001
+  force_retrain: True
+  global_scaler: True
+  verbose: True
+  save_history: False

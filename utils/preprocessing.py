@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import defaultdict
 import logging
 from typing import List, Tuple, Dict, Any
+from tqdm import tqdm
 from sklearn.decomposition import PCA
 
 from . import meteo
@@ -78,7 +79,7 @@ def _get_data_from_config_files(config: dict,
     original_seed = config['params'].get('random_seed', 42)
 
     # Process each file
-    for file_idx, file in enumerate(files):
+    for file_idx, file in tqdm(enumerate(files), total=len(files), desc=f"Loading stations [{files_key}]", unit="station", disable=len(files) <= 1):
         file_path = os.path.join(base_path, f"synth_{file}.csv")
         if not os.path.exists(file_path):
             logging.warning(f"File not found: {file_path}")
@@ -306,6 +307,9 @@ def pipeline(data: pd.DataFrame,
     gc.collect()
 
     df = knn_imputer(data=df, n_neighbors=config['data']['n_neighbors'])
+    with open('/tmp/ecmwf_debug.txt', 'a') as _dbg:
+        _ecmwf_after = [c for c in df.columns if c.startswith('ecmwf_')]
+        _dbg.write(f'after_knn: {list(df.columns)} ecmwf={_ecmwf_after}\n')
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
 
     if config['model']['name'] in ('tft', 'tcn-tft'):
@@ -820,7 +824,8 @@ def _process_csv_file(args):
                                            sat_vap_ps=sat_vap_ps)
 
         # Select relevant weather variables for pivoting
-        weather_vars = ['wind_speed', 'temperature', 'pressure', 'qs', 'relative_humidity']
+        # u_wind / v_wind are included so callers can request raw components (e.g. u_wind_h10)
+        weather_vars = ['wind_speed', 'u_wind', 'v_wind', 'temperature', 'pressure', 'qs', 'relative_humidity']
         if 'density' in df_grid.columns:
             weather_vars.append('density')
 
@@ -1345,6 +1350,89 @@ def extrapolate_to_hub_height(df: pd.DataFrame, source_col_prefix: str, hub_heig
     return v_hub
 
 
+def _fetch_ecmwf_data(station_lat: float,
+                      station_lon: float,
+                      next_n_grid_points: int,
+                      db_url: str,
+                      raw_columns: list,
+                      starttime_min: pd.Timestamp = None,
+                      starttime_max: pd.Timestamp = None) -> pd.DataFrame:
+    """
+    Fetch ECMWF wind data from PostGIS database for the N nearest grid points.
+
+    Credentials are read from the ECMWF_WIND_SL_URL environment variable (never stored in configs).
+
+    Args:
+        station_lat: Station latitude
+        station_lon: Station longitude
+        next_n_grid_points: Number of nearest ECMWF grid points to fetch
+        db_url: SQLAlchemy connection URL (e.g. postgresql://user:pass@host/db)
+        raw_columns: List of raw DB column names to fetch (e.g. ['u_wind_10m', 'v_wind_10m'])
+        starttime_min: Optional lower bound for ECMWF starttime (inclusive)
+        starttime_max: Optional upper bound for ECMWF starttime (inclusive)
+
+    Returns:
+        DataFrame with columns: starttime (UTC, tz-aware), forecasttime (int), <raw_columns>, rank (int)
+    """
+    try:
+        from sqlalchemy import create_engine
+    except ImportError:
+        raise ImportError(
+            "sqlalchemy is required for ECMWF data fetching. "
+            "Install with: pip install sqlalchemy psycopg2-binary"
+        )
+
+    date_filter = ""
+    if starttime_min is not None and starttime_max is not None:
+        # Format as ISO strings; values are internal pd.Timestamps, not user input
+        ts_min = starttime_min.strftime('%Y-%m-%d %H:%M:%S%z')
+        ts_max = starttime_max.strftime('%Y-%m-%d %H:%M:%S%z')
+        date_filter = f"AND e.starttime BETWEEN '{ts_min}' AND '{ts_max}'"
+
+    # Denormalize column names back to DB convention (u_wind10m → u_wind_10m)
+    # raw_columns use the normalized form; DB stores them with underscore before the numeric suffix.
+    db_col_names = [re.sub(r'(\D)(\d+m)', r'\1_\2', col) for col in raw_columns]
+    select_cols = ", ".join(f"e.{col}" for col in db_col_names)
+    query = f"""
+    WITH nearest_points AS (
+        SELECT geom,
+               ROW_NUMBER() OVER (
+                   ORDER BY geom <-> ST_SetSRID(ST_MakePoint({station_lon}, {station_lat}), 4326)
+               ) AS rank
+        FROM ecmwf_grid_points
+        ORDER BY geom <-> ST_SetSRID(ST_MakePoint({station_lon}, {station_lat}), 4326)
+        LIMIT {next_n_grid_points}
+    )
+    SELECT e.starttime, e.forecasttime, {select_cols}, n.rank
+    FROM ecmwf_wind_sl e
+    JOIN nearest_points n ON e.geom = n.geom
+    WHERE 1=1 {date_filter}
+    ORDER BY n.rank, e.starttime, e.forecasttime
+    """
+
+    engine = create_engine(db_url)
+    try:
+        df = pd.read_sql(query, engine)
+    finally:
+        engine.dispose()
+
+    df['starttime'] = pd.to_datetime(df['starttime'], utc=True)
+    df['forecasttime'] = df['forecasttime'].astype(int)
+    df['rank'] = df['rank'].astype(int)
+    # Normalize column names: remove underscore before numeric+m suffix (e.g. u_wind_10m → u_wind10m)
+    # so naming is consistent with ICON-D2 conventions used in ecmwf_features / known_features config.
+    df.columns = [re.sub(r'_(\d+m)', r'\1', c) for c in df.columns]
+    # Integer key YYYYMMDDHH — avoids datetime64[ns] vs datetime64[us] merge mismatches
+    # that occur when pandas 2.x reads timestamps from a DB (µs precision) vs CSV (ns precision).
+    df['_st_key'] = (
+        df['starttime'].dt.year * 1000000
+        + df['starttime'].dt.month * 10000
+        + df['starttime'].dt.day * 100
+        + df['starttime'].dt.hour
+    ).astype(np.int64)
+    return df
+
+
 def preprocess_synth_wind_icond2(path: str,
                           config: dict,
                           freq: str = '1H',
@@ -1601,6 +1689,140 @@ def preprocess_synth_wind_icond2(path: str,
                     logging.warning(f"next_n_stations: feature '{_base_feat}' not in neighbor {_neighbor_id}, skipping.")
 
         logging.debug(f"Station {station_id}: loaded '{_next_features_requested}' from {_next_n_stations} nearest neighbors")
+
+    # 3c. Merge ECMWF features if requested
+    _nwp_models = config['params'].get('nwp_models', ['icon-d2'])
+    _ecmwf_features_cfg = config['params'].get('ecmwf_features', [])
+
+    # Derive which ECMWF output features are requested from known/observed features (ecmwf_* entries)
+    _ecmwf_known_feats = [
+        f for f in (features.get('known', []) + features.get('observed', []))
+        if f.startswith('ecmwf_')
+    ] if features else []
+
+    if 'ecmwf' in _nwp_models and _ecmwf_features_cfg and _ecmwf_known_feats:
+        _db_url = os.environ.get('ECMWF_WIND_SL_URL')
+        if not _db_url:
+            logging.warning(
+                f"Station {station_id}: ECMWF_WIND_SL_URL not set — skipping ECMWF data. "
+                "Export the variable before running (e.g. export ECMWF_WIND_SL_URL=postgresql://...)."
+            )
+        else:
+            # Determine date range from the already-loaded ICON-D2 data
+            _icon_starttimes = pd.to_datetime(df_merged['starttime'], utc=True)
+            _ecmwf_ts_min = _icon_starttimes.min().normalize()
+            _ecmwf_ts_max_data = _icon_starttimes.max().normalize() + pd.Timedelta(hours=13)
+            _test_end = config['data'].get('test_end')
+            if _test_end:
+                # +12h so the noon ECMWF run on test_end is included
+                _ecmwf_ts_max = min(
+                    _ecmwf_ts_max_data,
+                    pd.Timestamp(_test_end, tz='UTC') + pd.Timedelta(hours=12)
+                )
+            else:
+                _ecmwf_ts_max = _ecmwf_ts_max_data
+
+            try:
+                _next_n_grid_ecmwf = config['params'].get('next_n_grid_ecmwf', next_n_grid_points)
+                _df_ecmwf = _fetch_ecmwf_data(
+                    station_lat=station_lat,
+                    station_lon=station_lon,
+                    next_n_grid_points=_next_n_grid_ecmwf,
+                    db_url=_db_url,
+                    raw_columns=_ecmwf_features_cfg,
+                    starttime_min=_ecmwf_ts_min,
+                    starttime_max=_ecmwf_ts_max,
+                )
+            except Exception as _ecmwf_exc:
+                logging.error(f"Station {station_id}: ECMWF fetch failed — {_ecmwf_exc}")
+                _df_ecmwf = pd.DataFrame()
+
+            if _df_ecmwf.empty:
+                logging.warning(f"Station {station_id}: ECMWF query returned no data.")
+            else:
+                # For each ICON-D2 row, compute the corresponding ECMWF (starttime, forecasttime):
+                #   ECMWF runs at 00:00 and 12:00 UTC.
+                #   Use the most recent ECMWF run <= icon starttime.
+                #   valid_time = icon_starttime + icon_forecasttime  →  ecmwf_forecasttime = valid_time - ecmwf_starttime
+                _icon_st = pd.to_datetime(df_merged['starttime'], utc=True)
+                _ecmwf_run_hour = np.where(_icon_st.dt.hour >= 12, 12, 0)
+                _ecmwf_starttime = _icon_st.dt.normalize() + pd.to_timedelta(_ecmwf_run_hour, unit='h')
+                # Ensure UTC timezone is preserved after arithmetic (guards against tz stripping)
+                if _ecmwf_starttime.dt.tz is None:
+                    _ecmwf_starttime = _ecmwf_starttime.dt.tz_localize('UTC')
+                _valid_time = _icon_st + pd.to_timedelta(df_merged['forecasttime'], unit='h')
+                _ecmwf_forecasttime = (
+                    (_valid_time - _ecmwf_starttime).dt.total_seconds() / 3600
+                ).astype(int)
+
+                df_merged = df_merged.copy()
+                # Use integer YYYYMMDDHH key instead of timestamp to avoid dtype mismatches
+                # between datetime64[ns, UTC] (CSV) and datetime64[us, UTC] (DB via SQLAlchemy)
+                df_merged['_ecmwf_st_key'] = (
+                    _ecmwf_starttime.dt.year * 1000000
+                    + _ecmwf_starttime.dt.month * 10000
+                    + _ecmwf_starttime.dt.day * 100
+                    + _ecmwf_starttime.dt.hour
+                ).astype(np.int64)
+                df_merged['_ecmwf_ft'] = _ecmwf_forecasttime
+
+                # Precompute test_end boundary for warning filter (rows beyond test_end are expected to have no match)
+                _test_end_ts = (
+                    pd.Timestamp(_test_end, tz='UTC') if _test_end else None
+                )
+
+                for _rank in sorted(_df_ecmwf['rank'].unique()):
+                    _df_rank = _df_ecmwf[_df_ecmwf['rank'] == _rank][
+                        ['_st_key', 'forecasttime'] + _ecmwf_features_cfg
+                    ].copy()
+                    _df_rank = _df_rank.rename(columns={
+                        '_st_key': '_ecmwf_st_key',
+                        'forecasttime': '_ecmwf_ft',
+                    })
+
+                    # Compute/rename output features based on known_features entries starting with 'ecmwf_'
+                    for _out_feat in _ecmwf_known_feats:
+                        _raw_name = _out_feat[len('ecmwf_'):]  # strip 'ecmwf_' prefix
+                        if _out_feat == 'ecmwf_wind_speed_h10':
+                            if 'u_wind10m' in _df_rank.columns and 'v_wind10m' in _df_rank.columns:
+                                _df_rank[f'ecmwf_wind_speed_h10_{_rank}'] = np.sqrt(
+                                    _df_rank['u_wind10m'] ** 2 + _df_rank['v_wind10m'] ** 2
+                                )
+                            else:
+                                logging.warning(
+                                    f"Station {station_id}: 'ecmwf_wind_speed_h10' requires "
+                                    "'u_wind10m' and 'v_wind10m' in ecmwf_features — skipping."
+                                )
+                        elif _raw_name in _df_rank.columns:
+                            _df_rank[f'{_out_feat}_{_rank}'] = _df_rank[_raw_name]
+                        else:
+                            logging.warning(
+                                f"Station {station_id}: ECMWF column '{_raw_name}' not fetched "
+                                f"(not in ecmwf_features) — skipping '{_out_feat}'."
+                            )
+
+                    _ecmwf_out_cols = [
+                        c for c in _df_rank.columns
+                        if c not in ('_ecmwf_st_key', '_ecmwf_ft') and c not in _ecmwf_features_cfg
+                    ]
+                    _df_rank = _df_rank[['_ecmwf_st_key', '_ecmwf_ft'] + _ecmwf_out_cols].drop_duplicates(
+                        subset=['_ecmwf_st_key', '_ecmwf_ft']
+                    )
+
+                    df_merged = df_merged.merge(
+                        _df_rank, on=['_ecmwf_st_key', '_ecmwf_ft'], how='left'
+                    )
+                    _missing_mask = df_merged[[c for c in _ecmwf_out_cols if c in df_merged.columns]].isna().any(axis=1)
+                    if _test_end_ts is not None:
+                        # Only warn for rows within test_end — rows beyond it have no ECMWF data by design
+                        _missing_mask = _missing_mask & (df_merged['starttime'] <= _test_end_ts)
+                    _missing = _missing_mask.sum()
+                    if _missing > 0:
+                        logging.warning(
+                            f"Station {station_id}: {_missing} rows within test_end have no ECMWF match for rank {_rank}."
+                        )
+
+                df_merged.drop(columns=['_ecmwf_st_key', '_ecmwf_ft'], inplace=True)
 
     # 4. Set MultiIndex strictly: ['starttime', 'forecasttime', 'timestamp']
     if 'starttime' in df_merged.columns and 'forecasttime' in df_merged.columns and 'timestamp' in df_merged.columns:

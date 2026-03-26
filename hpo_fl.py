@@ -16,6 +16,9 @@ import optuna
 torch.set_float32_matmul_precision('high')
 torch.multiprocessing.set_sharing_strategy('file_system')
 
+# Reduce CUDA memory fragmentation from many concurrent actors with varying tensor sizes
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
 from sklearn.preprocessing import StandardScaler
 from utils import preprocessing, tools, hpo, federated, models
 
@@ -154,8 +157,8 @@ def main() -> None:
     logging.info("Loading and preparing client data...")
     clients_data = {}
 
-    for client_id, station_ids in config['fl']['clients'].items():
-        logging.info(f'Loading data for client: {client_id} with stations: {station_ids}')
+    for client_id, station_ids in tqdm(config['fl']['clients'].items(), desc="Loading clients", unit="client"):
+        logging.debug(f'Loading data for client: {client_id} with stations: {station_ids}')
 
         # Create client-specific config
         client_config = copy.deepcopy(config)

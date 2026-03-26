@@ -32,7 +32,7 @@ def load_federated_data(config, freq, features, target_col='power'):
     base_path = config['data']['path']
 
     for client_id, file_list in clients_mapping.items():
-        logging.info(f'Loading data for client: {client_id}')
+        logging.debug(f'Loading data for client: {client_id}')
 
         # Create temporary config for this client
         client_config = config.copy()

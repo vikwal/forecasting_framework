@@ -235,8 +235,8 @@ def main() -> None:
     # --- LOAD AND PREPARE CLIENT DATA WITH CLIENT-SPECIFIC SCALERS ---
     clients_data = {}
 
-    for client_id, station_ids in config['fl']['clients'].items():
-        logging.info(f'Loading data for client: {client_id} with stations: {station_ids}')
+    for client_id, station_ids in tqdm(config['fl']['clients'].items(), desc="Loading clients", unit="client"):
+        logging.debug(f'Loading data for client: {client_id} with stations: {station_ids}')
 
         # Create client-specific config
         client_config = copy.deepcopy(config)
