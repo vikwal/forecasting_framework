@@ -259,7 +259,7 @@ def compute_skill_nwp(dfs, test_data, y_test_np, rmse_model, config_data, target
     return 1.0 - rmse_model / rmse_nwp
 
 
-def evaluate_model(model_path, models_dir, identifier_key='station_id', identifier_value=None, config=None, scaler_x=None, scaler_y=None):
+def evaluate_model(model_path, models_dir, identifier_key='station_id', identifier_value=None, config=None, scaler_x=None, scaler_y=None, sample_type=None):
     """
     Evaluate a single model on test data.
 
@@ -267,6 +267,7 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
         config:   Optional pre-loaded config dict. If None, derived from model filename.
         scaler_x: Optional pre-fitted StandardScaler for features. If None, fitted internally.
         scaler_y: Optional pre-fitted StandardScaler for target. Required when target_col != 'power'.
+        sample_type: Optional string ('in' or 'out') to indicate if station is from training or validation set.
 
     Returns:
         Tuple of (identifier_value, metrics_dict)
@@ -499,6 +500,10 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
             'mae': float(mae),
             'skill_nwp': float(skill_nwp) if skill_nwp is not None else None
         }
+        
+        # Add sample type if provided
+        if sample_type is not None:
+            metrics['sample'] = sample_type
 
         skill_nwp_str = f"{skill_nwp:.4f}" if skill_nwp is not None else "N/A"
         logger.info(f"Metrics - R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, Skill_NWP: {skill_nwp_str}")
@@ -1372,7 +1377,7 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
             continue
 
 
-def evaluate_model_chronos(config, chronos_pipeline, station_id, scaler_x=None):
+def evaluate_model_chronos(config, chronos_pipeline, station_id, scaler_x=None, sample_type=None):
     """
     Evaluate a Chronos-2 pipeline on test data for a single station.
 
@@ -1461,6 +1466,11 @@ def evaluate_model_chronos(config, chronos_pipeline, station_id, scaler_x=None):
             'rmse': float(rmse),
             'mae': float(mae),
         }
+        
+        # Add sample type if provided
+        if sample_type is not None:
+            metrics['sample'] = sample_type
+            
         logger.info(f"Metrics — R²: {r2:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}")
     except Exception as e:
         logger.error(f"Error calculating metrics: {e}")
@@ -1511,7 +1521,22 @@ def main():
         chronos_cfg = config['model']['chronos']
         repo_id = chronos_cfg.get('repo_id', 'amazon/chronos-2')
         device_map = chronos_cfg.get('device_map', 'cuda')
-        station_ids = config['data']['files']
+        
+        # Combine files and val_files with tracking
+        train_stations = config['data'].get('files', [])
+        val_stations = config['data'].get('val_files', [])
+        station_ids = train_stations + val_stations
+        
+        # Create mapping to track sample type
+        station_sample_type = {}
+        for sid in train_stations:
+            station_sample_type[sid] = 'in'
+        for sid in val_stations:
+            station_sample_type[sid] = 'out'
+        
+        logger.info(f"Training stations: {len(train_stations)}")
+        logger.info(f"Validation stations: {len(val_stations)}")
+        logger.info(f"Total stations: {len(station_ids)}")
 
         output_file = output_dir / 'test_results_chronos.csv'
 
@@ -1556,7 +1581,13 @@ def main():
             station_config = {**config, 'data': {**config['data'], 'files': [station_id]}}
 
             chronos_scaler_x, _ = load_scaler_for_model(local_model_dir.name) if local_model_dir.exists() else (None, None)
-            station_id_val, metrics = evaluate_model_chronos(station_config, pipeline_to_use, station_id, scaler_x=chronos_scaler_x)
+            station_id_val, metrics = evaluate_model_chronos(
+                station_config, 
+                pipeline_to_use, 
+                station_id, 
+                scaler_x=chronos_scaler_x,
+                sample_type=station_sample_type.get(station_id)
+            )
 
             if metrics:
                 new_df = pd.DataFrame([metrics])
@@ -1592,9 +1623,23 @@ def main():
         import copy
         config = load_config(Path(args.config_path))
         config['model']['name'] = 'tft'
-        station_ids = config['data']['files']
+        
+        # Combine files and val_files with tracking
+        train_stations = config['data'].get('files', [])
+        val_stations = config['data'].get('val_files', [])
+        station_ids = train_stations + val_stations
+        
+        # Create mapping to track sample type
+        station_sample_type = {}
+        for sid in train_stations:
+            station_sample_type[sid] = 'in'
+        for sid in val_stations:
+            station_sample_type[sid] = 'out'
+        
         logger.info(f"Config: {args.config_path}")
-        logger.info(f"Stations from config: {len(station_ids)}")
+        logger.info(f"Training stations: {len(train_stations)}")
+        logger.info(f"Validation stations: {len(val_stations)}")
+        logger.info(f"Total stations from config: {len(station_ids)}")
 
         # Find global models, optionally filtered by --model-name
         all_model_files = sorted([f for f in models_dir.glob('*.pt') if f.is_file()])
@@ -1686,7 +1731,8 @@ def main():
                         identifier_value=sid,
                         config=station_config,
                         scaler_x=global_scaler_x,
-                        scaler_y=global_scaler_y
+                        scaler_y=global_scaler_y,
+                        sample_type=station_sample_type.get(sid)
                     )
                     if metrics:
                         new_df = pd.DataFrame([metrics])
