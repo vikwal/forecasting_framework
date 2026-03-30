@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import re
+import subprocess
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,6 +14,10 @@ from sklearn.linear_model import LinearRegression
 import time
 from datetime import datetime
 import seaborn as sns
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configuration
 st.set_page_config(
@@ -51,97 +56,78 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def get_storage_url():
+    """Get storage URL from environment variable or use default SQLite"""
+    storage_url = os.environ.get('OPTUNA_STORAGE')
+    
+    if storage_url:
+        return storage_url
+    else:
+        # Fallback to SQLite if OPTUNA_STORAGE not set
+        default_path = os.path.join(os.path.dirname(__file__), "studies", "optuna_studies.db")
+        return f"sqlite:///{default_path}"
+
 @st.cache_data(ttl=30)  # Cache für 30 Sekunden
-def get_available_studies(studies_dir="./data"):
-    """Finds all available study files in the data directory"""
-    import glob
+def get_available_studies(storage_url):
+    """Gets all studies from the Optuna database"""
+    try:
+        storage = RDBStorage(url=storage_url)
+        
+        # Get all study summaries
+        study_summaries = optuna.get_all_study_summaries(storage=storage)
+        
+        study_info = []
+        for summary in study_summaries:
+            study_info.append({
+                'name': summary.study_name,
+                'n_trials': summary.n_trials,
+                'datetime_start': summary.datetime_start
+            })
+        
+        return study_info
+    except Exception as e:
+        st.error(f"Error loading studies from database: {str(e)}")
+        return []
 
-    pattern = os.path.join(studies_dir, "*.db")
-    study_files = glob.glob(pattern)
-
-    study_info = []
-    for file_path in study_files:
-        filename = os.path.basename(file_path)
-        study_name = os.path.splitext(filename)[0]
-        study_info.append({
-            'name': study_name,
-            'file_path': file_path,
-            'filename': filename
-        })
-
-    return study_info
-
-def load_optuna_studie(study_file_path, study_name=None, readonly=True):
+def load_optuna_studie(storage_url, study_name):
     """
-    Lädt eine einzelne Optuna Study in read-only Modus
+    Lädt eine einzelne Optuna Study
 
     Args:
-        study_file_path: Pfad zur .db Datei
-        study_name: Name der Study (optional, lädt erste verfügbare wenn None)
-        readonly: Ob read-only Modus verwendet werden soll (Standard: True)
+        storage_url: Storage URL (PostgreSQL oder SQLite)
+        study_name: Name der Study
 
     Returns:
         study: Optuna Study object or None on error
     """
     try:
-        if readonly:
-            # Read-only Zugriff über URL Parameter
-            storage_url = f"sqlite:///{study_file_path}?mode=ro"
-            storage = RDBStorage(url=storage_url)
-        else:
-            # Standard Zugriff (nicht empfohlen für Dashboard)
-            storage = RDBStorage(url=f"sqlite:///{study_file_path}")
-
-        # Verfügbare Studies abrufen
-        study_summaries = optuna.get_all_study_summaries(storage=storage)
-
-        if not study_summaries:
-            st.warning(f"No studies found in {study_file_path}")
-            return None
-
-        # Study Name bestimmen
-        if study_name is None:
-            study_name = study_summaries[0].study_name
-        elif study_name not in [s.study_name for s in study_summaries]:
-            available_names = [s.study_name for s in study_summaries]
-            st.error(f"Study '{study_name}' nicht gefunden. Verfügbare Studies: {available_names}")
-            return None
-
-        # Study im read-only Modus laden
+        storage = RDBStorage(url=storage_url)
+        # Study laden
         study = optuna.load_study(study_name=study_name, storage=storage)
-
         return study
 
     except Exception as e:
         st.error(f"Error loading study: {str(e)}")
         return None
 
-def load_all_optuna_studies(studies_dir):
-    """Lädt alle Optuna Study-Dateien (Session State basiert, kein Streamlit Cache mehr)"""
-    all_results = {}
-    all_studies = {}
+def load_all_optuna_studies(storage_url):
+    """Lädt alle Optuna Studies aus der zentralen Datenbank"""
+    try:
+        storage = RDBStorage(url=storage_url)
+        study_summaries = optuna.get_all_study_summaries(storage=storage)
 
-    available_studies = get_available_studies(studies_dir=studies_dir)
+        if not study_summaries:
+            st.warning(f"No studies found in database")
+            return None, []
 
-    for study_info in available_studies:
-        study_file_path = study_info['file_path']
-        study_key = study_info['name']
-
-        try:
-            # Read-only Zugriff
-            storage = RDBStorage(url=f"sqlite:///{study_file_path}?mode=ro")
-            study_summaries = optuna.get_all_study_summaries(storage=storage)
-
-            if not study_summaries:
-                continue
-
-            study_names = [summary.study_name for summary in study_summaries]
-            studies = [optuna.load_study(study_name=study_name, storage=RDBStorage(url=f"sqlite:///{study_file_path}?mode=ro"))
-                      for study_name in study_names]
-
-            # Process data wie in der ursprünglichen load_optuna_data Funktion
-            entries = []
-            for study in studies:
+        # Process each study
+        entries = []
+        studies = []
+        for summary in study_summaries:
+            try:
+                study = optuna.load_study(study_name=summary.study_name, storage=storage)
+                studies.append(study)
+                
                 completed_trials = [trial for trial in study.trials
                                   if trial.value is not None and trial.state == optuna.trial.TrialState.COMPLETE]
                 pruned_trials = [trial for trial in study.trials
@@ -185,19 +171,53 @@ def load_all_optuna_studies(studies_dir):
                     'best_params': best_params,
                     'last_trial_time': max([trial.datetime_complete for trial in completed_trials
                                           if trial.datetime_complete], default=None),
-                    'study_file': study_key  # Hinzugefügt für Filtering
                 }
                 entries.append(entry)
+            except Exception as e:
+                st.warning(f"Error loading study {summary.study_name}: {str(e)}")
+                continue
 
-            if entries:
-                all_results[study_key] = pd.DataFrame(entries)
-                all_studies[study_key] = studies
+        if entries:
+            results_df = pd.DataFrame(entries)
+            return results_df, studies
+        else:
+            return None, []
 
-        except Exception as e:
-            st.warning(f"Error loading {study_key}: {str(e)}")
-            continue
+    except Exception as e:
+        st.error(f"Error loading studies from database: {str(e)}")
+        return None, []
 
-    return all_results, all_studies
+def verify_sudo_password(password):
+    """Verifiziert das sudo-Passwort des aktuellen Nutzers"""
+    result = subprocess.run(
+        ['sudo', '-S', '-k', '/bin/true'],
+        input=password + '\n',
+        capture_output=True,
+        text=True
+    )
+    return result.returncode == 0
+
+def delete_study(storage_url, study_name):
+    """
+    Löscht eine Study aus der Optuna Datenbank
+    
+    Args:
+        storage_url: Storage URL (PostgreSQL oder SQLite)
+        study_name: Name der zu löschenden Study
+    
+    Returns:
+        bool: True wenn erfolgreich gelöscht, False bei Fehler
+    """
+    try:
+        storage = RDBStorage(url=storage_url)
+        
+        # Study löschen
+        optuna.delete_study(study_name=study_name, storage=storage)
+        return True
+        
+    except Exception as e:
+        st.error(f"Error deleting study '{study_name}': {str(e)}")
+        return False
 
 @st.cache_data(ttl=30)  # Cache for 30 seconds
 def load_optuna_data(study_file_path):
@@ -643,7 +663,14 @@ def main():
     # Sidebar for configuration
     st.sidebar.header("⚙️ Configuration")
 
-    studies_dir = "/mnt/nvme1/optuna_studies"
+    # Get storage URL from environment or use default
+    storage_url = get_storage_url()
+
+    # Display storage info
+    if storage_url.startswith('postgresql'):
+        st.sidebar.info(f"📁 Database: PostgreSQL (from OPTUNA_STORAGE)")
+    else:
+        st.sidebar.info(f"📁 Database: SQLite (studies/optuna_studies.db)")
 
     # UI elements for refresh control
     auto_refresh = st.sidebar.checkbox("Auto Refresh (5min)", value=True)
@@ -655,14 +682,14 @@ def main():
 
     # Lade verfügbare Studies nur einmal oder bei Refresh
     if st.session_state.cached_available_studies is None or force_reload:
-        available_studies = get_available_studies(studies_dir=studies_dir)
+        available_studies = get_available_studies(storage_url=storage_url)
         st.session_state.cached_available_studies = available_studies
     else:
         available_studies = st.session_state.cached_available_studies
 
     if not available_studies:
-        st.sidebar.error(f"No study files found in {studies_dir}!")
-        st.error(f"No study files found! Make sure .db files are in {studies_dir}.")
+        st.sidebar.error(f"No studies found in database!")
+        st.error(f"No Optuna Studies found in the database!")
         st.stop()
 
     # Lade Study-Daten nur bei Bedarf (einmal pro Session oder bei Refresh)
@@ -672,31 +699,17 @@ def main():
 
         # Show loading status
         with st.spinner('Loading Optuna Studies...'):
-            all_results_dict, all_studies_dict = load_all_optuna_studies(studies_dir)
+            results_df, studies = load_all_optuna_studies(storage_url)
 
         # Store in Session State for all tabs
-        st.session_state.cached_studies_data = (all_results_dict, all_studies_dict)
+        st.session_state.cached_studies_data = (results_df, studies)
 
-        if not all_results_dict:
+        if results_df is None or len(results_df) == 0:
             st.error("No Optuna Studies found or error loading!")
             st.stop()
     else:
         # Use cached data (instant!)
-        all_results_dict, all_studies_dict = st.session_state.cached_studies_data    # Study Selector
-    study_options = list(all_results_dict.keys())
-    selected_study_name = st.sidebar.selectbox(
-        "📊 Select Study:",
-        options=study_options,
-        index=0
-    )
-
-    # Aktuelle Study-Daten abrufen (bereits geladen!)
-    results_df = all_results_dict[selected_study_name]
-    studies = all_studies_dict[selected_study_name]
-
-    # Info über ausgewählte Study und Cache-Status
-    selected_study = next(study for study in available_studies if study['name'] == selected_study_name)
-    st.sidebar.info(f"📁 File: {selected_study['filename']}")
+        results_df, studies = st.session_state.cached_studies_data
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -716,13 +729,12 @@ def main():
         st.metric("🏆 Best Overall Value", f"{best_overall:.4f}" if best_overall != "N/A" else "N/A")
 
     # Custom Tab Navigation mit Session State
-    tab_names = ["📈 Study Overview", "🔄 Progress Tracking", "🏆 Best Trials", "📊 Comparison"]
+    tab_names = ["📈 Study Overview", "🔄 Progress Tracking", "🏆 Best Trials", "📊 Comparison", "🗑️ Study Management"]
 
     # Tab-Navigation Buttons
-    col1, col2, col3, col4 = st.columns(4)
-    tab_columns = [col1, col2, col3, col4]
+    cols = st.columns(len(tab_names))
 
-    for i, (col, tab_name) in enumerate(zip(tab_columns, tab_names)):
+    for i, (col, tab_name) in enumerate(zip(cols, tab_names)):
         with col:
             if st.button(tab_name, key=f"tab_{i}",
                         type="primary" if st.session_state.active_tab == i else "secondary",
@@ -942,6 +954,87 @@ def main():
         performance_fig = create_model_performance_plot(results_df)
         if performance_fig:
             st.plotly_chart(performance_fig, width='stretch')
+
+    elif st.session_state.active_tab == 4:
+        # Tab 5: Study Management
+        st.subheader("🗑️ Study Management")
+        
+        st.warning("⚠️ **Warning:** Deleting a study is permanent and cannot be undone!")
+        
+        # Show all studies
+        st.markdown("### All Studies in Database")
+        
+        # Create a DataFrame with study information
+        study_list = []
+        for study in studies:
+            completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
+            failed = len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])
+            
+            study_list.append({
+                'Study Name': study.study_name,
+                'Total Trials': len(study.trials),
+                'Completed': completed,
+                'Pruned': pruned,
+                'Failed': failed,
+                'Direction': ', '.join(d.name for d in study.directions) if hasattr(study, 'directions') else 'N/A'
+            })
+        
+        study_df = pd.DataFrame(study_list)
+        st.dataframe(study_df, use_container_width=True)
+        
+        # Study deletion section
+        st.markdown("---")
+        st.markdown("### Delete Study")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            study_to_delete = st.selectbox(
+                "Select study to delete:",
+                options=[s.study_name for s in studies],
+                key="delete_study_selector"
+            )
+        
+        with col2:
+            st.write("")  # Spacer
+            st.write("")  # Spacer
+            if st.button("🗑️ Delete Study", type="primary", key="delete_button"):
+                # Confirmation dialog using session state
+                st.session_state.confirm_delete = True
+                st.session_state.study_to_delete = study_to_delete
+                st.rerun()
+        
+        # Confirmation dialog
+        if st.session_state.get('confirm_delete', False):
+            st.error(f"⚠️ Are you sure you want to delete study **'{st.session_state.study_to_delete}'**?")
+
+            sudo_password = st.text_input("Sudo-Passwort zur Bestätigung:", type="password", key="sudo_pw_input")
+
+            col1, col2, col3 = st.columns([1, 1, 3])
+
+            with col1:
+                if st.button("✅ Yes, Delete", type="primary", key="confirm_yes"):
+                    if not sudo_password:
+                        st.warning("Bitte Sudo-Passwort eingeben.")
+                    elif not verify_sudo_password(sudo_password):
+                        st.error("❌ Falsches Passwort!")
+                    else:
+                        if delete_study(storage_url, st.session_state.study_to_delete):
+                            st.success(f"✅ Study '{st.session_state.study_to_delete}' successfully deleted!")
+                            st.session_state.cached_studies_data = None
+                            st.session_state.cached_available_studies = None
+                            st.session_state.confirm_delete = False
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("❌ Failed to delete study!")
+                            st.session_state.confirm_delete = False
+
+            with col2:
+                if st.button("❌ Cancel", key="confirm_no"):
+                    st.session_state.confirm_delete = False
+                    st.rerun()
 
     # Auto Refresh - only when needed
     if auto_refresh and current_time - st.session_state.last_refresh_time > 300:  # 5 minutes
