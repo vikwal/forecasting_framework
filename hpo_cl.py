@@ -37,10 +37,12 @@ def main() -> None:
         args.config = args.config.split('.')[0]
     if '/' in args.config:
         config_name = args.config.split('/')[-1]
-        if len(config_name.split('_')) == 3:
-            config_name = '_'.join(config_name.split('_')[1:])
     else:
         config_name = args.config
+    
+    # Remove 'config_' prefix if present
+    if config_name.startswith('config_'):
+        config_name = config_name[7:]  # Remove 'config_' (7 characters)
     log_file = f'logs/hpo_cl_m-{args.model}_c-{config_name}{suffix}.log'
 
     # Configure logging

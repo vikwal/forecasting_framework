@@ -4,6 +4,7 @@ import optuna
 import logging
 import numpy as np
 import pandas as pd
+import os
 from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -380,7 +381,7 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
     Create or load an Optuna study with flexible single/multi-objective support.
 
     Args:
-        path: Path to study database
+        path: Path to study database (ignored if OPTUNA_STORAGE env var is set)
         study_name: Name of the study
         direction: (Deprecated) Single objective direction - use config instead
         pruning_config: Pruning configuration
@@ -389,7 +390,13 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
     Returns:
         optuna.Study object
     """
-    if path.startswith('postgresql://') or path.startswith('postgres://'):
+    # Use OPTUNA_STORAGE environment variable if set, otherwise use path from config
+    storage_url = os.environ.get('OPTUNA_STORAGE')
+    
+    if storage_url:
+        storage = storage_url
+        logging.info(f"Using OPTUNA_STORAGE from environment: {storage_url}")
+    elif path.startswith('postgresql://') or path.startswith('postgres://'):
         storage = path
     else:
         storage = f'sqlite:///{path}'
@@ -473,7 +480,13 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
 
 def load_study(studies_path: str,
                study_name: str):
-    if studies_path.startswith('postgresql://') or studies_path.startswith('postgres://'):
+    # Use OPTUNA_STORAGE environment variable if set, otherwise use studies_path
+    storage_url = os.environ.get('OPTUNA_STORAGE')
+    
+    if storage_url:
+        storage = storage_url
+        logging.info(f"Using OPTUNA_STORAGE from environment: {storage_url}")
+    elif studies_path.startswith('postgresql://') or studies_path.startswith('postgres://'):
         storage = studies_path
     else:
         storage = f'sqlite:///{studies_path}'
