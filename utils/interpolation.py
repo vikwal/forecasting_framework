@@ -187,6 +187,7 @@ def compute_empirical_semivariance(
     dist_matrix: np.ndarray,
     n_lags: int = 20,
     max_dist: Optional[float] = None,
+    detrend: bool = False,
 ) -> tuple:
     """Compute empirical semivariances across all station pairs and timestamps.
 
@@ -199,6 +200,13 @@ def compute_empirical_semivariance(
         n_lags:        Number of equally-spaced lag bins.
         max_dist:      Upper distance cutoff in km.
                        Defaults to half of the maximum pairwise distance.
+        detrend:       If True, subtract each station's temporal mean before
+                       computing semivariances.  This removes the effect of
+                       spatially varying climatological means (e.g. coastal
+                       stations being systematically windier than inland ones),
+                       which otherwise inflates the variogram and prevents the
+                       range from being identified within the network extent.
+                       The variogram then describes anomaly correlation only.
 
     Returns:
         lags:          Bin-centre distances in km (only bins with ≥1 pair).
@@ -218,9 +226,15 @@ def compute_empirical_semivariance(
     within = pair_dists <= max_dist
     i_idx, j_idx, pair_dists = i_idx[within], j_idx[within], pair_dists[within]
 
+    # Optionally remove each station's temporal mean (anomaly variogram)
+    vm = values_matrix
+    if detrend:
+        station_means = np.nanmean(vm, axis=0, keepdims=True)  # (1, N)
+        vm = vm - station_means
+
     # Semivariance per pair, averaged over timestamps (ignore NaN)
-    vals_i = values_matrix[:, i_idx]   # (T, M)
-    vals_j = values_matrix[:, j_idx]   # (T, M)
+    vals_i = vm[:, i_idx]   # (T, M)
+    vals_j = vm[:, j_idx]   # (T, M)
     sv_pairs = 0.5 * np.nanmean((vals_i - vals_j) ** 2, axis=0)  # (M,)
 
     # Bin by distance
@@ -268,7 +282,7 @@ def fit_global_variogram(
         nugget, psill, range_ = nugget_init, psill_init, range_init
 
     params = {"nugget": nugget, "psill": psill, "range": range_, "model": model}
-    logger.info("Global variogram parameters: %s", params)
+    logger.debug("Global variogram parameters: %s", params)
     return params
 
 
@@ -623,7 +637,10 @@ def run_loo_cv(
 
             if use_multi_features:
                 n_feats, t_feats = _build_features(t_idx, n_idxs, s_idx)
-                rk_pred = predict_rk(n_vals, n_feats, t_feats, kp)
+                if np.any(np.isnan(n_feats)) or np.any(np.isnan(t_feats)):
+                    rk_pred = ok_pred  # fall back to OK when features are missing
+                else:
+                    rk_pred = predict_rk(n_vals, n_feats, t_feats, kp)
             else:
                 n_alts = alts[n_idxs]
                 rk_pred = predict_rk(n_vals, n_alts.reshape(-1, 1), np.array([alts[s_idx]]), kp)

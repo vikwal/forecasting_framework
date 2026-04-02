@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
+from tqdm import tqdm
 
 # Allow imports from the project root (utils/, etc.)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,6 +44,222 @@ def load_config(path: str) -> dict:
     """Load YAML config from *path*."""
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _parse_coords_from_filename(fname: str):
+    """Parse grid point coordinates from ICON-D2 CSV filename.
+
+    Expected format: ``<lat_int>_<lat_frac>_<lon_int>_<lon_frac>_ML.csv``
+    Example: ``52_15_10_45_ML.csv`` → (52.15, 10.45)
+
+    Returns (lat, lon) as floats, or None if parsing fails.
+    """
+    stem = fname.replace("_ML.csv", "")
+    parts = stem.split("_")
+    if len(parts) < 4:
+        return None
+    try:
+        lat = float(f"{parts[0]}.{parts[1]}")
+        lon = float(f"{parts[2]}.{parts[3]}")
+        return lat, lon
+    except (ValueError, IndexError):
+        return None
+
+
+def load_nwp_wind_speed(
+    nwp_path: str,
+    station_ids: list,
+    station_lats: np.ndarray,
+    station_lons: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    hub_height: float = 10.0,
+    forecast_hours: tuple = ("06", "09", "12", "15"),
+) -> np.ndarray:
+    """Load ICON-D2 NWP wind speed per station, aligned to *timestamps*.
+
+    File structure::
+
+        <nwp_path>/ML/<forecast_hour>/<station_id>/<lat_int>_<lat_frac>_<lon_int>_<lon_frac>_ML.csv
+
+    For each station:
+    - Parses grid point coordinates from all CSV filenames in the folder.
+    - Selects the nearest grid point via geodesic distance.
+    - Loads that single CSV across all forecast hours.
+    - Selects the height level closest to *hub_height* metres.
+    - When multiple forecast runs cover the same timestamp, keeps the one
+      with the smallest forecasttime (= most recent / shortest lead time).
+
+    Returns
+    -------
+    ndarray of shape (T, N), NaN where no NWP data is available.
+    """
+    from geopy.distance import geodesic
+
+    T = len(timestamps)
+    N = len(station_ids)
+    result = np.full((T, N), np.nan, dtype=np.float64)
+
+    if timestamps.tz is None:
+        ts_idx = pd.DatetimeIndex(timestamps).tz_localize("UTC")
+    else:
+        ts_idx = timestamps
+
+    for j, sid in tqdm(enumerate(station_ids), total=N, desc="Loading ICON-D2 NWP", unit="station"):
+        station_coord = (station_lats[j], station_lons[j])
+
+        # --- find nearest grid point (same across all forecast hours) ---
+        nearest_fname = None
+        min_dist = np.inf
+
+        # Use first available forecast hour to discover grid point filenames
+        for fh in forecast_hours:
+            folder = os.path.join(nwp_path, "ML", fh, sid)
+            if not os.path.isdir(folder):
+                continue
+            candidates = [f for f in os.listdir(folder) if f.endswith("_ML.csv")]
+            for fname in candidates:
+                coords = _parse_coords_from_filename(fname)
+                if coords is None:
+                    continue
+                dist = geodesic(station_coord, coords).km
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_fname = fname
+            break  # grid point filenames are the same for all forecast hours
+
+        if nearest_fname is None:
+            logger.warning("Station %s: no NWP grid point found — nwp_wind_speed will be NaN.", sid)
+            continue
+
+        logger.debug("Station %s: nearest grid point %s (%.2f km)", sid, nearest_fname, min_dist)
+
+        # --- load that grid point CSV across all forecast hours ---
+        frames = []
+        for fh in forecast_hours:
+            fpath = os.path.join(nwp_path, "ML", fh, sid, nearest_fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                df_nwp = pd.read_csv(fpath, parse_dates=["starttime"])
+                frames.append(df_nwp)
+            except Exception as exc:
+                logger.debug("Skipping %s: %s", fpath, exc)
+
+        if not frames:
+            logger.warning("Station %s: could not load NWP CSV — nwp_wind_speed will be NaN.", sid)
+            continue
+
+        data = pd.concat(frames, ignore_index=True)
+        data = data[data["forecasttime"] > 0].copy()
+
+        data["wind_speed_nwp"] = np.sqrt(data["u_wind"] ** 2 + data["v_wind"] ** 2)
+        data["height"] = (data["toplevel"] + data["bottomlevel"]) / 2.0
+        data["timestamp"] = pd.to_datetime(data["starttime"], utc=True) + pd.to_timedelta(
+            data["forecasttime"], unit="h"
+        )
+        data["height_diff"] = (data["height"] - hub_height).abs()
+
+        # For each timestamp: level closest to hub_height, then most recent forecast
+        data = data.sort_values(["timestamp", "height_diff", "forecasttime"])
+        data = data.drop_duplicates(subset=["timestamp"], keep="first")
+
+        nwp_series = data.set_index("timestamp")["wind_speed_nwp"]
+        result[:, j] = nwp_series.reindex(ts_idx).values
+
+    n_valid = np.sum(~np.isnan(result))
+    logger.info(
+        "NWP wind speed loaded: %.1f%% of values available.",
+        100.0 * n_valid / (T * N),
+    )
+    return result
+
+
+def load_ecmwf_wind_speed(
+    station_ids: list,
+    station_lats: np.ndarray,
+    station_lons: np.ndarray,
+    timestamps: pd.DatetimeIndex,
+    db_url: str,
+) -> np.ndarray:
+    """Load ECMWF wind speed at 10 m per station from PostGIS database, aligned to *timestamps*.
+
+    Uses the nearest ECMWF grid point (rank=1) via PostGIS KNN operator.
+    Computes wind_speed = sqrt(u_wind10m² + v_wind10m²).
+    When multiple forecast runs cover the same timestamp, keeps the one
+    with the smallest forecasttime (= most recent / shortest lead time).
+
+    Returns
+    -------
+    ndarray of shape (T, N), NaN where no ECMWF data is available.
+    """
+    try:
+        from sqlalchemy import create_engine
+    except ImportError:
+        raise ImportError("sqlalchemy required: pip install sqlalchemy psycopg2-binary")
+
+    T = len(timestamps)
+    N = len(station_ids)
+    result = np.full((T, N), np.nan, dtype=np.float64)
+
+    if timestamps.tz is None:
+        ts_idx = pd.DatetimeIndex(timestamps).tz_localize("UTC")
+    else:
+        ts_idx = timestamps
+
+    ts_min = ts_idx.min().strftime("%Y-%m-%d %H:%M:%S%z")
+    ts_max = ts_idx.max().strftime("%Y-%m-%d %H:%M:%S%z")
+
+    for j, sid in tqdm(enumerate(station_ids), total=N, desc="Loading ECMWF", unit="station"):
+        lat, lon = station_lats[j], station_lons[j]
+
+        query = f"""
+        WITH nearest AS (
+            SELECT geom,
+                   ROW_NUMBER() OVER (
+                       ORDER BY geom <-> ST_SetSRID(ST_MakePoint({lon}, {lat}), 4326)
+                   ) AS rank
+            FROM ecmwf_grid_points
+            ORDER BY geom <-> ST_SetSRID(ST_MakePoint({lon}, {lat}), 4326)
+            LIMIT 1
+        )
+        SELECT e.starttime, e.forecasttime, e.u_wind_10m, e.v_wind_10m
+        FROM ecmwf_wind_sl e
+        JOIN nearest n ON e.geom = n.geom
+        WHERE e.forecasttime > 0
+          AND e.starttime BETWEEN '{ts_min}' AND '{ts_max}'
+        ORDER BY e.starttime, e.forecasttime
+        """
+
+        engine = create_engine(db_url)
+        try:
+            data = pd.read_sql(query, engine)
+        except Exception as exc:
+            logger.warning("Station %s: ECMWF query failed (%s) — skipping.", sid, exc)
+            continue
+        finally:
+            engine.dispose()
+
+        if data.empty:
+            logger.warning("Station %s: no ECMWF data returned.", sid)
+            continue
+
+        data["starttime"] = pd.to_datetime(data["starttime"], utc=True)
+        data["timestamp"] = data["starttime"] + pd.to_timedelta(data["forecasttime"], unit="h")
+        data["wind_speed_ecmwf"] = np.sqrt(data["u_wind_10m"] ** 2 + data["v_wind_10m"] ** 2)
+
+        # Keep most recent forecast per timestamp (smallest forecasttime)
+        data = data.sort_values(["timestamp", "forecasttime"])
+        data = data.drop_duplicates(subset=["timestamp"], keep="first")
+
+        ecmwf_series = data.set_index("timestamp")["wind_speed_ecmwf"]
+        result[:, j] = ecmwf_series.reindex(ts_idx).values
+
+    n_valid = np.sum(~np.isnan(result))
+    logger.info(
+        "ECMWF wind speed loaded: %.1f%% of values available.",
+        100.0 * n_valid / (T * N),
+    )
+    return result
 
 
 def load_data(config: dict) -> tuple:
@@ -91,9 +308,15 @@ def load_data(config: dict) -> tuple:
     cols_to_load = ["station_id", "timestamp", "wind_speed"]
     if do_uv:
         cols_to_load.append("wind_direction")
-    # Dynamic RK features (all except 'altitude' which comes from metadata)
+    # Dynamic RK features (all except 'altitude' which comes from metadata,
+    # and 'nwp_wind_speed' which is computed from wind_speed_t* columns)
     rk_feature_names_cfg = interp_cfg.get("rk_features") or []
-    dynamic_rk_cols = [f for f in rk_feature_names_cfg if f != "altitude"]
+    nwp_wind_requested = "nwp_wind_speed" in rk_feature_names_cfg
+    ecmwf_wind_requested = "ecmwf_wind_speed" in rk_feature_names_cfg
+    dynamic_rk_cols = [
+        f for f in rk_feature_names_cfg
+        if f not in ("altitude", "nwp_wind_speed", "ecmwf_wind_speed")
+    ]
     cols_to_load.extend(dynamic_rk_cols)
 
     all_dfs = []
@@ -151,7 +374,7 @@ def load_data(config: dict) -> tuple:
 
     if rk_feature_names:
         rk_static_features["altitude"] = alts   # always available as static
-        dynamic_names = [f for f in rk_feature_names if f != "altitude"]
+        dynamic_names = [f for f in rk_feature_names if f not in ("altitude", "nwp_wind_speed", "ecmwf_wind_speed")]
         for fname in dynamic_names:
             if fname in combined.columns:
                 piv = combined.pivot_table(
@@ -165,12 +388,70 @@ def load_data(config: dict) -> tuple:
             else:
                 logger.warning("RK feature '%s' not found in CSVs — skipping.", fname)
 
+        # Load NWP wind speed from raw ICON-D2 CSVs if requested
+        if nwp_wind_requested:
+            nwp_path = config["data"].get("nwp_path")
+            if not nwp_path:
+                logger.warning("nwp_wind_speed requested but data.nwp_path not set in config — skipping.")
+            else:
+                hub_height = float(interp_cfg.get("nwp_hub_height", 10.0))
+                logger.info("=== Loading ICON-D2 NWP wind speed (hub_height=%.0f m) ===", hub_height)
+                nwp_matrix = load_nwp_wind_speed(
+                    nwp_path=nwp_path,
+                    station_ids=station_ids,
+                    station_lats=lats,
+                    station_lons=lons,
+                    timestamps=pivot.index,
+                    hub_height=hub_height,
+                )
+                rk_dynamic_features["nwp_wind_speed"] = nwp_matrix
+                logger.info("Loaded RK feature 'nwp_wind_speed' as (T, N) matrix.")
+
+        # Load ECMWF wind speed from PostGIS database if requested
+        if ecmwf_wind_requested:
+            db_url = os.environ.get("ECMWF_WIND_SL_URL")
+            if not db_url:
+                logger.warning("ecmwf_wind_speed requested but ECMWF_WIND_SL_URL not set — skipping.")
+            else:
+                logger.info("=== Loading ECMWF wind speed from database ===")
+                ecmwf_matrix = load_ecmwf_wind_speed(
+                    station_ids=station_ids,
+                    station_lats=lats,
+                    station_lons=lons,
+                    timestamps=pivot.index,
+                    db_url=db_url,
+                )
+                rk_dynamic_features["ecmwf_wind_speed"] = ecmwf_matrix
+                logger.info("Loaded RK feature 'ecmwf_wind_speed' as (T, N) matrix.")
+
         # Keep only features that were actually loaded
         rk_feature_names = [
             f for f in rk_feature_names
             if f in rk_static_features or f in rk_dynamic_features
         ]
         logger.info("Final RK feature list: %s", rk_feature_names)
+
+        # Diagnostics: NaN coverage per dynamic feature
+        for fname, arr in rk_dynamic_features.items():
+            nan_pct = 100.0 * np.sum(np.isnan(arr)) / arr.size
+            logger.info("  Feature '%s': %.1f%% NaN", fname, nan_pct)
+
+        # Drop timestamps where any dynamic feature has NaN in any station
+        if rk_dynamic_features:
+            valid_mask = np.ones(len(pivot), dtype=bool)
+            for fname, arr in rk_dynamic_features.items():
+                valid_mask &= ~np.any(np.isnan(arr), axis=1)
+            n_dropped = int((~valid_mask).sum())
+            if n_dropped > 0:
+                logger.info(
+                    "Dropping %d timestamps with NaN in dynamic RK features (%.1f%%).",
+                    n_dropped, 100.0 * n_dropped / len(pivot),
+                )
+                pivot = pivot.iloc[valid_mask]
+                if u_matrix is not None:
+                    u_matrix = u_matrix[valid_mask]
+                    v_matrix = v_matrix[valid_mask]
+                rk_dynamic_features = {k: v[valid_mask] for k, v in rk_dynamic_features.items()}
 
     logger.info(
         "Loaded data: %d timestamps × %d stations", len(pivot), len(station_ids)
@@ -282,6 +563,7 @@ def main() -> None:
         description="Spatial wind-speed interpolation: IDW / OK / RK with LOO-CV"
     )
     parser.add_argument("--config", required=True, help="Path to YAML config file")
+    parser.add_argument("-s", "--suffix", default="", help="Suffix appended to all output filenames, e.g. '_nwp' or '_exp'")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -290,11 +572,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    log_level = getattr(logging, args.log_level)
+    log_fmt = "%(asctime)s  %(levelname)-8s  %(message)s"
+    logging.basicConfig(level=log_level, format=log_fmt, datefmt="%H:%M:%S")
 
     config = load_config(args.config)
     interp_cfg = config.get("interpolation", {})
@@ -306,11 +586,26 @@ def main() -> None:
     max_dist = interp_cfg.get("max_variogram_dist")      # None → auto
     variogram_model = interp_cfg.get("variogram_model", "spherical")
     variogram_segments = int(interp_cfg.get("variogram_segments", 1))
+    variogram_detrend = bool(interp_cfg.get("variogram_detrend", False))
     aniso_cfg = interp_cfg.get("anisotropy", {})
     output_dir = out_cfg.get("path", "data/geostatistics")
-    prefix = out_cfg.get("prefix", "spatial_interp")
+    config_stem = os.path.splitext(os.path.basename(args.config))[0]  # e.g. "config_spatial_interpolation"
+    config_stem = config_stem.removeprefix("config_")                  # e.g. "spatial_interpolation"
+    prefix = config_stem + (f"_{args.suffix}" if args.suffix else "")
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # Add file handler now that we know prefix and output_dir
+    logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    log_path = os.path.join(logs_dir, f"{prefix}.log")
+    fh = logging.FileHandler(log_path, mode="w")
+    fh.setLevel(log_level)
+    fh.setFormatter(logging.Formatter(log_fmt, datefmt="%H:%M:%S"))
+    logging.getLogger().addHandler(fh)
+
+    logger.info("=== Output prefix: %s  |  dir: %s ===", prefix, output_dir)
+    logger.info("=== Log file: %s ===", log_path)
 
     # 1. Load data
     logger.info("=== Loading data ===")
@@ -358,19 +653,34 @@ def main() -> None:
         logger.info("=== Fitting %d segment variograms ===", n_segs)
 
     variogram_params_list = []
+    flat_variogram_timestamps = []
     for seg_i, sl in enumerate(seg_slices):
         seg_vals = values_matrix[sl]
         lags_emp, sv_emp = compute_empirical_semivariance(
-            seg_vals, dist_matrix, n_lags=n_lags, max_dist=max_dist
+            seg_vals, dist_matrix, n_lags=n_lags, max_dist=max_dist,
+            detrend=variogram_detrend,
         )
         vp = fit_global_variogram(lags_emp, sv_emp, model=variogram_model)
         variogram_params_list.append(vp)
         if n_segs <= 12 or seg_i == 0 or seg_i == n_segs - 1:
             logger.info("  Segment %d/%d: %s", seg_i + 1, n_segs, vp)
+        # Collect timestamps where variogram is flat (nugget + psill ≈ 0)
+        if vp["nugget"] + vp["psill"] < 1e-6:
+            flat_variogram_timestamps.append(str(timestamps[sl.start]))
+
+    if flat_variogram_timestamps:
+        flat_df = pd.DataFrame({"timestamp": flat_variogram_timestamps})
+        flat_path = os.path.join(output_dir, f"{prefix}_flat_variogram_timestamps.csv")
+        flat_df.to_csv(flat_path, index=False)
+        logger.info(
+            "%d timestamps with flat variogram (sill≈0) saved → %s",
+            len(flat_variogram_timestamps), flat_path,
+        )
 
     # Save variogram plot for the first (or only) segment
     lags_emp0, sv_emp0 = compute_empirical_semivariance(
-        values_matrix[seg_slices[0]], dist_matrix, n_lags=n_lags, max_dist=max_dist
+        values_matrix[seg_slices[0]], dist_matrix, n_lags=n_lags, max_dist=max_dist,
+        detrend=variogram_detrend,
     )
     save_variogram_plot(lags_emp0, sv_emp0, variogram_params_list[0], output_dir, prefix)
 
