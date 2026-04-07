@@ -19,12 +19,14 @@
 | `run_train_all_stations.sh` | Batch-Training für alle Stationen |
 | `run_hpo_all_stations.sh` | Batch-HPO für alle Stationen |
 | `eval_dashboard.py` | Visualisierung der Ergebnisse aus `results/` |
+| `optuna_dashboard.py` | Streamlit-Dashboard für HPO-Studies (PostgreSQL via `OPTUNA_STORAGE`), läuft als systemd-Service auf Port 8503 → `docs/optuna_dashboard.md` |
 
 ## Utils (`utils/`)
 
 | Modul | Inhalt |
 |---|---|
 | `preprocessing.py` | Hauptpipeline für Datenaufbereitung — **modellabhängig** (TFT vs. TCN-GRU) und **quellenabhängig** (Wind vs. PV). Kernfunktionen: `pipeline()`, `prepare_data()`, `prepare_data_for_tft()`, `preprocess_synth_wind_icond2()`, `preprocess_synth_pv()` |
+| `db_connector.py` | **NEU**: PostgreSQL/PostGIS Datenbankzugriff für ICON-D2 Daten. Connection Pool, Grid Point KNN-Suche, Multilevel-Datenlader → `docs/icond2_database_integration.md` |
 | `models.py` | Modelldefinitionen inkl. TFT, TCN-GRU, FNN, LSTM; Factory-Funktion `get_model()` |
 | `federated.py` | FL-Logik: Aggregation (FedAvg), Datenladen pro Client, Ray-Integration |
 | `eval.py` | Evaluierungsmetriken, Persistence-Baseline, Ergebnisspeicherung |
@@ -80,10 +82,14 @@ Detaillierte Feature-Dokumentation in `docs/`:
 - [global_early_stopping.md](docs/global_early_stopping.md) — Early Stopping über globale FL-Runden
 - [preprocess_icond2_wind.md](docs/preprocess_icond2_wind.md) — ICON-D2 Wind Preprocessing: Datenstruktur, Features, Luftdichte, Lookback/Horizon-Zusammenhang, bekannte Limitierungen
 - [predict_wind.md](docs/predict_wind.md) — Wind-Zielgrößen (`wind_speed` & `power`), `extrapolate`-Parameter (Power Law auf Nabenhöhe, `wind_speed_hub_extrap`), NWP-Baseline, Skill_NWP, MultiIndex-Handling, bekannte Fallstricke
+- [optuna_dashboard.md](docs/optuna_dashboard.md) — Deployment (systemd), Datenbank-Anbindung via `OPTUNA_STORAGE`, Passwort-geschütztes Study-Löschen
+- [icond2_database_integration.md](docs/icond2_database_integration.md) — **NEU (April 2026)**: PostgreSQL-Datenbankzugriff für ICON-D2 (Config: `data.icond2_source: 'database'`), Performance, Fehlerbehandlung, Migration CSV→DB
 
 ## Wichtige Hinweise
 
 - README.md erwähnt TensorFlow — das Framework nutzt aber **PyTorch**
 - Stationsdaten liegen auf NAS (`/mnt/nas/synthetic/`)
+- **ICON-D2 Daten**: Standardmäßig aus PostgreSQL-Datenbank (`data.icond2_source: 'database'`), CSV-Fallback verfügbar
+- **DB-Zugriff**: Umgebungsvariable `WEATHER_DB_URL` muss in `.bashrc` gesetzt sein
 - GPU-Nutzung: GPU 0 oft von anderen Prozessen belegt → in Configs ausschließen
 - `frcst/` ist das virtuelle Environment

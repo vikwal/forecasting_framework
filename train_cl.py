@@ -345,14 +345,14 @@ def main() -> None:
                     val_dfs, period_config, features,
                     scaler_x=global_scaler_x, scaler_y=scaler_y_arg
                 )
-                X_train, y_train, _, _, _ = tools.combine_datasets_efficiently(train_generator)
-                _, _, X_test, y_test, test_data = tools.combine_datasets_efficiently(val_generator)
+                X_train, y_train, _, _, _, _ = tools.combine_datasets_efficiently(train_generator)
+                _, _, X_test, y_test, test_data, _ = tools.combine_datasets_efficiently(val_generator)
             else:
                 data_generator = tools.create_data_generator(
                     dfs, period_config, features,
                     scaler_x=global_scaler_x, scaler_y=scaler_y_arg
                 )
-                X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+                X_train, y_train, X_test, y_test, test_data, _ = tools.combine_datasets_efficiently(data_generator)
 
             # Note: Don't delete dfs yet - needed for evaluation pipeline later
             gc.collect()
@@ -459,7 +459,7 @@ def main() -> None:
                 logging.debug("Preparing evaluation data for first period...")
                 eval_data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x,
                                                                    scaler_y=global_scaler_y if fit_scaler_y else None)
-                _, _, _, _, test_data = tools.combine_datasets_efficiently(eval_data_generator)
+                _, _, _, _, test_data, _ = tools.combine_datasets_efficiently(eval_data_generator)
                 gc.collect()
 
             logging.info(f"Training completed. Final metrics:")
@@ -477,60 +477,30 @@ def main() -> None:
             eval_period_config['data']['test_end'] = eval_test_end
             data_generator = tools.create_data_generator(dfs, eval_period_config, features, scaler_x=global_scaler_x,
                                                            scaler_y=global_scaler_y if fit_scaler_y else None)
-            _, _, _, _, test_data = tools.combine_datasets_efficiently(data_generator)
+            _, _, _, _, test_data, _ = tools.combine_datasets_efficiently(data_generator)
             model = trained_model
             history = None  # No training history for evaluation-only periods
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             gc.collect()
 
-    # Save model if requested
-    if args.save_model:
-        os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
-
-        if is_chronos:
-            model_path = os.path.join('models', f'chronos_{study_name}')
-            chronos_pipeline.save_pretrained(model_path)
-            logging.info(f"Chronos-2 model saved to: {model_path}/")
-
-            scaler_path = os.path.join('models', 'scaler', f'scaler_chronos_{study_name}.pkl')
-        else:
-            model_path = os.path.join('models', f'{study_name}.pt')
-            torch.save(model.state_dict(), model_path)
-            logging.info(f"Model saved to: {model_path}")
-
-            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}.pkl')
-
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(global_scaler_x, f)
-        logging.info(f"Scaler saved to: {scaler_path}")
-
-        if config['data']['target_col'] != 'power':
-            scaler_y_path = scaler_path.replace('scaler_', 'scaler_y_')
-            with open(scaler_y_path, 'wb') as f:
-                pickle.dump(global_scaler_y, f)
-            logging.info(f"Scaler Y saved to: {scaler_y_path}")
-
         # --- GENERATE PREDICTIONS AND EVALUATE PER PARK ---
         logging.info('Start evaluation pipeline...')
 
-        # Evaluate each park individually
         eval_results = []
         for park_key, (X_test_park, y_test_park, index_test_park, scaler_y_park) in test_data.items():
             logging.debug(f'Evaluating park: {park_key}')
 
-            # Get park data
-            park_df = dfs[park_key]
+            park_df = dfs.get(park_key) or (val_dfs.get(park_key) if val_dfs else None)
+            if park_df is None:
+                logging.warning(f"No raw data found for park {park_key}, skipping evaluation.")
+                continue
 
-            # Determine test_start for evaluation
-            # For train_once_eval_multiple, use eval_test_start (period-specific)
-            # For retraining, use training_test_start (same as period-specific)
             if train_once_eval_multiple:
                 test_start_str = eval_test_start
             else:
                 test_start_str = period_config['data']['test_start']
             t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
 
-            # Run evaluation pipeline for this park
             if is_chronos:
                 known_cols = period_config['params'].get('known_features', [])
                 y_true_park, y_pred_park = tools.get_y_chronos2(
@@ -579,10 +549,8 @@ def main() -> None:
                     device=device
                 )
             park_eval['key'] = park_key
-            # Add park identifier
             eval_results.append(park_eval)
 
-        # Combine all evaluations for this period
         if eval_results:
             period_evaluation = pd.concat(eval_results, ignore_index=False)
         else:
@@ -591,7 +559,6 @@ def main() -> None:
         logging.info(f"Per-park evaluation completed: {len(eval_results)} parks evaluated")
 
         if not period_evaluation.empty:
-            # Add aggregated statistics
             period_evaluation.loc['mean'] = period_evaluation.mean(numeric_only=True)
             period_evaluation.loc['std'] = period_evaluation.std(numeric_only=True)
             logging.info(f"\n{period_evaluation.to_string()}")
@@ -603,7 +570,6 @@ def main() -> None:
         else:
             period_evaluation['t_0'] = period_config['eval']['t_0']
 
-        # Store results for this period
         all_evaluations.append(period_evaluation)
         if history is not None:
             all_histories.append(history)
@@ -615,6 +581,58 @@ def main() -> None:
                 logging.info(f"Completed evaluation cycle {period_idx + 1}/{len(test_periods)}")
         else:
             logging.info(f"Completed training cycle {period_idx + 1}/{len(test_periods)}")
+
+        # --- PER-PERIOD SAVING (only for multiple retraining cycles) ---
+        if len(test_periods) > 1 and should_train and args.save_model:
+            period_n = period_idx + 1
+            os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
+            period_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            period_pkl = os.path.join('results', base_dir, f'{study_name}_{period_n}_{period_timestamp}.pkl')
+            with open(period_pkl, 'wb') as f:
+                pickle.dump({
+                    'hyperparameters': hyperparameters,
+                    'config': config,
+                    'history': history,
+                    'evaluation': period_evaluation,
+                    'test_dates': [(current_test_start, current_test_end)],
+                }, f)
+            logging.info(f"Period {period_n} results saved to: {period_pkl}")
+            if not is_chronos:
+                period_model_path = os.path.join('models', f'{study_name}_{period_n}.pt')
+                torch.save(model.state_dict(), period_model_path)
+                logging.info(f"Period {period_n} model saved to: {period_model_path}")
+                period_scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}_{period_n}.pkl')
+                with open(period_scaler_path, 'wb') as f:
+                    pickle.dump(global_scaler_x, f)
+                if config['data']['target_col'] != 'power':
+                    with open(period_scaler_path.replace('scaler_', 'scaler_y_'), 'wb') as f:
+                        pickle.dump(global_scaler_y, f)
+                logging.info(f"Period {period_n} scaler saved to: {period_scaler_path}")
+
+    # Save final model if requested
+    if args.save_model:
+        os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
+
+        if is_chronos:
+            model_path = os.path.join('models', f'chronos_{study_name}')
+            chronos_pipeline.save_pretrained(model_path)
+            logging.info(f"Chronos-2 model saved to: {model_path}/")
+            scaler_path = os.path.join('models', 'scaler', f'scaler_chronos_{study_name}.pkl')
+        else:
+            model_path = os.path.join('models', f'{study_name}.pt')
+            torch.save(model.state_dict(), model_path)
+            logging.info(f"Model saved to: {model_path}")
+            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}.pkl')
+
+        with open(scaler_path, 'wb') as f:
+            pickle.dump(global_scaler_x, f)
+        logging.info(f"Scaler saved to: {scaler_path}")
+
+        if config['data']['target_col'] != 'power':
+            scaler_y_path = scaler_path.replace('scaler_', 'scaler_y_')
+            with open(scaler_y_path, 'wb') as f:
+                pickle.dump(global_scaler_y, f)
+            logging.info(f"Scaler Y saved to: {scaler_y_path}")
 
     # --- AGGREGATE RESULTS ACROSS ALL RETRAINING PERIODS ---
     logging.info(f"\n{'='*80}")

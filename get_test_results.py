@@ -184,79 +184,62 @@ def calculate_metrics(y_true, y_pred):
     return r2, rmse, mae
 
 
-def compute_skill_nwp(dfs, test_data, y_test_np, rmse_model, config_data, target_col):
+def compute_skill_nwp(y_test_np, rmse_model, target_col, nwp_raw=None):
     """
     Compute Skill_NWP = 1 - RMSE_model / RMSE_NWP.
 
-    RMSE_NWP is the direct RMSE between the nearest NWP grid point's wind_speed_h10
-    column and the measured wind_speed column over the test period.
-    No windowing or aggregation across forecast runs — timestamps are deduplicated
-    so each observed value is counted once.
+    Uses pre-extracted raw (unscaled) NWP values that were saved before
+    feature scaling in prepare_data_for_tft(). This ensures a fair comparison
+    on the original physical scale.
 
-    Column priority for NWP baseline:
-      1. '_1' suffix (geodesic_next method, nearest point by construction)
-      2. Inner quad labels '_NW', '_NE', '_SW', '_SE' (relative_position method)
-      3. First available wind_speed_h10_* column
+    Args:
+        y_test_np:   Ground truth array, shape (n_samples, horizon) in original scale.
+        rmse_model:  RMSE of the ML model predictions (float).
+        target_col:  Target column name (skill only computed for 'wind_speed').
+        nwp_raw:     Raw (unscaled) NWP baseline, shape (n_samples, horizon).
+                     Extracted from wind_speed_h10_1 (nearest grid point) before scaling.
 
-    Returns float or None (None when target_col != 'wind_speed' or data is missing).
+    Returns:
+        float or None (None when target_col != 'wind_speed' or data is missing).
     """
     if target_col != 'wind_speed':
         return None
 
-    test_start_ts = pd.Timestamp(config_data['test_start'], tz='UTC')
-    test_end_ts   = pd.Timestamp(config_data['test_end'],   tz='UTC')
-
-    y_nwp_all  = []
-    y_true_all = []
-
-    for key in test_data:
-        if key not in dfs:
-            continue
-        df_raw = dfs[key]
-
-        # --- select NWP baseline column ---
-        # The nearest grid point label is stored in df.attrs during preprocessing.
-        # For geodesic_next: label='1' → column 'wind_speed_h10_1'.
-        # For relative_position: label=compass direction of geodesically nearest point (e.g. 'SW').
-        if 'wind_speed' not in df_raw.columns:
-            continue
-
-        nearest_label = df_raw.attrs.get('nwp_nearest_label')
-        if nearest_label is None:
-            logger.warning(f"nwp_nearest_label not set in df.attrs for {key} — skipping Skill_NWP")
-            continue
-
-        nwp_col = f'wind_speed_h10_{nearest_label}'
-        if nwp_col not in df_raw.columns:
-            logger.warning(f"Expected NWP baseline column '{nwp_col}' not found for {key} — skipping")
-            continue
-
-        # --- flatten MultiIndex to unique timestamps (no averaging) ---
-        if isinstance(df_raw.index, pd.MultiIndex):
-            df_flat = (df_raw[[nwp_col, 'wind_speed']]
-                       .reset_index()
-                       .drop_duplicates('timestamp')
-                       .set_index('timestamp'))
-        else:
-            df_flat = df_raw[[nwp_col, 'wind_speed']]
-
-        df_test = df_flat.loc[test_start_ts:test_end_ts]
-        if df_test.empty:
-            continue
-
-        mask = df_test[nwp_col].notna() & df_test['wind_speed'].notna()
-        y_nwp_all.append(df_test.loc[mask, nwp_col].values)
-        y_true_all.append(df_test.loc[mask, 'wind_speed'].values)
-
-    if not y_nwp_all:
+    if nwp_raw is None:
+        logger.warning("No raw NWP baseline available — cannot compute Skill_NWP. "
+                       "Ensure wind_speed_h10 or wind_speed_h10_1 is in known_features.")
         return None
 
-    y_nwp  = np.concatenate(y_nwp_all)
-    y_true = np.concatenate(y_true_all)
-    rmse_nwp = float(np.sqrt(mean_squared_error(y_true, y_nwp)))
-    if rmse_nwp == 0:
+    try:
+        y_nwp_flat = nwp_raw.flatten()
+        y_test_flat = y_test_np.flatten()
+
+        # Ensure same length
+        min_len = min(len(y_nwp_flat), len(y_test_flat))
+        y_nwp_flat = y_nwp_flat[:min_len]
+        y_test_flat = y_test_flat[:min_len]
+
+        # Remove NaN values
+        mask = ~(np.isnan(y_nwp_flat) | np.isnan(y_test_flat))
+        y_nwp_flat = y_nwp_flat[mask]
+        y_test_flat = y_test_flat[mask]
+
+        if len(y_nwp_flat) == 0:
+            logger.warning("No valid NWP predictions after removing NaN values")
+            return None
+
+        rmse_nwp = float(np.sqrt(mean_squared_error(y_test_flat, y_nwp_flat)))
+        if rmse_nwp == 0:
+            logger.warning("RMSE_NWP is 0 — cannot compute skill")
+            return None
+
+        skill = 1.0 - rmse_model / rmse_nwp
+        logger.info(f"Skill_NWP: {skill:.4f} (RMSE_model={rmse_model:.4f}, RMSE_NWP={rmse_nwp:.4f})")
+        return skill
+
+    except Exception as e:
+        logger.warning(f"Error computing Skill_NWP: {e}")
         return None
-    return 1.0 - rmse_model / rmse_nwp
 
 
 def evaluate_model(model_path, models_dir, identifier_key='station_id', identifier_value=None, config=None, scaler_x=None, scaler_y=None, sample_type=None):
@@ -300,14 +283,18 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
 
     config['model']['name'] = 'tft'
 
-    # Extract hyperparameters from model name
-    parts = model_name.replace('.pt', '').split('_')
-    output_dim = int([p for p in parts if 'out-' in p][0].replace('out-', ''))
-    freq_part = [p for p in parts if 'freq-' in p][0]
-    freq = freq_part.replace('freq-', '')
-    freq_idx = parts.index(freq_part)
-    study_name_suffix = '_'.join(parts[freq_idx+1:])
-    study_name = f'cl_m-{config["model"]["name"]}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
+    # Derive study name directly from model filename.
+    # Strips period suffixes (_1, _2, ...) and _global/_local suffixes.
+    stem = model_name.replace('.pt', '')
+    # Strip period suffix (_1, _2, etc.)
+    import re
+    stem = re.sub(r'_\d+$', '', stem)
+    # Strip _global/_local
+    for suffix in ('_global', '_local'):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+    study_name = stem
 
     # Load hyperparameters
     study = None
@@ -349,20 +336,17 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
                 test_end = test_end.replace(hour=23, minute=0, second=0)
 
             for key, df in dfs.items():
-                df_temp = df.copy()
-                if target_col in df_temp.columns:
-                    df_temp.drop(target_col, axis=1, inplace=True)
-
                 t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
                 df_train, _ = preprocessing.split_data(
-                    data=df_temp,
+                    data=df,
                     train_frac=config['data']['train_frac'],
                     test_start=test_start,
                     test_end=test_end,
                     t_0=t_0
                 )
-                global_scaler_x.partial_fit(df_train)
-                del df_temp, df_train
+                df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                global_scaler_x.partial_fit(df_train_x.values)
+                del df_train, df_train_x
                 gc.collect()
 
         # Fit scaler_y on target column if needed (when target is not pre-normalised)
@@ -395,7 +379,7 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
     try:
         data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x,
                                                      scaler_y=global_scaler_y if target_col != 'power' else None)
-        X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+        X_train, y_train, X_test, y_test, test_data, nwp_raw_test = tools.combine_datasets_efficiently(data_generator)
 
         # Extract feature dimensions
         feature_dims = {}
@@ -488,7 +472,9 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
         r2, rmse, mae = calculate_metrics(y_test_np, predictions_np)
 
         try:
-            skill_nwp = compute_skill_nwp(dfs, test_data, y_test_np, rmse, config['data'], target_col)
+            skill_nwp = compute_skill_nwp(
+                y_test_np, rmse, target_col, nwp_raw=nwp_raw_test
+            )
         except Exception as e_nwp:
             logger.warning(f"Could not compute Skill_NWP: {e_nwp}")
             skill_nwp = None
@@ -512,7 +498,7 @@ def evaluate_model(model_path, models_dir, identifier_key='station_id', identifi
         return identifier_value, None
 
     # Clean up
-    del model, checkpoint, X_train, y_train, X_test, y_test, dfs
+    del model, checkpoint, X_train, y_train, X_test, y_test, dfs, nwp_raw_test
     gc.collect()
 
     return identifier_value, metrics
@@ -549,14 +535,13 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
 
     global_config['model']['name'] = 'tft'
 
-    # Load hyperparameters
-    parts = model_name.replace('.pt', '').split('_')
-    output_dim = int([p for p in parts if 'out-' in p][0].replace('out-', ''))
-    freq_part = [p for p in parts if 'freq-' in p][0]
-    freq = freq_part.replace('freq-', '')
-    freq_idx = parts.index(freq_part)
-    study_name_suffix = '_'.join(parts[freq_idx+1:])
-    study_name = f'cl_m-{global_config["model"]["name"]}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
+    # Derive study name directly from model filename (strips _global/_local suffixes).
+    stem = model_name.replace('.pt', '')
+    for suffix in ('_global', '_local'):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+    study_name = stem
 
     study = None
     try:
@@ -636,20 +621,17 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
                     continue
 
                 for key, df in dfs.items():
-                    df_temp = df.copy()
-                    if target_col in df_temp.columns:
-                        df_temp.drop(target_col, axis=1, inplace=True)
-
                     t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
                     df_train, _ = preprocessing.split_data(
-                        data=df_temp,
+                        data=df,
                         train_frac=global_config['data']['train_frac'],
                         test_start=test_start,
                         test_end=test_end,
                         t_0=t_0
                     )
-                    global_scaler_x.partial_fit(df_train)
-                    del df_temp, df_train
+                    df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                    global_scaler_x.partial_fit(df_train_x.values)
+                    del df_train, df_train_x
 
                 del dfs
                 gc.collect()
@@ -716,7 +698,7 @@ def evaluate_global_model_daily_r2(model_path, models_dir, local_configs_dirs):
             # Prepare data with GLOBAL scaler
             data_generator = tools.create_data_generator(dfs, global_config, features, scaler_x=global_scaler_x,
                                                          scaler_y=global_scaler_y if target_col != 'power' else None)
-            X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+            X_train, y_train, X_test, y_test, test_data, nwp_raw_test = tools.combine_datasets_efficiently(data_generator)
 
             # Extract feature dimensions
             feature_dims = {}
@@ -913,20 +895,17 @@ def evaluate_local_models_daily_r2(models_dir, local_configs_dirs):
                     test_end = test_end.replace(hour=23, minute=0, second=0)
 
                 for key, df in dfs.items():
-                    df_temp = df.copy()
-                    if target_col in df_temp.columns:
-                        df_temp.drop(target_col, axis=1, inplace=True)
-
                     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
                     df_train, _ = preprocessing.split_data(
-                        data=df_temp,
+                        data=df,
                         train_frac=config['data']['train_frac'],
                         test_start=test_start,
                         test_end=test_end,
                         t_0=t_0
                     )
-                    global_scaler_x.partial_fit(df_train)
-                    del df_temp, df_train
+                    df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                    global_scaler_x.partial_fit(df_train_x.values)
+                    del df_train, df_train_x
 
             if global_scaler_y is None and target_col != 'power':
                 global_scaler_y = StandardScaler()
@@ -946,7 +925,7 @@ def evaluate_local_models_daily_r2(models_dir, local_configs_dirs):
             # Prepare data
             data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x,
                                                          scaler_y=global_scaler_y if target_col != 'power' else None)
-            X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+            X_train, y_train, X_test, y_test, test_data, _ = tools.combine_datasets_efficiently(data_generator)
 
             # Extract feature dimensions
             feature_dims = {}
@@ -1123,14 +1102,13 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
 
     global_config['model']['name'] = 'tft'
 
-    # Load hyperparameters
-    parts = model_name.replace('.pt', '').split('_')
-    output_dim = int([p for p in parts if 'out-' in p][0].replace('out-', ''))
-    freq_part = [p for p in parts if 'freq-' in p][0]
-    freq = freq_part.replace('freq-', '')
-    freq_idx = parts.index(freq_part)
-    study_name_suffix = '_'.join(parts[freq_idx+1:])
-    study_name = f'cl_m-{global_config["model"]["name"]}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
+    # Derive study name directly from model filename (strips _global/_local suffixes).
+    stem = model_name.replace('.pt', '')
+    for suffix in ('_global', '_local'):
+        if stem.endswith(suffix):
+            stem = stem[:-len(suffix)]
+            break
+    study_name = stem
 
     study = None
     try:
@@ -1210,20 +1188,17 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
                     continue
 
                 for key, df in dfs.items():
-                    df_temp = df.copy()
-                    if target_col in df_temp.columns:
-                        df_temp.drop(target_col, axis=1, inplace=True)
-
                     t_0 = 0 if global_config['eval']['eval_on_all_test_data'] else global_config['eval']['t_0']
                     df_train, _ = preprocessing.split_data(
-                        data=df_temp,
+                        data=df,
                         train_frac=global_config['data']['train_frac'],
                         test_start=test_start,
                         test_end=test_end,
                         t_0=t_0
                     )
-                    global_scaler_x.partial_fit(df_train)
-                    del df_temp, df_train
+                    df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                    global_scaler_x.partial_fit(df_train_x.values)
+                    del df_train, df_train_x
 
                 del dfs
                 gc.collect()
@@ -1286,7 +1261,7 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
             # Prepare data with GLOBAL scaler
             data_generator = tools.create_data_generator(dfs, global_config, features, scaler_x=global_scaler_x,
                                                          scaler_y=global_scaler_y if target_col != 'power' else None)
-            X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+            X_train, y_train, X_test, y_test, test_data, nwp_raw_test = tools.combine_datasets_efficiently(data_generator)
 
             # Extract feature dimensions
             feature_dims = {}
@@ -1350,7 +1325,7 @@ def evaluate_global_model_on_local_datasets(model_path, models_dir, local_config
             r2, rmse, mae = calculate_metrics(y_test_np, predictions_np)
 
             try:
-                skill_nwp = compute_skill_nwp(dfs, test_data, y_test_np, rmse, global_config['data'], target_col)
+                skill_nwp = compute_skill_nwp(y_test_np, rmse, target_col, nwp_raw=nwp_raw_test)
             except Exception as e_nwp:
                 logger.warning(f"Could not compute Skill_NWP: {e_nwp}")
                 skill_nwp = None
@@ -1434,7 +1409,7 @@ def evaluate_model_chronos(config, chronos_pipeline, station_id, scaler_x=None, 
 
     try:
         data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x)
-        X_train, y_train, X_test, y_test, _ = tools.combine_datasets_efficiently(data_generator)
+        X_train, y_train, X_test, y_test, _, _ = tools.combine_datasets_efficiently(data_generator)
         gc.collect()
     except Exception as e:
         logger.error(f"Error preparing data: {e}")
@@ -1641,125 +1616,262 @@ def main():
         logger.info(f"Validation stations: {len(val_stations)}")
         logger.info(f"Total stations from config: {len(station_ids)}")
 
-        # Find global models, optionally filtered by --model-name
+        # Check for retrain_interval to handle multiple period models
+        retrain_interval = config['data'].get('retrain_interval', 1)
+        eval_interval = config['data'].get('eval_interval', retrain_interval)
+        
+        # Validate and adjust eval_interval (same logic as train_cl.py)
+        if retrain_interval > 1 and eval_interval != retrain_interval:
+            logger.warning(
+                f"Invalid configuration: retrain_interval={retrain_interval} and eval_interval={eval_interval}. "
+                f"eval_interval can only differ from retrain_interval when retrain_interval=1. "
+                f"Setting eval_interval to {retrain_interval}."
+            )
+            eval_interval = retrain_interval
+        
+        # Calculate test periods if retrain_interval > 1
+        test_periods = []
+        if retrain_interval > 1:
+            logger.info(f"Retrain interval: {retrain_interval} - calculating test periods")
+            
+            test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+            test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+            freq = config['data']['freq']
+            
+            # Use same logic as train_cl.py to calculate periods
+            test_periods = tools.calculate_retrain_periods(test_start, test_end, eval_interval, freq)
+            logger.info(f"Test periods (Date-based, with retraining): {len(test_periods)}")
+            for i, (start, end) in enumerate(test_periods):
+                logger.info(f"  Period {i+1}: {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}")
+        else:
+            # Single period - use original test_start/test_end
+            test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
+            test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
+            test_periods = [(test_start, test_end)]
+            logger.info(f"Single test period: {test_start.strftime('%Y-%m-%d')} to {test_end.strftime('%Y-%m-%d')}")
+
+        # Stem = model name without .pt (e.g. "1dwd_1ecmwf_global" or "1dwd_1ecmwf")
+        model_stem = args.model_name.removesuffix('.pt') if args.model_name else None
+        logger.info(f"Model stem: {model_stem}")
+
+        # Determine if we are looking for global/federated models based on model_stem
+        wants_global = model_stem is not None and "global" in model_stem
+
+        # Find matching model files
         all_model_files = sorted([f for f in models_dir.glob('*.pt') if f.is_file()])
         global_model_files = []
+
         for f in all_model_files:
-            model_id = extract_model_name(f.name)
-            if model_id:
-                parts = model_id.split('_')
-                last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
-                if not (last_part.isdigit() and len(last_part) == 5):
-                    if args.model_name is None or args.model_name in f.name:
-                        global_model_files.append(f)
+            # Filter central vs federated based on model_stem
+            if model_stem:
+                if model_stem not in f.name:
+                    continue
+                
+                if wants_global:
+                    if f.name.startswith("cl_"):
+                        continue
+                else:
+                    if "global" in f.name:
+                        continue
+                    if not f.name.startswith("cl_"):
+                        continue
+
+            parts = f.stem.split('_')
+            last = parts[-1]
+
+            if retrain_interval > 1:
+                if not last.isdigit() or len(last) > 2:
+                    # Single-period model found but retrain_interval > 1
+                    if model_stem and model_stem in f.name:
+                        logger.warning(f"Found model '{f.name}' without retrain suffix, but retrain_interval > 1. "
+                                       f"Skipping this model. Please ensure retrain models have _1, _2 suffixes.")
+                    continue
+                    
+                if not f.stem.endswith('_1'):
+                    continue
+                
+                if last.isdigit() and len(last) == 5:
+                    continue  # station-specific model
+                    
+                global_model_files.append(f)
+                logger.debug(f"Found period model (period 1): {f.name}")
+            else:
+                is_station = last.isdigit() and len(last) == 5
+                is_period = last.isdigit() and len(last) <= 2
+                if is_station or is_period:
+                    continue
+                global_model_files.append(f)
+                logger.debug(f"Found model: {f.name}")
 
         logger.info(f"Found {len(global_model_files)} global model(s) to evaluate")
 
-        for model_path in global_model_files:
-            global_model_id = extract_model_name(model_path.name)
-
-            if args.eval_local:
-                # Per-station evaluation: fit global scaler once, then one row per station
-                output_file = output_dir / f'test_results_{global_model_id}.csv'
-                logger.info(f"Per-station evaluation → {output_file}")
-
-                processed_stations = set()
-                if output_file.exists():
-                    try:
-                        existing_df = pd.read_csv(output_file)
-                        processed_stations = set(existing_df['station_id'].unique())
-                        logger.info(f"Already processed {len(processed_stations)} stations")
-                    except Exception as e:
-                        logger.warning(f"Could not read existing CSV: {e}")
-
-                # Try to load saved scaler, fall back to fitting from data
-                features = preprocessing.get_features(config=config)
-                global_scaler_x, global_scaler_y = load_scaler_for_model(model_path)
-
-                if global_scaler_x is None:
-                    logger.info("Fitting global scaler on all stations from config...")
-                    global_scaler_x = StandardScaler()
-                    target_col = config['data']['target_col']
-                    test_start = pd.Timestamp(config['data']['test_start'], tz='UTC')
-                    test_end = pd.Timestamp(config['data']['test_end'], tz='UTC')
-                    if test_end.hour == 0 and test_end.minute == 0 and test_end.second == 0:
-                        test_end = test_end.replace(hour=23, minute=0, second=0)
-                    t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
-
-                    for j, sid in enumerate(station_ids):
-                        try:
-                            station_config = copy.deepcopy(config)
-                            station_config['data']['files'] = [sid]
-                            dfs = preprocessing.get_data(
-                                data_dir=config['data']['path'],
-                                config=station_config,
-                                freq=config['data']['freq'],
-                                features=features
-                            )
-                            for key, df in dfs.items():
-                                df_temp = df.copy()
-                                if target_col in df_temp.columns:
-                                    df_temp.drop(target_col, axis=1, inplace=True)
-                                df_train, _ = preprocessing.split_data(
-                                    data=df_temp,
-                                    train_frac=config['data']['train_frac'],
-                                    test_start=test_start,
-                                    test_end=test_end,
-                                    t_0=t_0
-                                )
-                                global_scaler_x.partial_fit(df_train)
-                                del df_temp, df_train
-                            del dfs
-                            gc.collect()
-                            if (j + 1) % 10 == 0:
-                                logger.info(f"  Fitted scaler on {j+1}/{len(station_ids)} stations")
-                        except Exception as e:
-                            logger.warning(f"Could not fit scaler on station {sid}: {e}")
-
-                    logger.info("Global scaler fitted.")
-
-                # Evaluate each station with the shared scaler
-                for sid in station_ids:
-                    if sid in processed_stations:
-                        logger.info(f"Skipping {sid} – already processed")
+        # Loop over base models
+        for base_model_path in global_model_files:
+            if retrain_interval > 1:
+                # base_model_path points to ..._1.pt → strip _1 to get base stem (full filename without suffix)
+                base_model_id = base_model_path.stem[:-2]  # e.g. "cl_m-tft_..._wind_80cl_1dwd_1ecmwf"
+            else:
+                base_model_id = base_model_path.stem  # full stem, no period suffix
+            
+            logger.info(f"\nProcessing base model: {base_model_id}")
+            
+            # Loop over test periods (1 period if retrain_interval==1, multiple if >1)
+            for period_idx, (period_start, period_end) in enumerate(test_periods):
+                period_n = period_idx + 1
+                
+                # Determine model path for this period
+                if retrain_interval > 1:
+                    # Look for model with period suffix: base_model_name_N.pt
+                    period_model_name = f"{base_model_id}_{period_n}.pt"
+                    model_path = models_dir / period_model_name
+                    
+                    if not model_path.exists():
+                        logger.warning(f"Period {period_n} model not found: {model_path.name}")
+                        logger.warning(f"Skipping period {period_n}")
                         continue
-                    station_config = copy.deepcopy(config)
-                    station_config['data']['files'] = [sid]
+                    
+                    logger.info(f"\n{'='*80}")
+                    logger.info(f"PERIOD {period_n}/{len(test_periods)}: {period_start.strftime('%Y-%m-%d')} to {period_end.strftime('%Y-%m-%d')}")
+                    logger.info(f"Model: {model_path.name}")
+                    logger.info(f"{'='*80}")
+                    
+                    # Use base_model_id (includes _global, _fl etc.) for output filename
+                    output_model_id = base_model_id
+                    period_suffix = f'_period{period_n}'
+                else:
+                    # Single period - use original model
+                    model_path = base_model_path
+                    # Use base_model_id (includes _global, _fl etc.) for output filename
+                    output_model_id = base_model_id
+                    period_suffix = ''
+                
+                # Create period-specific config
+                period_config = copy.deepcopy(config)
+                period_config['data']['test_start'] = period_start.strftime('%Y-%m-%d %H:%M')
+                period_config['data']['test_end'] = period_end.strftime('%Y-%m-%d %H:%M')
+
+                if args.eval_local:
+                    # Per-station evaluation: fit global scaler once, then one row per station
+                    output_file = output_dir / f'test_results_{output_model_id}{period_suffix}.csv'
+                    logger.info(f"Per-station evaluation → {output_file}")
+
+                    processed_stations = set()
+                    if output_file.exists():
+                        try:
+                            existing_df = pd.read_csv(output_file)
+                            processed_stations = set(existing_df['station_id'].unique())
+                            logger.info(f"Already processed {len(processed_stations)} stations")
+                        except Exception as e:
+                            logger.warning(f"Could not read existing CSV: {e}")
+
+                    # Try to load saved scaler, fall back to fitting from data
+                    features = preprocessing.get_features(config=period_config)
+                    
+                    # Try to load scaler with period suffix if retrain_interval > 1
+                    if retrain_interval > 1:
+                        # Look for scaler with period suffix
+                        scaler_path = models_dir / 'scaler' / f'scaler_{base_model_id}_{period_n}.pkl'
+                        if scaler_path.exists():
+                            with open(scaler_path, 'rb') as f:
+                                global_scaler_x = pickle.load(f)
+                            logger.info(f"Loaded period {period_n} scaler from {scaler_path}")
+                        else:
+                            global_scaler_x = None
+                        
+                        # Try to load scaler_y
+                        scaler_y_path = models_dir / 'scaler' / f'scaler_y_{base_model_id}_{period_n}.pkl'
+                        if scaler_y_path.exists():
+                            with open(scaler_y_path, 'rb') as f:
+                                global_scaler_y = pickle.load(f)
+                        else:
+                            global_scaler_y = None
+                    else:
+                        global_scaler_x, global_scaler_y = load_scaler_for_model(model_path)
+
+                    if global_scaler_x is None:
+                        logger.info("Fitting global scaler on all stations from config...")
+                        global_scaler_x = StandardScaler()
+                        target_col = period_config['data']['target_col']
+                        test_start_fit = pd.Timestamp(period_config['data']['test_start'], tz='UTC')
+                        test_end_fit = pd.Timestamp(period_config['data']['test_end'], tz='UTC')
+                        if test_end_fit.hour == 0 and test_end_fit.minute == 0 and test_end_fit.second == 0:
+                            test_end_fit = test_end_fit.replace(hour=23, minute=0, second=0)
+                        t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
+
+                        for j, sid in enumerate(station_ids):
+                            try:
+                                station_config = copy.deepcopy(period_config)
+                                station_config['data']['files'] = [sid]
+                                dfs = preprocessing.get_data(
+                                    data_dir=period_config['data']['path'],
+                                    config=station_config,
+                                    freq=period_config['data']['freq'],
+                                    features=features
+                                )
+                                for key, df in dfs.items():
+                                    df_temp = df.copy()
+                                    if target_col in df_temp.columns:
+                                        df_temp.drop(target_col, axis=1, inplace=True)
+                                    df_train, _ = preprocessing.split_data(
+                                        data=df_temp,
+                                        train_frac=period_config['data']['train_frac'],
+                                        test_start=test_start_fit,
+                                        test_end=test_end_fit,
+                                        t_0=t_0
+                                    )
+                                    global_scaler_x.partial_fit(df_train)
+                                    del df_temp, df_train
+                                del dfs
+                                gc.collect()
+                                if (j + 1) % 10 == 0:
+                                    logger.info(f"  Fitted scaler on {j+1}/{len(station_ids)} stations")
+                            except Exception as e:
+                                logger.warning(f"Could not fit scaler on station {sid}: {e}")
+
+                        logger.info("Global scaler fitted.")
+
+                    # Evaluate each station with the shared scaler
+                    for sid in station_ids:
+                        if sid in processed_stations:
+                            logger.info(f"Skipping {sid} – already processed")
+                            continue
+                        station_config = copy.deepcopy(period_config)
+                        station_config['data']['files'] = [sid]
+                        _, metrics = evaluate_model(
+                            model_path, models_dir,
+                            identifier_key='station_id',
+                            identifier_value=sid,
+                            config=station_config,
+                            scaler_x=global_scaler_x,
+                            scaler_y=global_scaler_y,
+                            sample_type=station_sample_type.get(sid)
+                        )
+                        if metrics:
+                            new_df = pd.DataFrame([metrics])
+                            if not output_file.exists():
+                                new_df.to_csv(output_file, index=False, mode='w')
+                            else:
+                                new_df.to_csv(output_file, index=False, mode='a', header=False)
+                            processed_stations.add(sid)
+
+                else:
+                    # Aggregate evaluation: single row for all stations combined
+                    output_file = output_dir / f'test_results_{output_model_id}{period_suffix}_agg.csv'
+                    logger.info(f"Aggregate evaluation → {output_file}")
+
+                    if output_file.exists():
+                        logger.info("Output file already exists, skipping.")
+                        continue
+
                     _, metrics = evaluate_model(
                         model_path, models_dir,
-                        identifier_key='station_id',
-                        identifier_value=sid,
-                        config=station_config,
-                        scaler_x=global_scaler_x,
-                        scaler_y=global_scaler_y,
-                        sample_type=station_sample_type.get(sid)
+                        identifier_key='model',
+                        identifier_value=output_model_id,
+                        config=period_config
                     )
                     if metrics:
-                        new_df = pd.DataFrame([metrics])
-                        if not output_file.exists():
-                            new_df.to_csv(output_file, index=False, mode='w')
-                        else:
-                            new_df.to_csv(output_file, index=False, mode='a', header=False)
-                        processed_stations.add(sid)
-
-            else:
-                # Aggregate evaluation: single row for all stations combined
-                output_file = output_dir / f'test_results_{global_model_id}_agg.csv'
-                logger.info(f"Aggregate evaluation → {output_file}")
-
-                if output_file.exists():
-                    logger.info("Output file already exists, skipping.")
-                    continue
-
-                _, metrics = evaluate_model(
-                    model_path, models_dir,
-                    identifier_key='model',
-                    identifier_value=global_model_id,
-                    config=config
-                )
-                if metrics:
-                    pd.DataFrame([metrics]).to_csv(output_file, index=False)
-                    logger.info(f"Saved aggregate result to {output_file}")
+                        pd.DataFrame([metrics]).to_csv(output_file, index=False)
+                        logger.info(f"Saved aggregate result to {output_file}")
 
         logger.info("="*80)
         logger.info("CONFIG-BASED EVALUATION COMPLETE")
@@ -1806,17 +1918,27 @@ def main():
         logger.info("MODE: Evaluating GLOBAL models on LOCAL datasets - DAILY R² CSV")
         logger.info("="*80)
 
+        model_stem = args.model_name.removesuffix('.pt') if args.model_name else None
+        wants_global = model_stem is not None and "global" in model_stem
+
         # Find global models
         all_model_files = sorted([f for f in models_dir.glob('*.pt') if f.is_file()])
         global_model_files = []
         for f in all_model_files:
+            if model_stem:
+                if model_stem not in f.name:
+                    continue
+                if wants_global and f.name.startswith("cl_"):
+                    continue
+                if not wants_global and ("global" in f.name or not f.name.startswith("cl_")):
+                    continue
+            
             model_id = extract_model_name(f.name)
             if model_id:
                 parts = model_id.split('_')
                 last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
                 if not (last_part.isdigit() and len(last_part) == 5):
-                    if args.model_name is None or args.model_name in f.name:
-                        global_model_files.append(f)
+                    global_model_files.append(f)
 
         logger.info(f"Found {len(global_model_files)} global models")
 
@@ -1876,17 +1998,27 @@ def main():
         logger.info("MODE: Evaluating GLOBAL models on LOCAL datasets")
         logger.info("="*80)
 
+        model_stem = args.model_name.removesuffix('.pt') if args.model_name else None
+        wants_global = model_stem is not None and "global" in model_stem
+
         # Find global models
         all_model_files = sorted([f for f in models_dir.glob('*.pt') if f.is_file()])
         global_model_files = []
         for f in all_model_files:
+            if model_stem:
+                if model_stem not in f.name:
+                    continue
+                if wants_global and f.name.startswith("cl_"):
+                    continue
+                if not wants_global and ("global" in f.name or not f.name.startswith("cl_")):
+                    continue
+            
             model_id = extract_model_name(f.name)
             if model_id:
                 parts = model_id.split('_')
                 last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
                 if not (last_part.isdigit() and len(last_part) == 5):
-                    if args.model_name is None or args.model_name in f.name:
-                        global_model_files.append(f)
+                    global_model_files.append(f)
 
         logger.info(f"Found {len(global_model_files)} global models")
 
@@ -1951,18 +2083,27 @@ def main():
         logger.info("Evaluating STATION-SPECIFIC models")
 
     # Find models
+    model_stem = args.model_name.removesuffix('.pt') if args.model_name else None
+    wants_global = model_stem is not None and "global" in model_stem
     all_model_files = sorted([f for f in models_dir.glob('*.pt') if f.is_file()])
 
     if args.global_models:
         model_files = []
         for f in all_model_files:
+            if model_stem:
+                if model_stem not in f.name:
+                    continue
+                if wants_global and f.name.startswith("cl_"):
+                    continue
+                if not wants_global and ("global" in f.name or not f.name.startswith("cl_")):
+                    continue
+                    
             model_id = extract_model_name(f.name)
             if model_id:
                 parts = model_id.split('_')
                 last_part = parts[-1] if parts[-1] != 'nostatic' else parts[-2]
                 if not (last_part.isdigit() and len(last_part) == 5):
-                    if args.model_name is None or args.model_name in f.name:
-                        model_files.append(f)
+                    model_files.append(f)
         logger.info(f"Found {len(model_files)} global models")
     else:
         model_files = []

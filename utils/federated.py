@@ -156,6 +156,43 @@ class ServerOptimizer:
         return numpy_list_to_state_dict(final_weights_list, old_global_weights)
 
 
+def _log_gpu_mem(tag: str, device, client_id):
+    """DEBUG HELPER — log GPU memory stats at key points. Remove when done debugging.
+
+    Uses a dedicated 'gpumem' logger set to INFO so it is not suppressed by
+    callers that temporarily raise the root logger to WARNING (e.g. hpo_fl.py).
+    """
+    import os
+    _gpumem_logger = logging.getLogger('gpumem')
+    if _gpumem_logger.level == logging.NOTSET or _gpumem_logger.level > logging.INFO:
+        _gpumem_logger.setLevel(logging.INFO)
+        if not _gpumem_logger.handlers:
+            _h = logging.StreamHandler()
+            _h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            _gpumem_logger.addHandler(_h)
+        _gpumem_logger.propagate = False
+
+    pid = os.getpid()
+    if torch.cuda.is_available():
+        try:
+            if device is not None and hasattr(device, 'type') and device.type == 'cuda':
+                idx = device.index if device.index is not None else torch.cuda.current_device()
+            else:
+                idx = torch.cuda.current_device()
+            alloc = torch.cuda.memory_allocated(idx) / 1024**3
+            reserved = torch.cuda.memory_reserved(idx) / 1024**3
+            total = torch.cuda.get_device_properties(idx).total_memory / 1024**3
+            free = total - reserved
+            _gpumem_logger.info(
+                f"[GPUMEM] [{tag}] client={client_id} pid={pid} "
+                f"gpu={idx} alloc={alloc:.2f}GiB reserved={reserved:.2f}GiB free_est={free:.2f}GiB total={total:.1f}GiB"
+            )
+        except Exception as e:
+            _gpumem_logger.info(f"[GPUMEM] [{tag}] client={client_id} pid={pid} — error querying GPU: {e}")
+    else:
+        _gpumem_logger.info(f"[GPUMEM] [{tag}] client={client_id} pid={pid} — no CUDA available")
+
+
 @ray.remote
 class ClientActor:
     def __init__(self,
@@ -172,6 +209,10 @@ class ClientActor:
         self.config = config
         self.hyperparameters = hyperparameters
 
+        # Must be set before the first CUDA memory allocation (allocator reads it once).
+        import os
+        os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+
         # Initialize GPU
         tools.initialize_gpu()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -182,15 +223,23 @@ class ClientActor:
 
         self.logger = logging.getLogger(f"ClientActor_{self.client_id}")
         self.logger.setLevel(logging.INFO)
+        # _log_gpu_mem("init", self.device, self.client_id)
         logging.info(f"[ClientActor {self.client_id}] Initialized (CPU, will use {self.device} during train/eval).")
 
     def train(self, global_weights: Dict[str, torch.Tensor]):
         """Performs model training for a communication round using PyTorch."""
         from . import tools
         import copy
+        import os
         from torch.utils.data import TensorDataset, DataLoader
 
+        _train_start = time.time()
+        _phys_gpu = os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')
+        logging.info(f"[TIMING] client={self.client_id} pid={os.getpid()} phys_gpu={_phys_gpu} train_START")
+
+        # _log_gpu_mem("train_before_to_device", self.device, self.client_id)
         self.model = self.model.to(self.device)
+        # _log_gpu_mem("train_after_to_device", self.device, self.client_id)
 
         verbose = self.config['fl'].get('verbose', False)
         personalize = self.config['fl'].get('personalize', False)
@@ -284,17 +333,32 @@ class ClientActor:
             self.model.train()
             train_preds, train_targets = [], []
 
-            for batch in train_loader:
+            # if epoch == 0:
+            #     _log_gpu_mem("train_epoch0_start", self.device, self.client_id)
+
+            for batch_idx, batch in enumerate(train_loader):
                 if is_tft:
                     if len(batch) == 4:
                         obs, known, static, targets = [b.to(self.device) for b in batch]
+                        # if epoch == 0 and batch_idx == 0:
+                        #     _log_gpu_mem("train_batch0_before_forward", self.device, self.client_id)
+                        #     logging.info(f"[GPUMEM] [train_batch0_shapes] client={self.client_id} obs={tuple(obs.shape)} known={tuple(known.shape)} static={tuple(static.shape)}")
                         predictions = self.model(obs, known, static)
                     elif len(batch) == 3:
                         obs, known, targets = [b.to(self.device) for b in batch]
+                        # if epoch == 0 and batch_idx == 0:
+                        #     _log_gpu_mem("train_batch0_before_forward", self.device, self.client_id)
+                        #     logging.info(f"[GPUMEM] [train_batch0_shapes] client={self.client_id} obs={tuple(obs.shape)} known={tuple(known.shape)}")
                         predictions = self.model(obs, known)
                 else:
                     inputs, targets = [b.to(self.device) for b in batch]
+                    # if epoch == 0 and batch_idx == 0:
+                    #     _log_gpu_mem("train_batch0_before_forward", self.device, self.client_id)
+                    #     logging.info(f"[GPUMEM] [train_batch0_shapes] client={self.client_id} inputs={tuple(inputs.shape)}")
                     predictions = self.model(inputs)
+
+                # if epoch == 0 and batch_idx == 0:
+                #     _log_gpu_mem("train_batch0_after_forward", self.device, self.client_id)
 
                 loss = criterion(predictions, targets)
                 optimizer.zero_grad()
@@ -303,6 +367,12 @@ class ClientActor:
 
                 train_preds.append(predictions.detach().cpu().numpy())
                 train_targets.append(targets.detach().cpu().numpy())
+
+            # if epoch == 0:
+            #     _log_gpu_mem("train_epoch0_end", self.device, self.client_id)
+
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
 
             # Compute train metrics
             train_preds = np.concatenate(train_preds)
@@ -384,6 +454,7 @@ class ClientActor:
             if len(values) > 0:
                 metrics[key] = values[-1]
 
+        # _log_gpu_mem("train_before_cpu_offload", self.device, self.client_id)
         results = {
             'client_id': self.client_id,
             'weights': self.model.state_dict(),
@@ -395,12 +466,18 @@ class ClientActor:
         self.model = self.model.to('cpu')
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
+        # _log_gpu_mem("train_after_cpu_offload", self.device, self.client_id)
+
+        _train_dur = time.time() - _train_start
+        logging.info(f"[TIMING] client={self.client_id} pid={os.getpid()} phys_gpu={_phys_gpu} train_END dur={_train_dur:.1f}s")
 
         return results
 
     def evaluate(self, global_weights: Dict[str, torch.Tensor]):
         """Performs local evaluation at the end of a communication round."""
+        # _log_gpu_mem("eval_before_to_device", self.device, self.client_id)
         self.model = self.model.to(self.device)
+        # _log_gpu_mem("eval_after_to_device", self.device, self.client_id)
 
         personalize = self.config['fl'].get('personalize', False)
 
@@ -424,17 +501,22 @@ class ClientActor:
                 # Prepare input
                 if isinstance(self.X_val, dict):
                     # TFT case
+                    # _log_gpu_mem("eval_before_data_to_device", self.device, self.client_id)
                     X_val_tensors = {k: torch.from_numpy(v).float().to(self.device) for k, v in self.X_val.items()}
                     y_val_tensor = torch.from_numpy(self.y_val).float().to(self.device)
+                    # _log_gpu_mem("eval_after_data_to_device", self.device, self.client_id)
 
                     if 'static' in X_val_tensors:
                         predictions = self.model(X_val_tensors['observed'], X_val_tensors['known'], X_val_tensors['static'])
                     else:
                         predictions = self.model(X_val_tensors['observed'], X_val_tensors['known'])
                 else:
+                    # _log_gpu_mem("eval_before_data_to_device", self.device, self.client_id)
                     X_val_tensor = torch.from_numpy(self.X_val).float().to(self.device)
                     y_val_tensor = torch.from_numpy(self.y_val).float().to(self.device)
+                    # _log_gpu_mem("eval_after_data_to_device", self.device, self.client_id)
                     predictions = self.model(X_val_tensor)
+                # _log_gpu_mem("eval_after_forward", self.device, self.client_id)
 
                 # Calculate metrics
                 mse = nn.MSELoss()(predictions, y_val_tensor).item()
@@ -458,6 +540,7 @@ class ClientActor:
             metrics = None
 
         logging.info(f"[ClientActor {self.client_id}] Local evaluation completed.")
+        # _log_gpu_mem("eval_before_cpu_offload", self.device, self.client_id)
         results = {
             'client_id': self.client_id,
             'n_samples': len(self.y_val) if self.y_val is not None else 0,
@@ -468,6 +551,7 @@ class ClientActor:
         self.model = self.model.to('cpu')
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
+        # _log_gpu_mem("eval_after_cpu_offload", self.device, self.client_id)
 
         return results
 
@@ -785,7 +869,8 @@ def run_simulation(partitions: Any,
         ignore_reinit_error=True,
         include_dashboard=False,
         logging_level=logging.WARNING,
-        log_to_driver=True
+        log_to_driver=True,
+        runtime_env={"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}}
     )
 
     # Create client actors
@@ -810,7 +895,9 @@ def run_simulation(partitions: Any,
     logging.debug('[Server] Global model is initialized.')
     server_device = torch.device('cuda:0' if total_num_gpus > 0 else 'cpu')
     global_model = models.get_model(config=config, hyperparameters=hyperparameters)
+    # _log_gpu_mem("server_before_global_model_to_device", server_device, "server")
     global_model = global_model.to(server_device)
+    # _log_gpu_mem("server_after_global_model_to_device", server_device, "server")
     global_weights = global_model.state_dict()
 
     # Initialize server optimizer if needed
@@ -857,15 +944,19 @@ def run_simulation(partitions: Any,
 
     for round_num in range(1, n_rounds+1):
         history[round_num] = {}
-        logging.info(f"--- Round {round_num}/{n_rounds} ---")
+        logging.debug(f"--- Round {round_num}/{n_rounds} ---")
         round_start_time = time.time()
 
         # Client training — processed in batches to limit concurrent GPU usage
+        # global_weights must be on CPU before passing to workers: if the server model
+        # lives on GPU, Ray serialises CUDA tensors and every worker re-allocates them
+        # on GPU during deserialisation, causing a spike proportional to n_concurrent.
+        global_weights_cpu = {k: v.cpu() for k, v in global_weights.items()}
         logging.debug(f"[Server] Start train jobs on clients (batch_size={max_concurrent}).")
         client_results = []
         for batch_start in range(0, n_clients, max_concurrent):
             batch_actors = client_actors[batch_start:batch_start + max_concurrent]
-            batch_results = ray.get([a.train.remote(global_weights) for a in batch_actors])
+            batch_results = ray.get([a.train.remote(global_weights_cpu) for a in batch_actors])
             client_results.extend(batch_results)
         logging.debug(f"[Server] All clients trained. Start aggregation.")
 
@@ -930,7 +1021,7 @@ def run_simulation(partitions: Any,
             logging.debug('[Server] Global evaluation completed.')
         else:
             logging.debug(f'[Server] Start local evaluation.')
-            results_refs = [actor.evaluate.remote(global_weights) for actor in client_actors]
+            results_refs = [actor.evaluate.remote(global_weights_cpu) for actor in client_actors]
             client_results = ray.get(results_refs)
             val_metrics_agg = aggregate_metrics(client_results)
             logging.debug(f'[Server] Evaluation metrics aggregated.')
@@ -980,7 +1071,7 @@ def run_simulation(partitions: Any,
         all_rounds_metrics_data.append(round_data)
 
         round_end_time = time.time()
-        logging.info(f"Round {round_num} terminated in {round_end_time - round_start_time:.2f} seconds.")
+        logging.debug(f"Round {round_num} terminated in {round_end_time - round_start_time:.2f} seconds.")
 
     end_time = time.time()
     logging.info(f"--- Simulation terminated in {end_time - start_time:.2f} seconds ---")

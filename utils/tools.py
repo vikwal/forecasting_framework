@@ -814,7 +814,8 @@ def create_data_generator(dfs, config, features, scaler_x=None, scaler_y=None):
             'X_test': prepared_data['X_test'],
             'y_test': prepared_data['y_test'],
             'index_test': prepared_data['index_test'],
-            'scalers': prepared_data['scalers']
+            'scalers': prepared_data['scalers'],
+            'nwp_raw_test': prepared_data.get('nwp_raw_test', None)
         }
 
         del prepared_data
@@ -829,6 +830,7 @@ def combine_datasets_efficiently(data_generator):
     """
     X_train, y_train = None, None
     X_test, y_test = None, None
+    nwp_raw_test = None
     test_data = {}
     total_samples = 0
 
@@ -887,6 +889,21 @@ def combine_datasets_efficiently(data_generator):
             del y_test
             y_test = combined_y_test
 
+        # Combine NWP raw test data (for Skill_NWP calculation)
+        nwp_raw_new = data_dict.get('nwp_raw_test', None)
+        if nwp_raw_new is not None:
+            if nwp_raw_test is None:
+                nwp_raw_test = nwp_raw_new
+            else:
+                old_len = nwp_raw_test.shape[0]
+                new_len = nwp_raw_new.shape[0]
+                combined_shape = (old_len + new_len,) + nwp_raw_test.shape[1:]
+                combined_nwp = np.empty(combined_shape, dtype=nwp_raw_test.dtype)
+                combined_nwp[:old_len] = nwp_raw_test
+                combined_nwp[old_len:] = nwp_raw_new
+                del nwp_raw_test
+                nwp_raw_test = combined_nwp
+
         # Combine training data
         if X_train is None:
             X_train = data_dict['X_train']
@@ -936,7 +953,7 @@ def combine_datasets_efficiently(data_generator):
         del data_dict
         gc.collect()
 
-    return X_train, y_train, X_test, y_test, test_data
+    return X_train, y_train, X_test, y_test, test_data, nwp_raw_test
 
 def calculate_retrain_periods(test_start: pd.Timestamp,
                                test_end: pd.Timestamp,

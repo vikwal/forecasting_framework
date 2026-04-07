@@ -274,7 +274,7 @@ def process_model(model_path, models_dir, identifier_key='station_id', identifie
     try:
         logger.info("Preparing data for TFT...")
         data_generator = tools.create_data_generator(dfs, config, features, scaler_x=global_scaler_x)
-        X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+        X_train, y_train, X_test, y_test, test_data, _ = tools.combine_datasets_efficiently(data_generator)
 
         # Extract feature dimensions from prepared data
         feature_dims = {}
@@ -613,7 +613,7 @@ def process_global_model_on_local_datasets(model_path, models_dir, local_configs
 
             # Prepare data using the GLOBAL scaler (already fitted on all stations)
             data_generator = tools.create_data_generator(dfs, global_config, features, scaler_x=global_scaler_x)
-            X_train, y_train, X_test, y_test, test_data = tools.combine_datasets_efficiently(data_generator)
+            X_train, y_train, X_test, y_test, test_data, _ = tools.combine_datasets_efficiently(data_generator)
 
             # Extract feature dimensions
             feature_dims = {}

@@ -198,7 +198,7 @@ def main() -> None:
     study = None
     if config['model'].get('lookup_hpo', False):
         logging.info(f"Looking up hyperparameters for study: {study_name}")
-        study = None #hpo.load_study(config['hpo']['studies_path'], study_name)
+        study = hpo.load_study(config['hpo']['studies_path'], study_name)
     hyperparameters = hpo.get_hyperparameters(config=config, study=study)
 
     # Add FL-specific hyperparameters
@@ -328,13 +328,13 @@ def main() -> None:
             target_col = period_config['data']['target_col']
             fit_scaler_y = target_col != 'power'  # power is pre-normalised to [0, 1]
 
-            for client_id, client_info in clients_data.items():
-                logging.info(f"Preparing data for client: {client_id}")
+            for client_id, client_info in tqdm(clients_data.items(), desc="Fitting scalers", unit="client"):
+                logging.debug(f"Preparing data for client: {client_id}")
                 logging.debug(f"Fitting scaler for client {client_id}...")
                 scaler_x = StandardScaler()
                 scaler_y = StandardScaler()
 
-                for key, df in tqdm(client_info['dfs'].items(), desc=f"Fitting Scaler for {client_id}"):
+                for key, df in client_info['dfs'].items():
                     df_temp = df.copy()
 
                     # For non-TFT models, create lag features before fitting scaler
@@ -429,11 +429,10 @@ def main() -> None:
                 logging.info(f"Global scalers (X and Y) applied to all {len(clients_data)} clients.")
 
         # Phase 3: Process data with the assigned scaler
-        for client_id, client_info in clients_data.items():
-            logging.info(f"Processing data for client: {client_id}")
+        for client_id, client_info in tqdm(clients_data.items(), desc="Processing clients", unit="client"):
+            logging.debug(f"Processing data for client: {client_id}")
 
             # Use memory-efficient data processing
-            logging.debug(f"Processing data for client {client_id}...")
             data_generator = tools.create_data_generator(
                 client_info['dfs'],
                 period_config,
@@ -441,7 +440,7 @@ def main() -> None:
                 scaler_x=client_info['scaler_x'],
                 scaler_y=client_info.get('scaler_y')
             )
-            X_train, y_train, X_test, y_test, client_test_data = tools.combine_datasets_efficiently(data_generator)
+            X_train, y_train, X_test, y_test, client_test_data, _ = tools.combine_datasets_efficiently(data_generator)
 
             # Store partition for federated training
             # Use ALL training data for FL training, test data for both validation AND evaluation
@@ -482,7 +481,7 @@ def main() -> None:
                 val_dfs, period_config, features,
                 scaler_x=representative_scaler
             )
-            _, _, _, _, val_test_data = tools.combine_datasets_efficiently(val_generator)
+            _, _, _, _, val_test_data, _ = tools.combine_datasets_efficiently(val_generator)
             logging.info(f"Generated test data for {len(val_test_data)} val stations.")
 
         # Log data shapes for first client
@@ -655,8 +654,8 @@ def main() -> None:
 
         # Evaluate each park individually
         eval_results = []
-        for client_id, client_test_data in test_data.items():
-            logging.info(f'Evaluating client: {client_id}')
+        for client_id, client_test_data in tqdm(test_data.items(), desc="Evaluating clients", unit="client"):
+            logging.debug(f'Evaluating client: {client_id}')
 
             # Create model with client-specific weights (either FL or fine-tuned)
             model = models.get_model(config=period_config, hyperparameters=hyperparameters)
@@ -782,6 +781,49 @@ def main() -> None:
         all_evaluations.append(period_evaluation)
         if history is not None:
             all_histories.append(history)
+
+        # --- PER-PERIOD MODEL & RESULT SAVING (only for multiple retraining cycles) ---
+        if len(test_periods) > 1 and should_train:
+            period_n = period_idx + 1
+            os.makedirs(os.path.join('models', 'scaler'), exist_ok=True)
+
+            # Save results for this period
+            period_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            period_pkl = os.path.join('results', base_dir, f'{study_name}_{period_n}_{period_timestamp}.pkl')
+            with open(period_pkl, 'wb') as f:
+                pickle.dump({
+                    'hyperparameters': hyperparameters,
+                    'config': config,
+                    'history': history,
+                    'evaluation': period_evaluation,
+                    'test_dates': [(current_test_start, current_test_end)],
+                }, f)
+            logging.info(f"Period {period_n} results saved to: {period_pkl}")
+
+            if args.save_model:
+                if config['fl'].get('personalize', False):
+                    for client_id, weights in clients_weights.items():
+                        period_model_path = os.path.join('models', f'{study_name}_id-{client_id}_{period_n}.pt')
+                        torch.save(weights, period_model_path)
+                        period_scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}_id-{client_id}_{period_n}.pkl')
+                        with open(period_scaler_path, 'wb') as f:
+                            pickle.dump(clients_data[client_id]['scaler_x'], f)
+                        if clients_data[client_id].get('scaler_y') is not None:
+                            with open(period_scaler_path.replace('scaler_', 'scaler_y_'), 'wb') as f:
+                                pickle.dump(clients_data[client_id]['scaler_y'], f)
+                    logging.info(f"Period {period_n} personalized models saved.")
+                else:
+                    first_client_id = list(clients_weights.keys())[0]
+                    period_model_path = os.path.join('models', f'{study_name}_global_{period_n}.pt')
+                    torch.save(clients_weights[first_client_id], period_model_path)
+                    logging.info(f"Period {period_n} global model saved to: {period_model_path}")
+                    period_scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}_global_{period_n}.pkl')
+                    with open(period_scaler_path, 'wb') as f:
+                        pickle.dump(clients_data[first_client_id]['scaler_x'], f)
+                    if clients_data[first_client_id].get('scaler_y') is not None:
+                        with open(period_scaler_path.replace('scaler_', 'scaler_y_'), 'wb') as f:
+                            pickle.dump(clients_data[first_client_id]['scaler_y'], f)
+                    logging.info(f"Period {period_n} global scaler saved to: {period_scaler_path}")
 
         if train_once_eval_multiple:
             if period_idx == 0:

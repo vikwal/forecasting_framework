@@ -397,7 +397,7 @@ def main() -> None:
             scaler_x=val_scaler_x,
             scaler_y=val_scaler_y
         )
-        X_val_full, y_val_full, _, _, _ = tools.combine_datasets_efficiently(val_generator)
+        X_val_full, y_val_full, _, _, _, _ = tools.combine_datasets_efficiently(val_generator)
 
         n_val = len(y_val_full)
         if n_val > 0:

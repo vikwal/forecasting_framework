@@ -22,6 +22,7 @@ from tqdm import tqdm
 from sklearn.decomposition import PCA
 
 from . import meteo
+from . import db_connector
 
 
 def _get_data_from_config_files(config: dict,
@@ -78,54 +79,45 @@ def _get_data_from_config_files(config: dict,
     # Store original seed (used as fallback if CSV lookup fails)
     original_seed = config['params'].get('random_seed', 42)
 
-    # Process each file
-    for file_idx, file in tqdm(enumerate(files), total=len(files), desc=f"Loading stations [{files_key}]", unit="station", disable=len(files) <= 1):
+    # For the database path, load stations in parallel (I/O-bound; psycopg2 releases the GIL).
+    # Worker count is capped at the connection pool size (maxconn=10).
+    icond2_source = config.get('data', {}).get('icond2_source', 'csv')
+    use_parallel_db = icond2_source == 'database' and len(files) > 1
+    n_db_workers = min(10, len(files))
+
+    def _process_file(file_idx_file):
+        file_idx, file = file_idx_file
         file_path = os.path.join(base_path, f"synth_{file}.csv")
         if not os.path.exists(file_path):
             logging.warning(f"File not found: {file_path}")
-            continue
+            return file, None
 
         try:
-            # Create a copy of config for this specific file
             file_config = copy.deepcopy(config)
-
-            # Look up turbine type from station_turbine_assignments.csv
-            station_id = str(file).zfill(5)  # Ensure consistent zero-padded format
+            station_id = str(file).zfill(5)
             if station_id in station_turbine_map:
                 file_config['params']['station_turbine_type'] = station_turbine_map[station_id]
-                logging.debug(f"Processing {file}: assigned turbine '{station_turbine_map[station_id]}' from CSV")
             else:
-                # Fallback to seed-based random assignment
                 file_config['params']['random_seed'] = original_seed + file_idx
                 logging.warning(f"Station {station_id} not found in assignments CSV. "
                                 f"Falling back to seed {file_config['params']['random_seed']}")
 
-            # Determine preprocessing based on data type
-            is_wind_data = 'wind' in base_path.lower()
-            is_pv_data = 'pv' in base_path.lower() or 'solar' in base_path.lower()
+            _is_wind = 'wind' in base_path.lower()
+            _is_pv = 'pv' in base_path.lower() or 'solar' in base_path.lower()
 
-            if is_wind_data:
-                # Wind data preprocessing
+            if _is_wind:
                 if 'open-meteo' in config['data']['nwp_path']:
-                    df = preprocess_synth_wind_openmeteo(path=file_path,
-                                                        config=file_config,
-                                                        freq=freq,
-                                                        features=features.copy() if features else None,
-                                                        target_col=target_col)
+                    df = preprocess_synth_wind_openmeteo(path=file_path, config=file_config,
+                                                         freq=freq, features=features.copy() if features else None,
+                                                         target_col=target_col)
                 elif 'icon-d2' in config['data']['nwp_path']:
-                    df = preprocess_synth_wind_icond2(path=file_path,
-                                                     config=file_config,
-                                                     freq=freq,
-                                                     features=features.copy() if features else None)
+                    df = preprocess_synth_wind_icond2(path=file_path, config=file_config,
+                                                      freq=freq, features=features.copy() if features else None)
                 else:
                     raise ValueError('NWP model source is not known for wind data')
-
-            elif is_pv_data:
-                df = preprocess_synth_pv(path=file_path,
-                                       freq=freq,
-                                       features=features)
+            elif _is_pv:
+                df = preprocess_synth_pv(path=file_path, freq=freq, features=features)
             else:
-                # Generic CSV loading
                 logging.warning(f"Unknown data type for {file_path}, using generic CSV loading")
                 df = pd.read_csv(file_path)
                 if 'timestamp' in df.columns:
@@ -134,13 +126,35 @@ def _get_data_from_config_files(config: dict,
                     if freq:
                         df = df.resample(freq).mean()
 
-            key = os.path.basename(file_path)
-            dfs[key] = df
-            logging.debug(f"Successfully loaded data for file: {key}")
+            return file, df
 
         except Exception as e:
             logging.error(f"Error loading data for file {file}: {str(e)}")
-            continue
+            return file, None
+
+    if use_parallel_db:
+        with ThreadPoolExecutor(max_workers=n_db_workers) as executor:
+            futures = {executor.submit(_process_file, (i, f)): f
+                       for i, f in enumerate(files)}
+            for future in tqdm(as_completed(futures), total=len(files),
+                               desc=f"Loading stations [{files_key}]", unit="station"):
+                file, df = future.result()
+                if df is not None:
+                    key = f"synth_{file}.csv"
+                    dfs[key] = df
+
+        config['params']['random_seed'] = original_seed
+        if not dfs:
+            raise ValueError("No valid data files were loaded from the specified files")
+        return dfs
+
+    # Sequential path (CSV or single file)
+    for file_idx, file in tqdm(enumerate(files), total=len(files), desc=f"Loading stations [{files_key}]", unit="station", disable=len(files) <= 1):
+        _, df = _process_file((file_idx, file))
+        if df is not None:
+            key = f"synth_{file}.csv"
+            dfs[key] = df
+            logging.debug(f"Successfully loaded data for file: {key}")
 
     # Restore original seed in config
     config['params']['random_seed'] = original_seed
@@ -1079,6 +1093,247 @@ def _select_grid_points_relative_position(file_distances, station_lat, station_l
     return labeled_points, station_rel_lat, station_rel_lon
 
 
+def _load_icon_d2_from_database(
+    station_lat: float,
+    station_lon: float,
+    next_n_grid_points: int,
+    get_method: str,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    config: dict,
+    turbines: pd.DataFrame
+) -> Tuple[pd.DataFrame, Any, float, float]:
+    """
+    Load ICON-D2 multilevel data from PostgreSQL database.
+    
+    Args:
+        station_lat: Station latitude
+        station_lon: Station longitude
+        next_n_grid_points: Number of nearest grid points to load
+        get_method: 'geodesic_next' or 'relative_position'
+        start_time: Start timestamp (UTC)
+        end_time: End timestamp (UTC)
+        config: Configuration dictionary
+        turbines: DataFrame with turbine specs
+    
+    Returns:
+        Tuple of (df_final, nearest_label, station_rel_lat, station_rel_lon)
+    """
+    # Find nearest grid points using DB
+    grid_points = db_connector.find_nearest_grid_points(
+        station_lat=station_lat,
+        station_lon=station_lon,
+        n_points=next_n_grid_points,
+        method=get_method
+    )
+    
+    if not grid_points:
+        raise ValueError(f"No grid points found near station ({station_lat}, {station_lon})")
+    
+    logging.debug(f"Found {len(grid_points)} grid points via DB (method={get_method})")
+    
+    # Extract height levels from requested features
+    known_features = config['params'].get('known_features', [])
+    observed_features = config['params'].get('observed_features', [])
+    all_features = known_features + observed_features
+    
+    # Parse height levels from feature names like 'wind_speed_h78', 'density_h127'
+    height_levels = set()
+    for feat in all_features:
+        match = re.search(r'_h(\d+)', feat)
+        if match:
+            height_levels.add(int(match.group(1)))
+    
+    if not height_levels:
+        # Fallback: use common height levels
+        height_levels = {10, 38, 78, 127, 184, 247}
+        logging.warning(f"No height levels found in features, using defaults: {sorted(height_levels)}")
+    
+    height_levels = sorted(list(height_levels))
+    
+    # Determine which DB features to load.
+    # qs is only needed when relative_humidity or density must be computed.
+    need_humidity = (
+        config['params'].get('get_density', False)
+        or any('relative_humidity' in f for f in all_features)
+    )
+    db_features = ['u_wind', 'v_wind', 'temperature', 'pressure']
+    if need_humidity:
+        db_features.append('qs')
+
+    # Load data from database
+    logging.debug(f"Loading DB data for heights {height_levels}, features {db_features}, "
+                  f"time range {start_time} to {end_time}")
+
+    try:
+        df_raw = db_connector.load_multilevel_data(
+            grid_points=grid_points,
+            start_time=start_time,
+            end_time=end_time,
+            height_levels=height_levels,
+            features=db_features
+        )
+    except Exception as e:
+        logging.error(f"Failed to load data from database: {e}")
+        raise
+    
+    if df_raw.empty:
+        raise ValueError("Database query returned no data")
+    
+    logging.debug(f"Loaded {len(df_raw)} rows from database")
+    
+    # Process each grid point's data (similar to CSV processing)
+    all_grid_dfs = []
+    
+    for grid_lon, grid_lat, label in grid_points:
+        # Select columns for this grid point (suffix matches label)
+        grid_cols = [col for col in df_raw.columns 
+                    if col.endswith(f'_{label}') or col in ['timestamp', 'starttime', 'forecasttime']]
+        
+        if len(grid_cols) <= 3:  # Only metadata columns
+            logging.warning(f"No data columns found for grid point label '{label}'")
+            continue
+        
+        df_grid = df_raw[grid_cols].copy()
+        
+        # Calculate wind speed from u and v components
+        for height in height_levels:
+            u_col = f'u_wind_h{height}_{label}'
+            v_col = f'v_wind_h{height}_{label}'
+            ws_col = f'wind_speed_h{height}_{label}'
+            
+            if u_col in df_grid.columns and v_col in df_grid.columns:
+                df_grid[ws_col] = np.sqrt(df_grid[u_col]**2 + df_grid[v_col]**2)
+        
+        # Calculate relative humidity from specific humidity (qs), identical to CSV path.
+        if need_humidity:
+            for height in height_levels:
+                qs_col = f'qs_h{height}_{label}'
+                temp_col = f'temperature_h{height}_{label}'
+                press_col = f'pressure_h{height}_{label}'
+                relhum_out = f'relative_humidity_h{height}_{label}'
+
+                if all(col in df_grid.columns for col in [qs_col, temp_col, press_col]):
+                    specific_humidity = df_grid[qs_col].values * units.dimensionless
+                    temp = df_grid[temp_col].values * units.kelvin
+                    press = df_grid[press_col].values * units.pascal
+                    rel_hum = mpcalc.relative_humidity_from_specific_humidity(
+                        press, temp, specific_humidity
+                    ).magnitude
+                    df_grid[relhum_out] = rel_hum * 100  # convert to percent
+
+        # Calculate density if requested
+        if config['params'].get('get_density', False):
+            for height in height_levels:
+                temp_col = f'temperature_h{height}_{label}'
+                press_col = f'pressure_h{height}_{label}'
+                relhum_col = f'relative_humidity_h{height}_{label}'
+                density_col = f'density_h{height}_{label}'
+
+                if all(col in df_grid.columns for col in [temp_col, press_col, relhum_col]):
+                    sat_vap_ps = get_saturated_vapor_pressure(
+                        temperature=df_grid[temp_col],
+                        model='huang'
+                    )
+                    df_grid[density_col] = get_density(
+                        temperature=df_grid[temp_col],
+                        pressure=df_grid[press_col],
+                        relhum=df_grid[relhum_col],
+                        sat_vap_ps=sat_vap_ps
+                    )
+        
+        all_grid_dfs.append(df_grid)
+    
+    # Merge all grid points
+    if not all_grid_dfs:
+        raise ValueError("No grid point data could be processed")
+    
+    df_final = all_grid_dfs[0]
+    for df_grid in all_grid_dfs[1:]:
+        df_final = df_final.merge(
+            df_grid,
+            on=['timestamp', 'starttime', 'forecasttime'],
+            how='outer'
+        )
+    
+    # Calculate rotor-equivalent wind speed if requested
+    if config['params'].get('aggregate_nwp_layers') == 'weighted_mean':
+        for grid_lon, grid_lat, label in grid_points:
+            wind_cols = [col for col in df_final.columns 
+                        if col.startswith('wind_speed_h') and col.endswith(f'_{label}')]
+            
+            if wind_cols and len(turbines) > 0:
+                # Extract heights from column names
+                heights = sorted([int(re.search(r'_h(\d+)_', col).group(1)) for col in wind_cols])
+                
+                if len(heights) > 1:
+                    midpoints = [(heights[j] + heights[j + 1]) / 2 for j in range(len(heights) - 1)]
+                    layers = []
+                    layers.append((0.0, midpoints[0], heights[0]))
+                    for j in range(len(midpoints) - 1):
+                        layers.append((midpoints[j], midpoints[j+1], heights[j+1]))
+                    layers.append((midpoints[-1], np.inf, heights[-1]))
+                    
+                    area_weights = get_A_weights(turbines, layers)
+                    weighted_speed_cubed = pd.Series(0.0, index=df_final.index)
+                    
+                    for j, (lower, upper, level) in enumerate(layers):
+                        wind_col = f'wind_speed_h{level}_{label}'
+                        if wind_col in df_final.columns and area_weights[j] > 0:
+                            weighted_speed_cubed += area_weights[j] * (df_final[wind_col] ** 3)
+                    
+                    df_final[f'wind_speed_rotor_eq_{label}'] = weighted_speed_cubed ** (1/3)
+            
+            # Same for density
+            density_cols = [col for col in df_final.columns 
+                           if col.startswith('density_h') and col.endswith(f'_{label}')]
+            
+            if density_cols and len(turbines) > 0:
+                heights = sorted([int(re.search(r'_h(\d+)_', col).group(1)) for col in density_cols])
+                
+                if len(heights) > 1:
+                    midpoints = [(heights[j] + heights[j + 1]) / 2 for j in range(len(heights) - 1)]
+                    layers = []
+                    layers.append((0.0, midpoints[0], heights[0]))
+                    for j in range(len(midpoints) - 1):
+                        layers.append((midpoints[j], midpoints[j+1], heights[j+1]))
+                    layers.append((midpoints[-1], np.inf, heights[-1]))
+                    
+                    area_weights = get_A_weights(turbines, layers)
+                    weighted_density = pd.Series(0.0, index=df_final.index)
+                    
+                    for j, (lower, upper, level) in enumerate(layers):
+                        dens_col = f'density_h{level}_{label}'
+                        if dens_col in df_final.columns and area_weights[j] > 0:
+                            weighted_density += area_weights[j] * df_final[dens_col]
+                    
+                    df_final[f'density_rotor_eq_{label}'] = weighted_density
+    
+    # Determine nearest label and relative position
+    nearest_label = grid_points[0][2]  # First point is always nearest
+    station_rel_lat = None
+    station_rel_lon = None
+    
+    if get_method == 'relative_position' and len(grid_points) > 0:
+        # Calculate normalized relative position
+        lats = [lat for _, lat, _ in grid_points]
+        lons = [lon for lon, _, _ in grid_points]
+        
+        if len(lats) > 1:
+            lat_range = max(lats) - min(lats)
+            lon_range = max(lons) - min(lons)
+            
+            if lat_range > 0:
+                station_rel_lat = (station_lat - min(lats)) / lat_range
+            if lon_range > 0:
+                station_rel_lon = (station_lon - min(lons)) / lon_range
+    
+    # Sort by timestamp
+    df_final = df_final.sort_values('timestamp').reset_index(drop=True)
+    
+    return df_final, nearest_label, station_rel_lat, station_rel_lon
+
+
 def _process_forecast_hour(args):
     """
     Process a single forecast hour for Icon-D2 data.
@@ -1578,54 +1833,92 @@ def preprocess_synth_wind_icond2(path: str,
 
     # Parameters from config
     next_n_grid_points = config['params'].get('next_n_grid_points', 12)
-    forecast_hours = ['06', '09', '12', '15']  # Available forecast hours
+    get_method = config['params'].get('get_next_grid_points_method', 'geodesic_next')
+    icond2_source = config['data'].get('icond2_source', 'csv')
     rel_features = list(set(features['known'] + features['observed'])) if features else []
+    
+    # Check if we should use database or CSV
+    if icond2_source == 'database':
+        logging.debug(f"Loading ICON-D2 data from database for station {station_id}")
+        
+        # Determine time range for DB query
+        # Use full synthetic data range
+        start_time = df_synth.index.min()
+        end_time = df_synth.index.max()
+        
+        # Load from database - will raise exception if it fails
+        df_final, _nearest_label, _station_rel_lat, _station_rel_lon = _load_icon_d2_from_database(
+            station_lat=station_lat,
+            station_lon=station_lon,
+            next_n_grid_points=next_n_grid_points,
+            get_method=get_method,
+            start_time=start_time,
+            end_time=end_time,
+            config=config,
+            turbines=turbines
+        )
+        
+        # Store relative position features if available
+        if _station_rel_lat is not None:
+            static_data['station_rel_lat'] = _station_rel_lat
+            static_data['station_rel_lon'] = _station_rel_lon
+        
+        logging.info(f"Successfully loaded {len(df_final)} rows from database")
+    
+    elif icond2_source == 'csv':
+        # Original CSV-based loading
+        logging.debug(f"Loading ICON-D2 data from CSV for station {station_id}")
+        
+        forecast_hours = ['06', '09', '12', '15']  # Available forecast hours
+        
+        # Prepare arguments for parallel forecast hour processing
+        forecast_args = []
+        for forecast_hour in forecast_hours:
+            forecast_args.append((forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points, turbines))
 
-    # Prepare arguments for parallel forecast hour processing
-    forecast_args = []
-    for forecast_hour in forecast_hours:
-        forecast_args.append((forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points, turbines))
+        # Process forecast hours in parallel using ProcessPoolExecutor (CPU bound)
+        all_forecast_dfs = []
+        max_workers = min(len(forecast_hours), mp.cpu_count())
+        # Relative-position scalars are the same for every forecast hour; capture from first result
+        _station_rel_lat = None
+        _nearest_label = None
+        _station_rel_lon = None
 
-    # Process forecast hours in parallel using ProcessPoolExecutor (CPU bound)
-    all_forecast_dfs = []
-    max_workers = min(len(forecast_hours), mp.cpu_count())
-    # Relative-position scalars are the same for every forecast hour; capture from first result
-    _station_rel_lat = None
-    _nearest_label = None
-    _station_rel_lon = None
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_hour = {executor.submit(_process_forecast_hour, arg): arg[0] for arg in forecast_args}
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_to_hour = {executor.submit(_process_forecast_hour, arg): arg[0] for arg in forecast_args}
+            for future in as_completed(future_to_hour):
+                hour = future_to_hour[future]
+                result = future.result()
+                if result[0] is not None:
+                    all_forecast_dfs.append((result[0], hour))
+                    # Capture relative-position scalars (index 2/3) and nearest NWP label (index 4).
+                    # Take the first non-None value across forecast hours — they should be identical
+                    # for a given station since its position relative to the grid doesn't change.
+                    if len(result) > 2 and result[2] is not None and _station_rel_lat is None:
+                        _station_rel_lat = result[2]
+                        _station_rel_lon = result[3]
+                    if len(result) > 4 and result[4] is not None and _nearest_label is None:
+                        _nearest_label = result[4]
 
-        for future in as_completed(future_to_hour):
-            hour = future_to_hour[future]
-            result = future.result()
-            if result[0] is not None:
-                all_forecast_dfs.append((result[0], hour))
-                # Capture relative-position scalars (index 2/3) and nearest NWP label (index 4).
-                # Take the first non-None value across forecast hours — they should be identical
-                # for a given station since its position relative to the grid doesn't change.
-                if len(result) > 2 and result[2] is not None and _station_rel_lat is None:
-                    _station_rel_lat = result[2]
-                    _station_rel_lon = result[3]
-                if len(result) > 4 and result[4] is not None and _nearest_label is None:
-                    _nearest_label = result[4]
+        # If relative_position method returned relative scalars, store them as static features
+        if _station_rel_lat is not None:
+            static_data['station_rel_lat'] = _station_rel_lat
+            static_data['station_rel_lon'] = _station_rel_lon
 
-    # If relative_position method returned relative scalars, store them as static features
-    if _station_rel_lat is not None:
-        static_data['station_rel_lat'] = _station_rel_lat
-        static_data['station_rel_lon'] = _station_rel_lon
+        # Sort by forecast hour to maintain consistent order
+        hour_order = {'06': 0, '09': 1, '12': 2, '15': 3}
+        all_forecast_dfs.sort(key=lambda x: hour_order.get(x[1], 99))
+        all_forecast_dfs = [df for df, _ in all_forecast_dfs]
 
-    # Sort by forecast hour to maintain consistent order
-    hour_order = {'06': 0, '09': 1, '12': 2, '15': 3}
-    all_forecast_dfs.sort(key=lambda x: hour_order.get(x[1], 99))
-    all_forecast_dfs = [df for df, _ in all_forecast_dfs]
+        if not all_forecast_dfs:
+            raise ValueError("No data could be loaded from any forecast hour")
 
-    if not all_forecast_dfs:
-        raise ValueError("No data could be loaded from any forecast hour")
-
-    # Combine all forecast hours - keep all columns including starttime, forecasttime
-    df_final = pd.concat(all_forecast_dfs, ignore_index=False)
+        # Combine all forecast hours - keep all columns including starttime, forecasttime
+        df_final = pd.concat(all_forecast_dfs, ignore_index=False)
+    
+    else:
+        raise ValueError(f"Invalid icond2_source: '{icond2_source}'. Must be 'database' or 'csv'.")
 
     # 1. Filter out forecasttime=0 (analysis values)
     if 'forecasttime' in df_final.columns:
@@ -2438,6 +2731,31 @@ def prepare_data_for_tft(data: pd.DataFrame,
             logging.error(f"Error scaling static features: {e}. "
                         f"Static features will NOT be scaled! This may cause poor model performance.")
 
+    # --- Extract raw NWP baseline before scaling (for Skill_NWP calculation) ---
+    # Priority: wind_speed_h10_1 (nearest grid point) > wind_speed_h10 (no suffix)
+    nwp_raw_col = None
+    if known_future_cols:
+        for col in known_future_cols:
+            if col == 'wind_speed_h10_1':
+                nwp_raw_col = col
+                break
+        if nwp_raw_col is None:
+            for col in known_future_cols:
+                if col == 'wind_speed_h10':
+                    nwp_raw_col = col
+                    break
+        if nwp_raw_col is None:
+            for col in known_future_cols:
+                if col.startswith('wind_speed_h10'):
+                    nwp_raw_col = col
+                    break
+
+    nwp_raw_test_data = None
+    if nwp_raw_col is not None and nwp_raw_col in test_df.columns:
+        # Store raw (unscaled) NWP values for Skill_NWP — single column as 2D array
+        nwp_raw_test_data = test_df[[nwp_raw_col]].values
+        logging.debug(f"Extracted raw NWP baseline column '{nwp_raw_col}' for Skill_NWP (before scaling)")
+
     # Scale Known Future Features
     known_train_data, known_test_data = None, None
 
@@ -2519,6 +2837,27 @@ def prepare_data_for_tft(data: pd.DataFrame,
         step_size
     )
 
+    # --- Window raw NWP data with the same logic, then extract horizon portion ---
+    nwp_raw_test_windowed = None
+    if nwp_raw_test_data is not None:
+        # Window NWP raw data using the same windowing as known features
+        # We pass it as "known" data and use a dummy for observed/target since
+        # create_tft_sequences needs them. We only care about the known output.
+        nwp_known_test_windowed, _, _, _ = create_tft_sequences(
+            nwp_raw_test_data,   # single-column known data
+            None,                # no observed
+            target_test_scaled,  # target (needed for windowing alignment)
+            test_df.index,
+            history_length,
+            future_horizon,
+            step_size
+        )
+        # nwp_known_test_windowed shape: (n_samples, history_len + future_horizon, 1)
+        # Extract only the forecast horizon portion and squeeze the feature dim
+        nwp_raw_test_windowed = nwp_known_test_windowed[:, history_length:, 0]
+        # Shape: (n_samples, future_horizon) — matches y_test shape
+        logging.debug(f"NWP raw test windowed shape: {nwp_raw_test_windowed.shape}")
+
     has_observed = X_observed_train.ndim == 3 and X_observed_train.shape[-1] > 0
     num_train_samples = X_observed_train.shape[0] if has_observed else X_known_train.shape[0]
     num_test_samples = X_observed_test.shape[0] if has_observed else X_known_test.shape[0]
@@ -2546,6 +2885,9 @@ def prepare_data_for_tft(data: pd.DataFrame,
 
     results['scalers'] = scalers
     results['index_train'], results['index_test'] = train_indices, test_indices
+
+    # Store raw NWP baseline for Skill_NWP (None if no NWP column found)
+    results['nwp_raw_test'] = nwp_raw_test_windowed
 
     X_train: Dict[str, np.ndarray] = {
             'observed': X_observed_train,
