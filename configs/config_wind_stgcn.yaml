@@ -1,0 +1,256 @@
+data:
+  path: '/mnt/lambda1/nvme1/synthetic/wind/era5_fric_wind_hourly_age'
+  nwp_path: '/mnt/lambda1/nvme1/icond-d2/parquet'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
+  files: ['00298', '02907', '02564', '01303', '03015', '00183', '01759', '07403', '05546', '00662',
+          '00596', '07410', '03631', '03366', '07374', '03362', '05800', '00591', '02812', '03946',
+          '03196', '00891', '00867', '02961', '01694', '05490', '01605', '07351', '00656', '04024',
+          '07396', '15207', '07367', '02928', '01001', '01612', '02601', '00427', '01639', '03166',
+          '07370', '03821', '02559', '03268', '05705', '00282', '02014', '00722', '02485', '00856',
+          '00963', '00704', '04745', '00342', '01766', '01544', '04104', '05109', '01200', '02171',
+          '00880', '02794', '04393', '07369', '03126', '00232', '00164', '02261', '01358', '01346',
+          '07412', '03379', '05349', '07341', '03028', '05397', '04371', '02925', '00840', '07368']
+  val_files: ['05930', '07395', '15813', '04280', '01262', '02932', '05404', '01587', '03098', '04642',
+            '00433', '02712', '05029', '06197', '03158', '03660', '02597', '03032', '00303', '04336',
+            '03668', '05100', '05347', '15000', '04271', '00691', '02115', '03761', '01270', '03730',
+            '01832', '00198', '02483', '01443', '06163', '02044', '04464', '01580', '04911', '01503',
+            '03513', '01975', '01691', '07394', '00096', '05371', '02023', '03086', '05906', '01078',
+            '03093', '15444', '05440', '05779', '02667', '05792', '03987', '00161', '00460', '02638',
+            '03231', '05516', '05856', '00953', '04466', '07393', '04928', '05142', '02429', '02290',
+            '05158', '01048', '13674', '01684', '04177', '03287', '04887', '02985', '03897', '00701']
+  # Optional: restrict to a time window for evaluation (comment out to use all data)
+  test_start: '2025-08-01'
+  test_end:   '2025-10-31'
+  power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
+  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  stations_master: 'data/stations_master.csv'
+  freq: '1h'
+  train_frac: 1
+  val_frac: 0.25 # abs from train_frac
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
+  retrain_interval: 1
+  eval_interval: 1
+  scale_x: True
+  scale_y: True
+  knn_imputer_neighbors: 5
+
+
+gnn:
+  station_split_seed: 42       # RNG seed for 80/80 station split (must match TFT pipeline)
+  val_fraction: 0.2            # fraction of timestamps held out for early stopping
+  hidden: 128                  # hidden dimension (must be divisible by heads)
+  heads: 4                     # GATv2 attention heads
+  num_layers: 3                # number of GATv2 layers
+  dropout: 0.1
+  lr: 0.001
+  weight_decay: 1.0e-5
+  batch_size: 512
+  max_epochs: 100
+  patience: 15                 # early stopping patience (epochs)
+  num_workers: 16
+
+stgnn:
+  radius_km: 500              # Kanten nur zu Stationen innerhalb dieses Radius (geodätisch)
+  max_neighbors: 8           # optional: max eingehende Kanten pro Node (null = unbegrenzt)
+  seq_len: 96                 # total sequence length (past_len + forecast_horizon)
+  forecast_horizon: 48        # steps 48–95 are predicted (= future 48 h)
+  hidden: 128                 # hidden dimension (must be divisible by heads)
+  heads: 4                    # GATv2 attention heads
+  num_layers: 3              # number of ST-blocks
+  temporal_kernel_size: 5     # Conv1d kernel size along the time axis
+  dropout: 0.2
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  batch_size: 64              # smaller than GNN due to 96-step sequences
+  max_epochs: 100
+  patience: 10                # early stopping patience (epochs)
+  num_workers: 4
+
+stgnn2:
+  # Input features
+  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m'] # 'u_10m', 'v_10m'          # ICON-D2 ML features: {quantity}_{height}m
+  ecmwf_features: ['u_wind10m', 'v_wind10m', 'wind_speed_10m']  # 'u_wind10m', 'v_wind10m' # ECMWF DB column names (normalised form)
+  measurement_features: ['wind_speed', 'wind_direction']          # columns from synth_*.csv (historical input)
+  target_col: 'wind_speed'                      # which measurement feature to predict
+  n_workers: 16 # parallel data loading workers (passed to DataLoader)
+
+  # Graph topology
+  next_n_icond2: 4              # ICON-D2 grid points per station
+  next_n_ecmwf: 4              # ECMWF grid points per station
+  station_connectivity: delaunay  # "delaunay" | "knn"
+  use_altitude_diff: true       # NWP nodes have altitude=0, so diff = station elevation above NWP surface
+
+  # Time windows
+  history_length: 48            # past hours with measurements
+  forecast_horizon: 48          # hours to predict
+
+  # ICON-D2 run hours to include (all four available: 6, 9, 12, 15)
+  icond2_run_hours: [6,9,12,15]
+
+  # Architecture
+  temporal_encoding: gru        # "flat" | "gru" | "cnn"
+  hidden: 128
+  num_layers: 3                 # message-passing layers
+  encoder_mlp_layers: 2
+  decoder_mlp_layers: 2
+  aggregation: mean
+  gru_hidden: 64
+  gru_layers: 2
+  cnn_channels: 64
+  cnn_kernel_size: 5
+  dropout: 0.3
+  update_nwp_nodes: false
+
+  # Training
+  min_target_stations: 1
+  max_target_stations: 10
+  max_neighbor_stations: 60
+  neighbor_radius_km: 500      # only include neighbour stations within this radius of any target
+  loss_fn: mse
+  loss_weights_by_horizon: true
+  horizon_decay: 0.95
+  lr: 1.0e-4
+  weight_decay: 1.0e-3
+  scheduler: cosine
+  batch_size: 32
+  max_epochs: 200
+  patience: 10
+  gradient_clip: 1.0
+
+dcrnn:
+  # Input features — same as stgnn2
+  icond2_features: ['wind_speed_10m', 'wind_speed_38m'] # 'u_10m', 'v_10m',
+  ecmwf_features: ['wind_speed_10m'] # 'u_wind10m', 'v_wind10m',
+  measurement_features: ['wind_speed', 'wind_direction']
+  target_col: 'wind_speed'
+  n_workers: 16
+
+  # Graph
+  next_n_icond2: 4
+  next_n_ecmwf: 4
+  station_connectivity: delaunay
+  use_altitude_diff: true
+  icond2_run_hours: [6, 9, 12, 15]
+
+  # Time windows
+  history_length: 48
+  forecast_horizon: 48
+  temporal_encoding: gru        # sampler output format for DCRNN
+
+  # DCRNN architecture
+  hidden:
+  num_layers: 2
+  diffusion_K: 2
+  nwp_out_dim: 64    # output dim of NWP attention layer; must be divisible by nwp_heads
+  nwp_heads: 4        # GATv2 attention heads for NWP → station
+  dropout: 0.3
+  teacher_forcing_ratio: 0.1   # starts here, linearly decays to 0
+
+  # Station subgraph sampling
+  min_target_stations: 1
+  max_target_stations: 10
+  max_neighbor_stations: 60
+  neighbor_radius_km: 500
+
+  # Training
+  loss_fn: mse
+  loss_weights_by_horizon: true
+  horizon_decay: 0.95
+  lr: 3.0e-4
+  weight_decay: 1.0e-3
+  scheduler: cosine
+  batch_size: 8
+  max_epochs: 200
+  patience: 15
+  gradient_clip: 1.0
+
+  # ---------------------------------------------------------------------------
+  # HPO bounds — read by hpo_dcrnn.py
+  # Each param entry has a "type" key:
+  #   categorical : choices list
+  #   int         : low / high (+ optional step)
+  #   float       : low / high (+ optional log: true for log-uniform sampling)
+  # All other dcrnn params not listed here keep their fixed values above.
+  # ---------------------------------------------------------------------------
+  hpo:
+    trials: 50
+    studies_path: studies/
+    # Cross-validation: expanding-window, same idea as hpo_cl.py
+    n_folds: 3
+    min_train_date: '2024-03-31'  # end of chunk-0 (always training); folds validate on [2024-07-31 … 2025-08-01]
+    n_val_stations: 40            # use first N stations from val_files as HPO val set
+    # max training epochs per trial (usually shorter than the final run)
+    max_epochs_per_trial: 50
+    patience_per_trial: 8
+
+    params:
+      # DCGRU hidden dimension (no divisibility constraint)
+      hidden:
+        type: int
+        low: 32
+        high: 128
+
+      num_layers:
+        type: int
+        low: 1
+        high: 3
+
+      diffusion_K:
+        type: int
+        low: 1
+        high: 5
+
+      # NWP attention heads — sampled first; nwp_out_dim is then forced to be
+      # a multiple of nwp_heads via nwp_out_per_head (see hpo_dcrnn.py)
+      nwp_heads:
+        type: int
+        low: 1
+        high: 8
+
+      # Per-head output dimension of the NWP attention layer.
+      # nwp_out_dim = nwp_heads * nwp_out_per_head (enforced in hpo_dcrnn.py)
+      nwp_out_per_head:
+        type: int
+        low: 8
+        high: 64
+
+      dropout:
+        type: float
+        low: 0.0
+        high: 0.5
+
+      teacher_forcing_ratio:
+        type: float
+        low: 0.0
+        high: 1.0
+
+      lr:
+        type: float
+        low: 1.0e-5
+        high: 1.0e-3
+        log: true
+
+      weight_decay:
+        type: float
+        low: 1.0e-6
+        high: 1.0e-3
+        log: true
+
+      batch_size:
+        type: int
+        low: 4
+        high: 64
+
+      horizon_decay:
+        type: float
+        low: 0.80
+        high: 1.00
+
+      scheduler:
+        type: categorical
+        choices: [cosine, plateau, none]
+
+output:
+  path: 'results/geostatistics'
+  prefix: 'spatial_interp'   # prepended to all output filenames
