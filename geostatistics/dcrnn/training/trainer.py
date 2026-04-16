@@ -13,6 +13,14 @@ Teacher forcing schedule
 Starting at 1.0 (always teacher forcing) and decaying to 0.0 (fully
 autoregressive) is a common curriculum.  The YAML parameters
 ``teacher_forcing_start`` / ``teacher_forcing_end`` control this.
+
+Performance
+-----------
+CPU sample building is overlapped with GPU forward/backward via
+_SamplePrefetcher: a background thread pre-builds the next n_ahead
+samples into a queue while the GPU is busy, hiding the numpy prep latency.
+Gradient accumulation (batch_size steps per optimizer.step) further
+stabilises gradients without increasing per-step VRAM.
 """
 from __future__ import annotations
 
@@ -20,6 +28,8 @@ import logging
 import math
 import random
 from pathlib import Path
+from queue import Queue as _Queue
+from threading import Thread
 
 import torch
 from torch import Tensor
@@ -34,6 +44,74 @@ from ..model.dcrnn import DCRNN
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Prefetcher
+# ---------------------------------------------------------------------------
+
+class _SamplePrefetcher:
+    """
+    Overlaps CPU sample building with GPU compute via a background thread.
+
+    The worker pre-builds SampleBatch objects (CPU tensors) into a bounded
+    queue. The main thread consumes them and calls .to(device) right before
+    use — the PCIe transfer is thus pipelined with the worker's numpy work.
+
+    Error handling: if the worker raises, the exception is re-raised in the
+    main thread on the next iteration so it is not silently swallowed.
+
+    Parameters
+    ----------
+    run_pairs : list of (r_curr, r_hist, t_run_abs) tuples
+    sample_fn : callable(*pair) -> SampleBatch  (called in worker thread)
+    device    : target torch.device
+    n_ahead   : queue depth; 2 is optimal when forward ≈ sample-build time
+    """
+
+    def __init__(
+        self,
+        run_pairs: list,
+        sample_fn,
+        device: torch.device,
+        n_ahead: int = 2,
+    ) -> None:
+        self._q      = _Queue(maxsize=n_ahead)
+        self._device = device
+        t = Thread(
+            target=self._worker,
+            args=(run_pairs, sample_fn),
+            daemon=True,   # dies with the main process; no cleanup needed
+        )
+        t.start()
+
+    def _worker(self, run_pairs, sample_fn) -> None:
+        try:
+            for pair in run_pairs:
+                self._q.put(sample_fn(*pair))
+        except Exception as exc:   # propagate to main thread
+            self._q.put(exc)
+        finally:
+            self._q.put(None)      # sentinel — always sent
+
+    def __iter__(self):
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            if isinstance(item, Exception):
+                raise item
+            batch: SampleBatch = item
+            # .to(device) here: PCIe transfer while worker builds next sample
+            yield (
+                batch.data.to(self._device),
+                batch.target_mask.to(self._device),
+                batch.ground_truth.to(self._device),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Metrics helper
+# ---------------------------------------------------------------------------
+
 def _metrics(preds: Tensor, targets: Tensor) -> tuple[float, float, float]:
     """MSE, RMSE, R² — NaN-safe."""
     valid = ~torch.isnan(targets)
@@ -47,6 +125,10 @@ def _metrics(preds: Tensor, targets: Tensor) -> tuple[float, float, float]:
     r2     = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
     return mse, rmse, r2
 
+
+# ---------------------------------------------------------------------------
+# Trainer
+# ---------------------------------------------------------------------------
 
 class DCRNNTrainer:
     """
@@ -132,12 +214,37 @@ class DCRNNTrainer:
         """Identical signature to InductiveTrainer.fit() for drop-in use."""
         import numpy as np
 
-        tc = self.tc
+        tc   = self.tc
+        accum = max(tc.batch_size, 1)
+
         history: dict[str, list] = {
             "epoch": [], "train_loss": [], "train_rmse": [], "train_r2": [],
             "val_loss": [], "val_rmse": [], "val_r2": [], "lr": [],
         }
         stopped_epoch = tc.max_epochs
+
+        # Bound sample functions — closures over the data arrays.
+        # Created once here so the prefetcher worker can call them by name.
+        def _train_sample(r_curr, r_hist, t_run_abs) -> SampleBatch:
+            return self.sampler.sample_train(
+                r_curr, r_hist, t_run_abs,
+                station_meas, station_nearest_grid,
+                grid_icond2_runs, station_ecmwf_nwp,
+                station_static, ecmwf_nwp,
+                icond2_static, ecmwf_static,
+                train_station_indices,
+            )
+
+        def _val_sample(r_curr, r_hist, t_run_abs) -> SampleBatch:
+            return self.sampler.sample_val(
+                r_curr, r_hist, t_run_abs,
+                station_meas, station_nearest_grid,
+                grid_icond2_runs, station_ecmwf_nwp,
+                station_static, ecmwf_nwp,
+                icond2_static, ecmwf_static,
+                train_station_indices,
+                val_station_indices,
+            )
 
         for epoch in range(1, tc.max_epochs + 1):
             tf_ratio = self._teacher_forcing_ratio(epoch - 1)
@@ -147,35 +254,29 @@ class DCRNNTrainer:
             random.shuffle(train_run_pairs)
             t_losses, t_preds_all, t_gt_all = [], [], []
 
-            for r_curr, r_hist, t_run_abs in train_run_pairs:
-                batch: SampleBatch = self.sampler.sample_train(
-                    r_curr, r_hist, t_run_abs,
-                    station_meas, station_nearest_grid,
-                    grid_icond2_runs, station_ecmwf_nwp,
-                    station_static, ecmwf_nwp,
-                    icond2_static, ecmwf_static,
-                    train_station_indices,
-                )
-                data    = batch.data.to(self.device)
-                mask    = batch.target_mask.to(self.device)
-                gt      = batch.ground_truth.to(self.device)  # (N_target, T_fore)
+            self.optimiser.zero_grad()
+            prefetcher = _SamplePrefetcher(train_run_pairs, _train_sample, self.device)
 
-                self.optimiser.zero_grad()
+            for step_idx, (data, mask, gt) in enumerate(prefetcher):
                 preds = self.model(
                     data, mask,
                     teacher_forcing_targets=gt,
                     teacher_forcing_ratio=tf_ratio,
                 )
-                loss = self.loss_fn(preds, gt)
+                loss = self.loss_fn(preds, gt) / accum
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), tc.gradient_clip
-                )
-                self.optimiser.step()
 
-                t_losses.append(loss.item())
+                t_losses.append(loss.item() * accum)
                 t_preds_all.append(preds.detach())
                 t_gt_all.append(gt)
+
+                is_last = (step_idx + 1 == len(train_run_pairs))
+                if (step_idx + 1) % accum == 0 or is_last:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), tc.gradient_clip
+                    )
+                    self.optimiser.step()
+                    self.optimiser.zero_grad()
 
             t_loss = float(np.mean(t_losses))
             t_preds_cat = torch.cat(t_preds_all, dim=0)
@@ -187,23 +288,10 @@ class DCRNNTrainer:
             v_losses, v_preds_all, v_gt_all = [], [], []
 
             with torch.no_grad():
-                for r_curr, r_hist, t_run_abs in val_run_pairs:
-                    batch = self.sampler.sample_val(
-                        r_curr, r_hist, t_run_abs,
-                        station_meas, station_nearest_grid,
-                        grid_icond2_runs, station_ecmwf_nwp,
-                        station_static, ecmwf_nwp,
-                        icond2_static, ecmwf_static,
-                        train_station_indices,
-                        val_station_indices,
-                    )
-                    data = batch.data.to(self.device)
-                    mask = batch.target_mask.to(self.device)
-                    gt   = batch.ground_truth.to(self.device)
-
+                val_prefetcher = _SamplePrefetcher(val_run_pairs, _val_sample, self.device)
+                for data, mask, gt in val_prefetcher:
                     preds = self.model(data, mask)   # autoregressive (no TF)
                     loss  = self.loss_fn(preds, gt)
-
                     v_losses.append(loss.item())
                     v_preds_all.append(preds)
                     v_gt_all.append(gt)

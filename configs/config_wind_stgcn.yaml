@@ -165,7 +165,6 @@ dcrnn:
   horizon_decay: 0.95
   lr: 3.0e-4
   weight_decay: 1.0e-3
-  scheduler: cosine
   batch_size: 8
   max_epochs: 200
   patience: 15

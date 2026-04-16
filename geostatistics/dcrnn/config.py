@@ -123,7 +123,7 @@ class DCRNNConfig:
             horizon_decay=d.get("horizon_decay", 0.95),
             lr=d["lr"],
             weight_decay=d.get("weight_decay", 1e-5),
-            scheduler=d.get("scheduler", "cosine"),
+            scheduler=d.get("scheduler", "plateau"),
             max_epochs=d["max_epochs"],
             batch_size=d.get("batch_size", 8),
             gradient_clip=d.get("gradient_clip", 1.0),

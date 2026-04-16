@@ -108,7 +108,7 @@ for ((i=0; i<N_WORKERS; i++)); do
     CMD="cd '$REPO_ROOT' && source '$VENV_PATH/bin/activate' && \
 CUDA_VISIBLE_DEVICES=$GPU_IDX python geostatistics/hpo_dcrnn.py \
     --config '$CONFIG' \
-    $SUFFIX_FLAG; \
+    --suffix '$WORKER_SUFFIX'; \
 echo 'Worker $i finished (exit \$?). Press any key to close.'; read -n1"
 
     echo "  Launching screen '$SESSION_NAME' on GPU $GPU_IDX ..."
