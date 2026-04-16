@@ -127,6 +127,7 @@ class DCRNNTrainer:
         val_run_pairs: list,
         train_station_indices: list,
         val_station_indices: list,
+        verbose: bool = True,
     ) -> dict:
         """Identical signature to InductiveTrainer.fit() for drop-in use."""
         import numpy as np
@@ -219,15 +220,16 @@ class DCRNNTrainer:
                 self.scheduler.step()
 
             lr_now = self.optimiser.param_groups[0]["lr"]
-            logger.info(
-                "Epoch %3d/%d | TF=%.2f | "
-                "train loss=%.4f RMSE=%.4f R²=%.4f | "
-                "val loss=%.4f RMSE=%.4f R²=%.4f | lr=%.2e",
-                epoch, tc.max_epochs, tf_ratio,
-                t_loss, t_rmse, t_r2,
-                v_loss, v_rmse, v_r2,
-                lr_now,
-            )
+            if verbose:
+                logger.info(
+                    "Epoch %3d/%d | TF=%.2f | "
+                    "train loss=%.4f RMSE=%.4f R²=%.4f | "
+                    "val loss=%.4f RMSE=%.4f R²=%.4f | lr=%.2e",
+                    epoch, tc.max_epochs, tf_ratio,
+                    t_loss, t_rmse, t_r2,
+                    v_loss, v_rmse, v_r2,
+                    lr_now,
+                )
 
             history["epoch"].append(epoch)
             history["train_loss"].append(t_loss)

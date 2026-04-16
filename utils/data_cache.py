@@ -554,3 +554,163 @@ def create_or_load_preprocessed_data(config: Dict,
         logger.info(f"Created and cached {len(lazy_loader)} folds")
 
         return lazy_loader, cache_id
+
+
+# ---------------------------------------------------------------------------
+# GNNCache — memory-mapped caching for DCRNN / STGNN2 data
+# ---------------------------------------------------------------------------
+
+class GNNCache:
+    """
+    Disk-based cache for large GNN tensors (ICON-D2, ECMWF, measurements).
+
+    Layout::
+
+        cache_dir/{key}/
+            grid_icond2_runs_scaled.npy   # mmap-able  (R × 48 × N_igrid × I2)
+            meas_scaled.npy               # mmap-able  (T × N_all × M_meas)
+            station_ecmwf_scaled.npy      # mmap-able  (T × N_all × E2)
+            ecmwf_nwp_scaled.npy          # mmap-able  (T × N_ecmwf × E2)
+            derived.pkl                   # small: coords, run_times, scalers, pairs …
+
+    All workers share the same OS page-cache for the mmap'd arrays, so
+    4 workers don't consume 4 × 15 GB RAM.
+    """
+
+    # Arrays stored as .npy (mmap-able) — raw/unscaled so each fold can fit
+    # its own scaler on the correct training window (no data leakage).
+    ARRAY_NAMES = [
+        "grid_icond2_runs",
+        "meas_raw",
+        "station_ecmwf_nwp",
+        "ecmwf_nwp",
+    ]
+
+    def __init__(self, cache_dir: str = "data_cache/gnns"):
+        from pathlib import Path
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger(__name__)
+
+    # ── Key generation ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def make_key(cfg: dict) -> str:
+        """Stable MD5 hash over all fields that affect tensor content."""
+        import hashlib, json
+        data_cfg  = cfg["data"]
+        dcrnn_cfg = cfg.get("dcrnn", cfg.get("stgnn2", {}))
+        key_dict = {
+            "path":             data_cfg.get("path", ""),
+            "nwp_path":         data_cfg.get("nwp_path", ""),
+            "ecmwf_path":       data_cfg.get("ecmwf_path", ""),
+            "files":            sorted(str(s) for s in data_cfg.get("files", [])),
+            "val_files":        sorted(str(s) for s in data_cfg.get("val_files", [])),
+            "test_start":       str(data_cfg.get("test_start", "")),
+            "test_end":         str(data_cfg.get("test_end", "")),
+            "interpol_path":    str(data_cfg.get("interpol_path", "")),
+            "knnimputer_path":  str(data_cfg.get("knnimputer_path", "")),
+            "icond2_features":  sorted(dcrnn_cfg.get("icond2_features", [])),
+            "ecmwf_features":   sorted(dcrnn_cfg.get("ecmwf_features", [])),
+            "meas_features":    sorted(dcrnn_cfg.get("measurement_features", [])),
+            "next_n_icond2":    dcrnn_cfg.get("next_n_icond2", 4),
+            "next_n_ecmwf":     dcrnn_cfg.get("next_n_ecmwf", 4),
+            "icond2_run_hours": sorted(dcrnn_cfg.get("icond2_run_hours", [6, 9, 12, 15])),
+            "use_altitude_diff": dcrnn_cfg.get("use_altitude_diff", False),
+        }
+        raw = json.dumps(key_dict, sort_keys=True)
+        return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+    # ── Path helpers ──────────────────────────────────────────────────────────
+
+    def _dir(self, key: str):
+        from pathlib import Path
+        return self.cache_dir / key
+
+    def exists(self, key: str) -> bool:
+        """Return True only if the cache is fully written (derived.pkl present)."""
+        return (self._dir(key) / "derived.pkl").exists()
+
+    # ── Write ─────────────────────────────────────────────────────────────────
+
+    def save(
+        self,
+        key: str,
+        arrays: dict,
+        derived: dict,
+    ) -> None:
+        """
+        Persist arrays as .npy (one file each) and everything else as derived.pkl.
+
+        Parameters
+        ----------
+        key     : cache key returned by ``make_key``
+        arrays  : dict with keys from ``ARRAY_NAMES``
+        derived : dict with small objects (scalers, coords, pairs, timestamps …)
+        """
+        import pickle
+        p = self._dir(key)
+        p.mkdir(parents=True, exist_ok=True)
+
+        for name, arr in arrays.items():
+            out = p / f"{name}.npy"
+            self.logger.info("GNNCache — saving %s %s …", name, arr.shape)
+            np.save(out, arr)
+
+        with open(p / "derived.pkl", "wb") as fh:
+            pickle.dump(derived, fh, protocol=4)
+
+        self.logger.info("GNNCache — written to %s", p)
+
+    # ── Read ──────────────────────────────────────────────────────────────────
+
+    def load_arrays(
+        self,
+        key: str,
+        names: list = None,
+        mmap: bool = True,
+        mmap_overrides: dict = None,
+    ) -> dict:
+        """
+        Load cached arrays.
+
+        Parameters
+        ----------
+        key            : cache key
+        names          : list of array names to load (default: all ARRAY_NAMES)
+        mmap           : default mmap mode for all arrays
+        mmap_overrides : per-array override, e.g. ``{"grid_icond2_runs": False}``
+                         to load a specific array fully into RAM while keeping the
+                         rest memory-mapped.  Useful when an array is always copied
+                         by downstream code (e.g. StandardScaler.transform) anyway,
+                         making mmap only add overhead without sharing benefit.
+        """
+        p     = self._dir(key)
+        names = names or self.ARRAY_NAMES
+        overrides = mmap_overrides or {}
+        out: dict = {}
+        for name in names:
+            path = p / f"{name}.npy"
+            if not path.exists():
+                raise FileNotFoundError(f"GNNCache: missing {path}")
+            use_mmap = overrides.get(name, mmap)
+            mode = "r" if use_mmap else None
+            out[name] = np.load(path, mmap_mode=mode)
+            self.logger.info(
+                "GNNCache — loaded %s %s (mmap=%s)", name, out[name].shape, use_mmap
+            )
+        return out
+
+    def load_derived(self, key: str) -> dict:
+        import pickle
+        with open(self._dir(key) / "derived.pkl", "rb") as fh:
+            return pickle.load(fh)
+
+    def load(
+        self,
+        key: str,
+        mmap: bool = True,
+        mmap_overrides: dict = None,
+    ) -> tuple:
+        """Convenience: returns (arrays_dict, derived_dict)."""
+        return self.load_arrays(key, mmap=mmap, mmap_overrides=mmap_overrides), self.load_derived(key)

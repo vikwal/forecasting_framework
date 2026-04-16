@@ -1,0 +1,87 @@
+data:
+  path: '/mnt/nas/synthetic/raw/wind' # '/mnt/nas/open-meteo/wind'
+  #exclude_stations: ['03321', '05480', '19207']  # incomplete NWP parquet data
+  #test_start: '2023-07-24'
+  test_end:   '2025-11-02'
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet' # '/mnt/nas/open-meteo/wind'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet' # '/mnt/nas/open-meteo/wind'
+  stations_master: 'data/stations_master.csv'
+
+
+interpolation:
+  get_theta_opt: true     # true → load best params from Optuna study (hpo.study_name); false → use values below
+  k_neighbors: 30         # number of nearest neighbours used for each prediction
+  idw_power: 2.0          # IDW exponent (weight = 1 / dist^power)
+  variogram_model: 'gaussian'   # spherical | gaussian | exponential
+  n_variogram_lags: 30    # number of lag bins for empirical semivariance
+  max_variogram_dist: 1000 # km; null = half of max pairwise dist (~430 km for this network)
+  interpolate_uv: false    # also interpolate u/v wind components (requires wind_direction column)
+  variogram_segments: 1   # 1=global (one variogram), 0=per-timestamp, N=N equal time blocks
+  variogram_detrend: true  # subtract per-station temporal mean before computing semivariance
+  rk_nan_threshold: 0.5   # drop timestamp only if >50% of stations have NaN in any RK feature
+  knn_impute_neighbors: 10  # k for KNN imputation of missing wind_speed (on 10-min data)
+  anisotropy:
+    enabled: true        # set to true to use anisotropic distances in the kriging system
+    angle: 0            # major axis direction (geographic degrees, clockwise from North)
+    ratio: 0.2            # range_minor / range_major  (< 1 = more correlated along major axis)
+  rk_features:            # covariates for the OLS trend in Regression Kriging
+    - altitude            # static (from wind_parameter.csv)
+    - nwp_wind_speed
+    - ecmwf_wind_speed
+    - wind_direction
+    # - temperature_2m
+    # - pressure
+    # - relative_humidity
+  nwp_components: absolute    # absolute | components | both  (ICON-D2 u_10m/v_10m as RK features)
+  ecmwf_components: components  # absolute | components | both  (ECMWF u_wind10m/v_wind10m as RK features)
+  variogram_seasonal: false   # directional_variogram.py: compute one variogram per season (DJF/MAM/JJA/SON)
+  azimuths: [0, 45, 90, 135]  # directional variogram angles in degrees (geographic: 0=N, 90=E); tolerance fixed at ±22.5°
+  #azimuths: [22.5, 67.5, 112.5, 157.5]
+  #azimuths: [0, 30, 60, 90, 120, 150]
+
+
+output:
+  path: 'results/geostatistics'
+  target_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'  # per-station interpolated timeseries
+  prefix: 'spatial_interp'   # prepended to all output filenames
+
+
+hpo:
+  trials: 1000
+  study_name: 'wind_interpol'
+  subsample_hours: null       # timestamps sampled per trial (null = full dataset)
+  params:
+    k_neighbors:
+      type: int
+      low: 60
+      high: 202
+    # variogram_model:
+    #   type: categorical
+    #   choices: ['spherical', 'gaussian', 'exponential']
+    n_variogram_lags:
+      type: int
+      low: 20
+      high: 60
+    anisotropy_angle:
+      type: float
+      low: 0.0
+      high: 180.0
+    anisotropy_ratio:
+      type: float
+      low: 0.1
+      high: 0.9
+    # use_temperature_2m:
+    #   type: categorical
+    #   choices: [true, false]
+    use_direction:
+      type: categorical
+      choices: [true, false]
+    # interpolate_uv:
+    #   type: categorical
+    #   choices: [true, false]
+    nwp_components:
+      type: categorical
+      choices: [absolute, components, both]
+    # ecmwf_components:
+    #   type: categorical
+    #   choices: [absolute, components, both]

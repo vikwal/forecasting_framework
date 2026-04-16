@@ -84,6 +84,10 @@ from geostatistics.train_stgnn2 import (
     load_ecmwf_at_stations_and_grid,
     load_ecmwf_parquet_at_stations_and_grid,
     load_nwp_elevations,
+    load_interpol_imputation,
+    apply_interpol_imputation,
+    load_knn_imputation,
+    apply_knn_imputation,
 )
 
 # ── DCRNN-specific imports ───────────────────────────────────────────────────
@@ -99,9 +103,56 @@ from geostatistics.evaluation import evaluate as run_evaluation, find_ws_feat_id
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("train_dcrnn")
+
+
+# ---------------------------------------------------------------------------
+# Feature mode helpers
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+def resolve_feature_mode(features: list[str], mode: str) -> list[str]:
+    """Filter a NWP feature list by mode: ``absolute`` | ``components`` | ``both``.
+
+    Classification per feature name:
+      - **wind speed** (absolute): matches ``wind_speed_*``
+      - **wind components**: matches ``u_*``, ``v_*``, ``u_wind*``, ``v_wind*``
+      - **other** (temperature, pressure, qs, …): always kept regardless of mode
+
+    Parameters
+    ----------
+    features : list of feature name strings (ICON-D2 or ECMWF format)
+    mode     : 'absolute' → speed only | 'components' → u/v only | 'both' → all
+    """
+    if mode == "both":
+        return list(features)
+    result = []
+    for f in features:
+        is_speed = bool(_re.match(r"wind_speed_", f))
+        is_comp  = bool(_re.match(r"[uv]_", f))  # u_10m, v_10m, u_wind10m, v_wind10m
+        if is_speed or is_comp:
+            if mode == "absolute" and is_speed:
+                result.append(f)
+            elif mode == "components" and is_comp:
+                result.append(f)
+        else:
+            # non-wind feature (temperature, pressure, qs …) → always include
+            result.append(f)
+    if not result:
+        raise ValueError(
+            f"resolve_feature_mode(mode={mode!r}) produced an empty feature list "
+            f"from {features}. Check your config."
+        )
+    return result
+
+
+def feature_indices(full_features: list[str], subset: list[str]) -> list[int]:
+    """Return integer indices of *subset* within *full_features*."""
+    idx_map = {f: i for i, f in enumerate(full_features)}
+    return [idx_map[f] for f in subset]
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +190,7 @@ def main() -> None:
     log_path = Path("logs") / log_name
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fh = logging.FileHandler(log_path)
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     logger.addHandler(fh)
     logging.getLogger("geostatistics").addHandler(fh)
 
@@ -156,8 +207,16 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Feature config
     # ------------------------------------------------------------------
-    icond2_features  = dcrnn_cfg.get("icond2_features")
-    ecmwf_features   = dcrnn_cfg.get("ecmwf_features")
+    icond2_features_all = dcrnn_cfg.get("icond2_features") or []
+    ecmwf_features_all  = dcrnn_cfg.get("ecmwf_features")  or []
+    i2_mode = dcrnn_cfg.get("icond2_feature_mode", "both")
+    e2_mode = dcrnn_cfg.get("ecmwf_feature_mode",  "both")
+    icond2_features = resolve_feature_mode(icond2_features_all, i2_mode)
+    ecmwf_features  = resolve_feature_mode(ecmwf_features_all,  e2_mode)
+    if i2_mode != "both":
+        logger.info("icond2_feature_mode=%s → %s", i2_mode, icond2_features)
+    if e2_mode != "both":
+        logger.info("ecmwf_feature_mode=%s  → %s", e2_mode, ecmwf_features)
     measurement_cols = dcrnn_cfg.get("measurement_features")
     target_col       = dcrnn_cfg.get("target_col")
     if target_col not in measurement_cols:
@@ -188,7 +247,27 @@ def main() -> None:
         logger.warning(
             "Measurement NaN audit: %d stations have gaps: %s", len(bad), bad
         )
-    _meas_nan_any = np.isnan(meas_raw[:, :, 0]).any(axis=1)
+
+    # Wind speed imputation via regression-kriging predictions
+    interpol_path = data_cfg.get("interpol_path")
+    if interpol_path:
+        logger.info("Loading interpolation (rk_pred) for imputation from %s …", interpol_path)
+        rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)
+        nan_before = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
+        meas_raw = apply_interpol_imputation(meas_raw, rk_pred, measurement_cols, target_col)
+        nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
+        logger.info("Imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, target_col)
+
+    # Wind direction imputation via pre-computed KNN parquet
+    knnimputer_path = data_cfg.get("knnimputer_path")
+    if knnimputer_path and "wind_direction" in measurement_cols:
+        knn_wd = load_knn_imputation(knnimputer_path, "wind_direction", all_ids, timestamps)
+        nan_before = int(np.isnan(meas_raw[:, :, measurement_cols.index("wind_direction")]).sum())
+        meas_raw = apply_knn_imputation(meas_raw, knn_wd, measurement_cols, "wind_direction")
+        nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index("wind_direction")]).sum())
+        logger.info("KNN imputation: %d NaN → %d NaN in 'wind_direction'", nan_before, nan_after)
+
+    _meas_nan_any = np.isnan(meas_raw).any(axis=(1, 2))
 
     test_start = data_cfg.get("test_start")
     test_end   = data_cfg.get("test_end")
@@ -205,7 +284,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Station metadata
     # ------------------------------------------------------------------
-    lats, lons, alts = load_station_metadata(data_path, all_ids)
+    meta_path = data_cfg.get("stations_master")
+    lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=meta_path)
     station_coords = np.stack([lats, lons], axis=1)
 
     # ------------------------------------------------------------------

@@ -229,13 +229,25 @@ def compute_empirical_semivariance(
     # Optionally remove each station's temporal mean (anomaly variogram)
     vm = values_matrix
     if detrend:
-        station_means = np.nanmean(vm, axis=0, keepdims=True)  # (1, N)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            station_means = np.nanmean(vm, axis=0, keepdims=True)  # (1, N) — NaN if all-NaN column
         vm = vm - station_means
 
     # Semivariance per pair, averaged over timestamps (ignore NaN)
     vals_i = vm[:, i_idx]   # (T, M)
     vals_j = vm[:, j_idx]   # (T, M)
-    sv_pairs = 0.5 * np.nanmean((vals_i - vals_j) ** 2, axis=0)  # (M,)
+    
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        sv_pairs = 0.5 * np.nanmean((vals_i - vals_j) ** 2, axis=0)  # (M,)
+
+    # Remove pairs that are purely NaN (no overlapping timestamps)
+    valid_pairs = ~np.isnan(sv_pairs)
+    pair_dists = pair_dists[valid_pairs]
+    sv_pairs = sv_pairs[valid_pairs]
 
     # Bin by distance
     bin_idx = np.searchsorted(bin_edges[1:], pair_dists).clip(0, n_lags - 1)
@@ -264,6 +276,9 @@ def fit_global_variogram(
         dict with keys 'nugget', 'psill', 'range', 'model'.
     """
     model_fn = _get_variogram_fn(model)
+
+    if len(semivariances) == 0 or len(lags) == 0:
+        raise ValueError("fit_global_variogram: empty semivariance array — no valid lag pairs.")
 
     sill_init = float(np.max(semivariances))
     idx80 = np.searchsorted(semivariances, 0.8 * sill_init)
@@ -481,6 +496,7 @@ def run_loo_cv(
     rk_static_features: Optional[dict] = None,
     rk_dynamic_features: Optional[dict] = None,
     aniso_dist_matrix: Optional[np.ndarray] = None,
+    rk_only: bool = False,
 ) -> pd.DataFrame:
     """Run leave-one-out cross-validation for IDW, OK, and RK over all
     stations and timestamps.
@@ -625,14 +641,13 @@ def run_loo_cv(
             n_idxs = neighbor_sets[s_idx]
             n_vals = vals_t[n_idxs]
 
-            # Skip if any neighbour is missing
+            # Skip if any neighbour is missing (after KNN imputation this should not occur)
             if np.any(np.isnan(n_vals)):
                 continue
 
-            n_dists = dist_matrix[s_idx, n_idxs]   # geodesic for IDW
+            n_dists = dist_matrix[s_idx, n_idxs]
             kp = active_predictors[s_idx]
 
-            idw_pred = predict_idw(n_vals, n_dists, idw_power)
             ok_pred = kp.predict(n_vals)
 
             if use_multi_features:
@@ -649,10 +664,11 @@ def run_loo_cv(
                 "station_id": station_ids[s_idx],
                 "timestamp": timestamps[t_idx],
                 "wind_speed_observed": float(obs),
-                "idw_pred": idw_pred,
-                "ok_pred": ok_pred,
                 "rk_pred": rk_pred,
             }
+            if not rk_only:
+                rec["idw_pred"] = predict_idw(n_vals, n_dists, idw_power)
+                rec["ok_pred"] = ok_pred
 
             if do_uv:
                 u_obs = u_t[s_idx]
@@ -705,11 +721,11 @@ def compute_metrics(df: pd.DataFrame) -> tuple:
     """
     has_uv = "u_observed" in df.columns
 
-    # Scalar wind-speed methods
+    # Scalar wind-speed methods — only include those present in the DataFrame
     methods: dict[str, tuple[str, str]] = {
-        "idw": ("wind_speed_observed", "idw_pred"),
-        "ok": ("wind_speed_observed", "ok_pred"),
-        "rk": ("wind_speed_observed", "rk_pred"),
+        m: ("wind_speed_observed", f"{m}_pred")
+        for m in ("idw", "ok", "rk")
+        if f"{m}_pred" in df.columns
     }
 
     if has_uv:

@@ -84,19 +84,31 @@ if [ -n "$SUFFIX" ]; then
     SUFFIX_FLAG="--suffix $SUFFIX"
 fi
 
+# ── Preprocess / cache step (runs once on GPU 0, synchronously) ──────────────
+echo ""
+echo "Step 1: Checking / building GNN data cache ..."
+CUDA_VISIBLE_DEVICES="${GPUS[0]}" python geostatistics/hpo_dcrnn.py \
+    --config "$CONFIG" \
+    $SUFFIX_FLAG \
+    --preprocess-only
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: Cache build step failed. Aborting."
+    exit 1
+fi
+echo "Cache ready."
+echo ""
+
 # ── Launch one screen session per worker ──────────────────────────────────────
 for ((i=0; i<N_WORKERS; i++)); do
     GPU_IDX=${GPUS[$((i % N_GPUS))]}
     WORKER_SUFFIX="${SUFFIX:+${SUFFIX}_}worker${i}"
     SESSION_NAME="hpo_dcrnn_${WORKER_SUFFIX}"
 
-    # Per-worker log suffix so logs are distinguishable
-    WORKER_SUFFIX_FLAG="--suffix ${WORKER_SUFFIX}"
-
     CMD="cd '$REPO_ROOT' && source '$VENV_PATH/bin/activate' && \
 CUDA_VISIBLE_DEVICES=$GPU_IDX python geostatistics/hpo_dcrnn.py \
     --config '$CONFIG' \
-    $WORKER_SUFFIX_FLAG; \
+    $SUFFIX_FLAG; \
 echo 'Worker $i finished (exit \$?). Press any key to close.'; read -n1"
 
     echo "  Launching screen '$SESSION_NAME' on GPU $GPU_IDX ..."

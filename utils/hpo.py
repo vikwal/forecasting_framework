@@ -395,7 +395,7 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
     
     if storage_url:
         storage = storage_url
-        logging.info(f"Using OPTUNA_STORAGE from environment: {storage_url}")
+        logging.info("Using Optuna storage: PostgreSQL (OPTUNA_STORAGE)")
     elif path.startswith('postgresql://') or path.startswith('postgres://'):
         storage = path
     else:
@@ -485,7 +485,7 @@ def load_study(studies_path: str,
     
     if storage_url:
         storage = storage_url
-        logging.info(f"Using OPTUNA_STORAGE from environment: {storage_url}")
+        logging.info("Using Optuna storage: PostgreSQL (OPTUNA_STORAGE)")
     elif studies_path.startswith('postgresql://') or studies_path.startswith('postgres://'):
         storage = studies_path
     else:

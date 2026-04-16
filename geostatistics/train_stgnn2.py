@@ -98,12 +98,18 @@ def load_station_measurements(
     for col in cols:
         dfs = []
         for sid in station_ids:
-            fpath = os.path.join(data_path, f"synth_{sid}.csv")
-            df = pd.read_csv(fpath, sep=";", usecols=["timestamp", col],
+            fpath = os.path.join(data_path, f"Station_{sid}.csv")
+            df = pd.read_csv(fpath, usecols=["timestamp", col],
                              parse_dates=["timestamp"])
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
             dfs.append(df.set_index("timestamp")[col].rename(sid))
-        pivot = pd.concat(dfs, axis=1).sort_index().resample("1h").mean()
+        # closed="left", label="left": hour 0 = [00:00, 00:50], hour 1 = [01:00, 01:50], …
+        pivot = (
+            pd.concat(dfs, axis=1)
+            .sort_index()
+            .resample("1h", closed="left", label="left")
+            .mean()
+        )
         if common_index is None:
             common_index = pivot.index
         pivots.append(pivot.values.astype(np.float32))
@@ -111,16 +117,207 @@ def load_station_measurements(
     return np.stack(pivots, axis=-1), common_index   # (T, N, M)
 
 
+def load_interpol_imputation(
+    interpol_path: str,
+    station_ids: list[str],
+    timestamps: pd.DatetimeIndex,
+) -> np.ndarray:
+    """
+    Load Regression-Kriging predictions (``rk_pred``) from pre-computed
+    interpolation CSVs and align them to ``timestamps``.
+
+    Used to impute missing ``wind_speed`` values in ``meas_raw``:
+    wherever ``meas_raw[:, n, ws_idx]`` is NaN the corresponding
+    ``rk_pred`` value fills the gap.
+
+    Returns
+    -------
+    rk_pred : (T, N) float32  — NaN where the interpol file has no entry
+              for that timestamp.
+    """
+    series = []
+    for sid in station_ids:
+        fpath = os.path.join(interpol_path, f"Station_{sid}.csv")
+        if not os.path.exists(fpath):
+            # Station has no interpol file → all-NaN column (no imputation)
+            series.append(pd.Series(np.nan, index=timestamps, name=sid, dtype="float32"))
+            continue
+        df = pd.read_csv(fpath, usecols=["timestamp", "rk_pred"], parse_dates=["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        s = df.set_index("timestamp")["rk_pred"].rename(sid)
+        series.append(s)
+
+    pivot = pd.concat(series, axis=1).reindex(timestamps)
+    return pivot.values.astype(np.float32)
+
+
+def load_knn_imputation(
+    knnimputer_path: str,
+    feature: str,
+    station_ids: list[str],
+    timestamps: pd.DatetimeIndex,
+) -> np.ndarray:
+    """
+    Load a pre-computed KNN-imputed parquet from ``knnimputer_path`` for the
+    given ``feature`` (e.g. ``"wind_direction"`` or ``"wind_speed"``) and
+    return a (T, N) float32 array aligned to ``timestamps``.
+
+    The parquet contains 10-min resolution data; it is resampled to 1 h by
+    mean before alignment.  Columns are station IDs (5-digit strings).
+    Missing stations or timestamps are left as NaN.
+
+    Parameters
+    ----------
+    knnimputer_path : directory that contains the parquet files
+    feature         : e.g. ``"wind_direction"``
+    station_ids     : ordered list of station IDs to extract
+    timestamps      : hourly UTC DatetimeIndex to align to
+
+    Returns
+    -------
+    arr : (T, N) float32 — NaN where the file has no entry
+    """
+    import glob
+
+    pattern = os.path.join(knnimputer_path, f"{feature}_knn*.parquet")
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        logger.warning(
+            "KNN imputation: no parquet found for '%s' in %s — skipping",
+            feature, knnimputer_path,
+        )
+        return np.full((len(timestamps), len(station_ids)), np.nan, dtype=np.float32)
+
+    fpath = matches[-1]   # use the most recent file
+    logger.info("KNN imputation: loading %s", os.path.basename(fpath))
+    df = pd.read_parquet(fpath)
+
+    # Resample 10-min → 1 h (closed="left", label="left" matches measurement loader)
+    df.index = pd.to_datetime(df.index, utc=True)
+    df = df.resample("1h", closed="left", label="left").mean()
+
+    # Select requested stations (fill missing stations with NaN)
+    available = [s for s in station_ids if s in df.columns]
+    missing   = [s for s in station_ids if s not in df.columns]
+    if missing:
+        logger.warning(
+            "KNN imputation '%s': %d stations not in parquet: %s",
+            feature, len(missing), missing[:10],
+        )
+    df = df.reindex(columns=station_ids)   # missing → NaN columns
+
+    # Align to timestamps
+    df = df.reindex(timestamps)
+    logger.info(
+        "KNN imputation '%s': loaded %d/%d stations, NaN remaining: %d",
+        feature, len(available), len(station_ids),
+        int(np.isnan(df.values).sum()),
+    )
+    return df.values.astype(np.float32)   # (T, N)
+
+
+def apply_knn_imputation(
+    meas_raw: np.ndarray,
+    knn_arr: np.ndarray,
+    measurement_cols: list[str],
+    feature: str,
+) -> np.ndarray:
+    """
+    Fill NaN entries in the ``feature`` channel of ``meas_raw`` with the
+    corresponding values from ``knn_arr``.
+
+    Parameters
+    ----------
+    meas_raw         : (T, N, M) float32 — may contain NaN
+    knn_arr          : (T, N)   float32 — pre-imputed values
+    measurement_cols : list of column names (same order as last dim of meas_raw)
+    feature          : column to impute (e.g. ``"wind_direction"``)
+
+    Returns
+    -------
+    meas_raw with NaN in the feature channel replaced (modified in-place).
+    """
+    if feature not in measurement_cols:
+        return meas_raw
+    idx  = measurement_cols.index(feature)
+    mask = np.isnan(meas_raw[:, :, idx]) & ~np.isnan(knn_arr)
+    meas_raw[:, :, idx][mask] = knn_arr[mask]
+    return meas_raw
+
+
+def apply_interpol_imputation(
+    meas_raw: np.ndarray,
+    rk_pred: np.ndarray,
+    measurement_cols: list[str],
+    target_col: str = "wind_speed",
+) -> np.ndarray:
+    """
+    Fill NaN entries in the ``target_col`` channel of ``meas_raw`` with
+    the corresponding ``rk_pred`` values.
+
+    Parameters
+    ----------
+    meas_raw         : (T, N, M) float32 — may contain NaN
+    rk_pred          : (T, N)   float32 — interpolated values
+    measurement_cols : list of column names (same order as last dim of meas_raw)
+    target_col       : column to impute (default: "wind_speed")
+
+    Returns
+    -------
+    meas_raw with NaN in the target channel replaced by rk_pred.
+    The array is modified in-place and returned.
+    """
+    if target_col not in measurement_cols:
+        return meas_raw
+    idx = measurement_cols.index(target_col)
+    mask = np.isnan(meas_raw[:, :, idx])
+    meas_raw[:, :, idx][mask] = rk_pred[mask]
+    return meas_raw
+
+
 def load_station_metadata(
     data_path: str,
     station_ids: list[str],
+    meta_path: str = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load lat, lon, altitude from wind_parameter.csv → each (N,) float32."""
-    meta_path = os.path.join(data_path, "wind_parameter.csv")
-    meta = pd.read_csv(meta_path, sep=";", dtype={"park_id": str}).set_index("park_id")
-    lats = meta.loc[station_ids, "latitude"].values.astype(np.float32)
-    lons = meta.loc[station_ids, "longitude"].values.astype(np.float32)
-    alts = meta.loc[station_ids, "altitude"].values.astype(np.float32)
+    """
+    Load lat, lon, altitude for the given station IDs.
+
+    Supports two CSV formats (auto-detected by columns present):
+      - stations_master.csv  : station_id, latitude, longitude, station_height  (comma-sep)
+      - wind_parameter.csv   : park_id, latitude, longitude, altitude           (semicolon-sep)
+
+    Parameters
+    ----------
+    data_path  : fallback directory (used only when meta_path is None)
+    station_ids: station IDs to look up
+    meta_path  : explicit path to the metadata CSV; overrides data_path if given
+    """
+    if meta_path is None:
+        meta_path = os.path.join(data_path, "wind_parameter.csv")
+
+    # Try comma separator first, then semicolon
+    meta = pd.read_csv(meta_path, dtype=str, sep=None, engine="python")
+
+    # Normalise column names to a common internal set
+    col_map: dict[str, str] = {}
+    for c in meta.columns:
+        lc = c.strip().lower()
+        if lc in ("station_id", "park_id"):
+            col_map[c] = "id"
+        elif lc == "latitude":
+            col_map[c] = "latitude"
+        elif lc == "longitude":
+            col_map[c] = "longitude"
+        elif lc in ("altitude", "station_height"):
+            col_map[c] = "altitude"
+    meta = meta.rename(columns=col_map)
+    meta["id"] = meta["id"].str.strip().str.zfill(5)
+    meta = meta.set_index("id")
+
+    lats = meta.loc[station_ids, "latitude"].astype(float).values.astype(np.float32)
+    lons = meta.loc[station_ids, "longitude"].astype(float).values.astype(np.float32)
+    alts = meta.loc[station_ids, "altitude"].astype(float).values.astype(np.float32)
     return lats, lons, alts
 
 

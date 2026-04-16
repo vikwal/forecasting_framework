@@ -13,11 +13,11 @@ def main() -> None:
     parser.add_argument('-d', '--data', type=str, help='Select dataset')
     args = parser.parse_args()
     # create directories
-    os.makedirs('results', exist_ok=True)
-    os.makedirs('models', exist_ok=True)
-    os.makedirs('studies', exist_ok=True)
+    os.makedirs('../results', exist_ok=True)
+    os.makedirs('../models', exist_ok=True)
+    os.makedirs('../studies', exist_ok=True)
     # read config
-    config = tools.load_config('config.yaml')
+    config = tools.load_config('../configs/config.yaml')
     freq = config['data']['freq']
     config = tools.handle_freq(config=config)
     output_dim = config['model']['output_dim']

@@ -132,9 +132,9 @@ class DCRNNConfig:
             val_stations=list(range(n_train, n_train + n_val)),
         )
 
-        hidden_dim  = d.get("hidden", 128)
-        nwp_heads   = d.get("nwp_heads", 4)
-        nwp_out_dim = d.get("nwp_out_dim", hidden_dim)
+        hidden_dim  = d.get("hidden")
+        nwp_heads   = d.get("nwp_heads")
+        nwp_out_dim = d.get("nwp_out_dim") or hidden_dim
         # Enforce divisibility
         if nwp_out_dim % nwp_heads != 0:
             raise ValueError(
