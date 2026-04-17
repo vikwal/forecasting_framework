@@ -36,6 +36,11 @@ from torch import Tensor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
+try:
+    from torch.utils.tensorboard import SummaryWriter as _SummaryWriter
+except ImportError:
+    _SummaryWriter = None  # type: ignore[assignment,misc]
+
 from geostatistics.stgnn.training.losses import build_loss
 from geostatistics.stgnn.training.sampler import SampleBatch, TrainingSampler
 from ..config import DCRNNConfig
@@ -150,6 +155,7 @@ class DCRNNTrainer:
         device: torch.device,
         teacher_forcing_start: float = 1.0,
         teacher_forcing_end: float = 0.0,
+        writer=None,  # optional SummaryWriter for TensorBoard logging
     ) -> None:
         self.model   = model.to(device)
         self.sampler = sampler
@@ -158,6 +164,7 @@ class DCRNNTrainer:
         self.device  = device
         self.tf_start = teacher_forcing_start
         self.tf_end   = teacher_forcing_end
+        self.writer   = writer
 
         self.loss_fn = build_loss(
             self.tc.loss_fn,
@@ -308,6 +315,17 @@ class DCRNNTrainer:
                 self.scheduler.step()
 
             lr_now = self.optimiser.param_groups[0]["lr"]
+
+            if self.writer is not None:
+                self.writer.add_scalar("train/loss",              t_loss,   epoch)
+                self.writer.add_scalar("train/rmse",              t_rmse,   epoch)
+                self.writer.add_scalar("train/r2",                t_r2,     epoch)
+                self.writer.add_scalar("val/loss",                v_loss,   epoch)
+                self.writer.add_scalar("val/rmse",                v_rmse,   epoch)
+                self.writer.add_scalar("val/r2",                  v_r2,     epoch)
+                self.writer.add_scalar("train/lr",                lr_now,   epoch)
+                self.writer.add_scalar("train/teacher_forcing",   tf_ratio, epoch)
+
             if verbose:
                 logger.info(
                     "Epoch %3d/%d | TF=%.2f | "

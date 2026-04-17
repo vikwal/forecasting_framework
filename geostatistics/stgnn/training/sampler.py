@@ -84,6 +84,41 @@ class TrainingSampler:
                 kept.append(ci)
         return kept
 
+    def _nearest_neighbors(
+        self,
+        target_global_indices: list[int],
+        candidate_global_indices: list[int],
+        k: int,
+    ) -> list[int]:
+        """
+        Return the k candidates closest to the target group.
+
+        For each candidate the relevant distance is its minimum geodesic
+        distance to ANY target station — i.e. the candidate is ranked by
+        how close it is to the nearest target, not to the centroid.
+
+        Fully vectorised via pairwise_geodesic_km: (N_cand, N_target) matrix,
+        min over targets, argsort, slice top-k.
+        """
+        if not candidate_global_indices or k <= 0:
+            return []
+        if k >= len(candidate_global_indices):
+            return candidate_global_indices
+        if self.station_coords is None:
+            return candidate_global_indices[:k]
+
+        from ..utils.spatial import pairwise_geodesic_km
+
+        cand_coords   = self.station_coords[candidate_global_indices]   # (N_c, 2)
+        target_coords = self.station_coords[target_global_indices]      # (N_t, 2)
+
+        # (N_c, N_t) → min over targets → (N_c,)
+        dist_matrix = pairwise_geodesic_km(cand_coords, target_coords)
+        min_dists   = dist_matrix.min(axis=1)
+
+        order = np.argsort(min_dists)
+        return [candidate_global_indices[i] for i in order[:k]]
+
     # ------------------------------------------------------------------
 
     def sample_train(
@@ -117,14 +152,20 @@ class TrainingSampler:
         neighbour_local = [i for i in range(N_train) if i not in set(target_local)]
         neighbour_global = [train_station_indices[i] for i in neighbour_local]
 
-        # Radius filter: keep only neighbours within neighbor_radius_km of any target
-        neighbour_global = self._neighbors_within_radius(target_global_list, neighbour_global)
-        neighbour_local  = [i for i in neighbour_local
-                            if train_station_indices[i] in set(neighbour_global)]
+        if self.tc.next_n_neighbors is not None:
+            # Deterministic: pick the N spatially nearest candidates to the target group
+            neighbour_global = self._nearest_neighbors(
+                target_global_list, neighbour_global, self.tc.next_n_neighbors
+            )
+        else:
+            # Legacy: radius filter + random subsample
+            neighbour_global = self._neighbors_within_radius(target_global_list, neighbour_global)
+            if self.tc.subsample_neighbors and len(neighbour_global) > self.tc.max_neighbor_stations:
+                neighbour_global = random.sample(neighbour_global, self.tc.max_neighbor_stations)
 
-        if self.tc.subsample_neighbors and len(neighbour_local) > self.tc.max_neighbor_stations:
-            neighbour_local  = sorted(random.sample(neighbour_local, self.tc.max_neighbor_stations))
-            neighbour_global = [train_station_indices[i] for i in neighbour_local]
+        neighbour_global_set = set(neighbour_global)
+        neighbour_local = [i for i in neighbour_local
+                           if train_station_indices[i] in neighbour_global_set]
 
         all_local  = sorted(neighbour_local + target_local)
         all_global = [train_station_indices[i] for i in all_local]
@@ -197,8 +238,12 @@ class TrainingSampler:
         H_fore = self.cfg.forecast_horizon
         t_hist_abs = t_run_abs - H_hist
 
-        # Radius filter: only include training stations within radius of any val station
-        neighbor_train = self._neighbors_within_radius(val_station_indices, train_station_indices)
+        if self.tc.next_n_neighbors is not None:
+            neighbor_train = self._nearest_neighbors(
+                val_station_indices, train_station_indices, self.tc.next_n_neighbors
+            )
+        else:
+            neighbor_train = self._neighbors_within_radius(val_station_indices, train_station_indices)
         all_global = neighbor_train + val_station_indices
         N_train    = len(neighbor_train)
         N_all      = len(all_global)

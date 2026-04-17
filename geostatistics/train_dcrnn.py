@@ -73,6 +73,11 @@ import pandas as pd
 import torch
 import yaml
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None  # type: ignore[assignment,misc]
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Reuse ALL data-loading functions from train_stgnn2 ──────────────────────
@@ -497,6 +502,11 @@ def main() -> None:
     model = DCRNN(model_cfg)
     logger.info("DCRNN parameters: %s", f"{model.count_parameters():,}")
 
+    tb_dir = Path("runs") / Path(model_name).stem
+    writer = SummaryWriter(log_dir=str(tb_dir)) if SummaryWriter is not None else None
+    if writer is not None:
+        logger.info("TensorBoard log dir: %s", tb_dir)
+
     trainer = DCRNNTrainer(
         model=model,
         sampler=sampler,
@@ -504,6 +514,7 @@ def main() -> None:
         device=device,
         teacher_forcing_start=dcrnn_cfg.get("teacher_forcing_ratio", 1.0),
         teacher_forcing_end=0.0,
+        writer=writer,
     )
 
     train_station_indices = list(range(N_train))
@@ -526,6 +537,8 @@ def main() -> None:
         val_station_indices=val_station_indices,
     )
 
+    if writer is not None:
+        writer.close()
     logger.info("Training complete. Best model: %s", model_path)
 
     # ------------------------------------------------------------------

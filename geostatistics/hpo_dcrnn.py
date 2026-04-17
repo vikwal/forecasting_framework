@@ -53,6 +53,11 @@ import optuna
 from utils.data_cache import GNNCache
 from optuna.samplers import TPESampler
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None  # type: ignore[assignment,misc]
+
 from geostatistics.train_dcrnn import resolve_feature_mode, feature_indices
 from geostatistics.train_stgnn2 import (
     load_yaml,
@@ -228,6 +233,7 @@ def main() -> None:
     studies_path    = hpo_cfg.get("studies_path", "studies/")
     max_epochs      = hpo_cfg.get("max_epochs_per_trial", 60)
     patience        = hpo_cfg.get("patience_per_trial", 8)
+    use_tensorboard = hpo_cfg.get("tensorboard_monitoring", False)
 
     # Device
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -718,6 +724,9 @@ def main() -> None:
             ckpt = Path(f"models/_hpo_dcrnn_trial{trial.number}_fold{fold_idx}.pt")
             trial_cfg["checkpoint_path"] = str(ckpt)
 
+            tb_dir = Path("runs") / f"hpo_dcrnn_{config_stem}" / f"trial_{trial.number:04d}_fold_{fold_idx}"
+            writer = SummaryWriter(log_dir=str(tb_dir)) if (use_tensorboard and SummaryWriter is not None) else None
+
             model   = DCRNN(model_cfg)
             trainer = DCRNNTrainer(
                 model=model,
@@ -726,6 +735,7 @@ def main() -> None:
                 device=device,
                 teacher_forcing_start=float(trial_cfg.get("teacher_forcing_ratio", 0.5)),
                 teacher_forcing_end=0.0,
+                writer=writer,
             )
             # Override checkpoint path in trainer
             trainer._ckpt_path = ckpt
@@ -736,6 +746,9 @@ def main() -> None:
                 val_run_pairs=val_pairs_fold,
                 verbose=False,
             )
+            if writer is not None:
+                writer.close()
+
             fold_loss = result["best_val_loss"]
             fold_losses.append(fold_loss)
             logger.info(

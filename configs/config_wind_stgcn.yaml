@@ -156,8 +156,7 @@ dcrnn:
   # Station subgraph sampling
   min_target_stations: 1
   max_target_stations: 10
-  max_neighbor_stations: 60
-  neighbor_radius_km: 500
+  next_n_neighbors: 30
 
   # Training
   loss_fn: mse
@@ -169,6 +168,7 @@ dcrnn:
   max_epochs: 200
   patience: 15
   gradient_clip: 1.0
+  scheduler: plateau
 
   # ---------------------------------------------------------------------------
   # HPO bounds — read by hpo_dcrnn.py
@@ -181,9 +181,10 @@ dcrnn:
   hpo:
     trials: 1000
     studies_path: studies/
+    tensorboard_monitoring: true
     # Cross-validation: expanding-window, same idea as hpo_cl.py
-    n_folds: 4
-    min_train_date: '2024-04-30'  # end of chunk-0 (always training); folds validate on [2024-07-31 … 2025-08-01]
+    n_folds: 3
+    min_train_date: '2024-03-31'  # end of chunk-0 (always training); folds validate on [2024-07-31 … 2025-08-01]
     n_val_stations: 50            # use first N stations from val_files as HPO val set
     # max training epochs per trial (usually shorter than the final run)
     max_epochs_per_trial: 100
@@ -194,17 +195,17 @@ dcrnn:
       hidden:
         type: int
         low: 32
-        high: 128
+        high: 64
 
       num_layers:
         type: int
         low: 1
-        high: 4
+        high: 3
 
       diffusion_K:
         type: int
         low: 1
-        high: 5
+        high: 4
 
       # NWP attention heads — sampled first; nwp_out_dim is then forced to be
       # a multiple of nwp_heads via nwp_out_per_head (see hpo_dcrnn.py)
@@ -252,9 +253,15 @@ dcrnn:
         low: 0.80
         high: 1.00
 
-      scheduler:
-        type: categorical
-        choices: [cosine, plateau, none]
+      max_target_stations:
+        type: int
+        low: 1
+        high: 30
+
+      next_n_neighbors:
+        type: int
+        low: 10
+        high: 60
 
       icond2_feature_mode:
         type: categorical

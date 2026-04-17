@@ -40,6 +40,7 @@ class TrainingConfig:
     checkpoint_path: str
     subsample_neighbors: bool = True
     neighbor_radius_km: Optional[float] = None  # None = no radius limit
+    next_n_neighbors: Optional[int] = None      # when set: pick N spatially nearest neighbors instead of random
     val_stations: Optional[List[int]] = None
     test_stations: Optional[List[int]] = None
 

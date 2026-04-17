@@ -118,6 +118,7 @@ class DCRNNConfig:
             max_target_stations=d.get("max_target_stations", 10),
             max_neighbor_stations=d.get("max_neighbor_stations", 60),
             neighbor_radius_km=d.get("neighbor_radius_km", None),
+            next_n_neighbors=d.get("next_n_neighbors", None),
             loss_fn=d.get("loss_fn", "mse"),
             loss_weights_by_horizon=d.get("loss_weights_by_horizon", True),
             horizon_decay=d.get("horizon_decay", 0.95),
