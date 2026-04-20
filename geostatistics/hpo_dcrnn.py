@@ -235,6 +235,21 @@ def main() -> None:
     patience        = hpo_cfg.get("patience_per_trial", 8)
     use_tensorboard = hpo_cfg.get("tensorboard_monitoring", False)
 
+    pruner_type          = hpo_cfg.get("pruner", "median")
+    pruner_n_startup     = hpo_cfg.get("pruner_n_startup_trials", 5)
+    pruner_n_warmup      = hpo_cfg.get("pruner_n_warmup_steps", 0)
+    if pruner_type == "none":
+        pruner = optuna.pruners.NopPruner()
+    else:
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=pruner_n_startup,
+            n_warmup_steps=pruner_n_warmup,
+        )
+    logger.info(
+        "Pruner: %s (n_startup_trials=%s, n_warmup_steps=%s)",
+        pruner_type, pruner_n_startup, pruner_n_warmup,
+    )
+
     # Device
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     if args.gpu is not None and torch.cuda.is_available():
@@ -779,8 +794,12 @@ def main() -> None:
     # ── Create / resume study ─────────────────────────────────────────────────
     storage_url = os.environ.get("OPTUNA_STORAGE")
     if storage_url:
-        storage = storage_url
-        logger.info("Using Optuna storage: PostgreSQL (OPTUNA_STORAGE)")
+        storage = optuna.storages.RDBStorage(
+            url=storage_url,
+            heartbeat_interval=60,
+            failed_trial_callback=optuna.storages.RetryFailedTrialCallback(max_retry=1),
+        )
+        logger.info("Using Optuna storage: PostgreSQL (OPTUNA_STORAGE) with heartbeat")
     else:
         db_path = Path(studies_path) / f"hpo_dcrnn_{config_stem}{suffix}.db"
         storage = f"sqlite:///{db_path}"
@@ -791,6 +810,7 @@ def main() -> None:
         storage=storage,
         direction="minimize",
         sampler=TPESampler(seed=42),
+        pruner=pruner,
         load_if_exists=True,
     )
 
