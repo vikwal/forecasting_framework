@@ -697,7 +697,7 @@ def main() -> None:
                 next_n_neighbors      = next_n_nbr_trial,
                 grid_ecmwf_scaled     = grid_ecmwf_scaled,
                 ecmwf_coords          = ecmwf_coords,
-                next_n_ecmwf               = next_n_ecmwf_trial,
+                k_ecmwf               = next_n_ecmwf_trial,
                 aggregate_nwp         = aggregate_nwp,
             )
 
