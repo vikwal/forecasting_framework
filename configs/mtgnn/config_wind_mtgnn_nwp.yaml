@@ -35,12 +35,9 @@ data:
   val_frac: 0.25
   use_case: wind
 
-wavenet:
+mtgnn:
   # Input features
-  # dir_in_deg mode requires u/v pairs — use the list below instead of speed-only:
-  #   icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m']
-  #   ecmwf_features:  ['u_wind10m', 'v_wind10m', 'wind_speed_10m']
-  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m'] # 'wind_speed_38m'
+  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m']
   ecmwf_features:  ['u_wind10m', 'v_wind10m', 'wind_speed_10m']
   icond2_feature_mode: dir_in_deg   # absolute | components | both | dir_in_deg
   ecmwf_feature_mode:  dir_in_deg   # absolute | components | both | dir_in_deg
@@ -50,12 +47,12 @@ wavenet:
   icond2_run_hours: [6,9,12,15]
 
   # NWP aggregation
-  nwp_nodes: false                         # true → GATv2 over k grid points; false → concat into station.x
+  nwp_nodes: true                           # GATv2 over k grid points → station embedding
   next_n_icond2: 4                          # nearest ICON-D2 grid points per station; HPO varies 1-7
   next_n_ecmwf: 4                           # nearest ECMWF grid points (0 = disabled)
-  aggregate_nwp: false                       # true: IDW-mean  false: concat all k points
-  # nwp_out_dim: 32                          # GATv2 output dim per station (only used when nwp_nodes=true)
-  # nwp_heads: 4                             # GATv2 attention heads (only used when nwp_nodes=true)
+  aggregate_nwp: false                      # forced false when nwp_nodes=true
+  nwp_out_dim: 32                           # GATv2 output dim; must be divisible by nwp_heads
+  nwp_heads: 4                              # fixed — nwp_out_dim HPO uses step=4 to guarantee divisibility
 
   # Time windows
   history_length: 48
@@ -63,19 +60,20 @@ wavenet:
 
   # Architecture
   hidden: 64
-  n_blocks: 12         # cycle [1,2,4,8,16,32]×2 → RF=127, covers T_total=96
-  K_hop: 2       # hops in MultiHopDiffusion (paper default K=2); HPO varies 1-4
+  n_layers: 5          # dilations [1,2,4,8,16] → RF=187, covers T_total=96
+  K_hop: 2
+  beta: 0.05
   emb_dim: 64
   graph_alpha: 3.0
-  kernel_size: 2
   dropout: 0.2
 
   # Training
   min_target_stations: 1
   max_target_stations: 10
   max_neighbor_stations: 90
-  next_n_neighbors: 90   # spatial kNN subsample (analog to DCRNN); HPO varies 60-120
+  next_n_neighbors: 90
   hist_wind_available: false    # true = historical measurements kept for target nodes (ablation)
+  topk_graph: 20
   handle_nans: break
   loss_weights_by_horizon: true
   horizon_decay: 0.90
@@ -87,8 +85,11 @@ wavenet:
   patience: 15
   gradient_clip: 5.0
 
+  # Curriculum learning: increase forecast horizon by 1 step every N epochs
+  cl_period: 1
+
   # ---------------------------------------------------------------------------
-  # HPO bounds — read by hpo_wavenet.py
+  # HPO bounds — read by hpo_mtgnn.py
   # ---------------------------------------------------------------------------
   hpo:
     trials: 1000
@@ -114,20 +115,43 @@ wavenet:
         low: 0
         high: 4
 
+      nwp_out_dim:
+        type: int
+        low: 16
+        high: 128
+        step: 4   # always divisible by nwp_heads=4
+
       hidden:
         type: int
         low: 32
         high: 128
+        step: 4
 
-      n_blocks:
+      n_layers:
         type: int
-        low: 8
-        high: 18
+        low: 4
+        high: 8
 
-      kernel_size:
+      K_hop:
         type: int
-        low: 2
-        high: 4
+        low: 1
+        high: 3
+
+      beta:
+        type: float
+        low: 0.01
+        high: 0.2
+
+      emb_dim:
+        type: int
+        low: 16
+        high: 128
+        step: 4
+
+      graph_alpha:
+        type: float
+        low: 1.0
+        high: 6.0
 
       dropout:
         type: float
@@ -161,22 +185,6 @@ wavenet:
         low: 1
         high: 64
 
-      K_hop:
-        type: int
-        low: 1
-        high: 3
-
-      emb_dim:
-        type: int
-        low: 16
-        high: 128
-        step: 4
-
-      graph_alpha:
-        type: float
-        low: 1.0
-        high: 6.0
-
       next_n_neighbors:
         type: int
         low: 50
@@ -189,3 +197,8 @@ wavenet:
       ecmwf_feature_mode:
         type: categorical
         choices: [absolute, dir_in_deg]
+
+      topk_graph:
+        type: int
+        low: 5
+        high: 40

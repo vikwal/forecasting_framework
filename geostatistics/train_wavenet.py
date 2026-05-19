@@ -467,6 +467,7 @@ def main() -> None:
         max_target_stations   = mcfg.get("max_target_stations", 10),
         max_neighbor_stations = mcfg.get("max_neighbor_stations", 60),
         next_n_neighbors      = mcfg.get("next_n_neighbors", None),
+        hist_wind_available   = mcfg.get("hist_wind_available", False),
         grid_ecmwf_scaled     = grid_ecmwf_scaled,
         ecmwf_coords          = ecmwf_coords,
         k_ecmwf               = next_n_ecmwf,

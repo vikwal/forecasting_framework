@@ -73,6 +73,7 @@ def build_eval_batch(
     H_hist: int,
     H_fore: int,
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
+    hist_wind_available: bool = False,
 ) -> tuple:
     """
     Build a HeteroData evaluation batch for the given station split.
@@ -107,7 +108,8 @@ def build_eval_batch(
     e2_grid_full = ecmwf_nwp_scaled[t_hist_abs:t_run_abs + H_fore]   # (96, N_ecmwf, E2)
 
     meas_hist = station_meas_scaled[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
-    meas_hist[:, N_obs:, :] = 0.0
+    if not hist_wind_available:
+        meas_hist[:, N_obs:, :] = 0.0
 
     if interpol_meas is not None:
         rk_slice = interpol_meas[t_hist_abs:t_run_abs, :][:, all_global, np.newaxis]
@@ -162,6 +164,7 @@ def evaluate(
     all_ids: list[str],
     test_run_pairs: list[tuple[int, int, int]],
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
+    hist_wind_available: bool = False,
 ) -> pd.DataFrame:
     """
     Single-pass evaluation over all test run pairs.
@@ -195,6 +198,7 @@ def evaluate(
         H_hist=H_hist,
         H_fore=H_fore,
         interpol_meas=interpol_meas,
+        hist_wind_available=hist_wind_available,
     )
 
     def _nwp_ref(gidx: int, r_curr: int) -> np.ndarray:

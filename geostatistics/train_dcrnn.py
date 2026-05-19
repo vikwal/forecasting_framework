@@ -908,6 +908,7 @@ def main() -> None:
         model_cfg, builder, base_graph,
         target_feat_idx=target_feat_idx,
         station_coords=station_coords,
+        hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
     )
 
     # ------------------------------------------------------------------
@@ -997,6 +998,7 @@ def main() -> None:
             all_ids=all_ids,
             test_run_pairs=val_run_pairs,
             interpol_meas=interpol_meas_scaled,
+            hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
         )
         cols = ["mae", "rmse", "r2", "skill", "skill_nwp"]
         tbl  = eval_df.set_index("station_id")[cols]

@@ -115,6 +115,7 @@ class HomoSampler:
         max_target_stations: int = 10,
         max_neighbor_stations: int = 60,
         next_n_neighbors: int | None = None,
+        hist_wind_available: bool = False,
         # ECMWF (optional)
         grid_ecmwf_scaled: np.ndarray | None = None,  # (T, N_ecmwf_grid, E2)
         ecmwf_coords: np.ndarray | None = None,        # (N_ecmwf_grid, 2)
@@ -138,6 +139,7 @@ class HomoSampler:
         self.max_tgt = max_target_stations
         self.max_nbr = max_neighbor_stations
         self.next_n_neighbors = next_n_neighbors
+        self.hist_wind_available = hist_wind_available
 
         self.I2 = grid_icond2_scaled.shape[3]
         self.E2 = grid_ecmwf_scaled.shape[2] if grid_ecmwf_scaled is not None else 0
@@ -344,7 +346,8 @@ class HomoSampler:
 
         # Measurements — history window, target stations zeroed (IGNNK)
         meas_hist = self.meas[t_hist_abs:t_run_abs, :, :][:, sub_indices, :].copy()
-        meas_hist[:, target_mask_np, :] = 0.0
+        if not self.hist_wind_available:
+            meas_hist[:, target_mask_np, :] = 0.0
 
         # Pad forecast horizon with zeros → (N_sub, T_total, M)
         meas_full = np.zeros((N_sub, T_total, M), dtype=np.float32)

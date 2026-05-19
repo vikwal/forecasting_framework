@@ -34,7 +34,6 @@ data:
   interpol_path: '/mnt/nvme1/synthetic/interpol/wind'
   knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/wind'
   power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
-  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
@@ -49,11 +48,11 @@ data:
 dcrnn:
   # Input features — full list; icond2_feature_mode / ecmwf_feature_mode controls which are used
   # absolute: only wind_speed_* | components: only u_*/v_* | both: all features
-  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m'] # 'wind_speed_38m'
+  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m']
   ecmwf_features:  ['u_wind10m', 'v_wind10m', 'wind_speed_10m']
   icond2_feature_mode: dir_in_deg   # absolute | components | both | dir_in_deg
   ecmwf_feature_mode:  dir_in_deg   # absolute | components | both | dir_in_deg
-  measurement_features: ['wind_speed', 'wind_direction'] # 'wind_direction'
+  measurement_features: ['wind_speed', 'wind_direction']
   target_col: 'wind_speed'
   n_workers: 16
   n_ahead_prefetch: 8
@@ -93,7 +92,7 @@ dcrnn:
   min_target_stations: 1
   max_target_stations: 10
   next_n_neighbors: 90
-  hist_wind_available: false    # true = historical measurements kept for target nodes (ablation)
+  hist_wind_available: true     # historical measurements kept for target nodes (ablation)
 
   # Training
   loss_fn: mse
@@ -109,29 +108,21 @@ dcrnn:
 
   # ---------------------------------------------------------------------------
   # HPO bounds — read by hpo_dcrnn.py
-  # Each param entry has a "type" key:
-  #   categorical : choices list
-  #   int         : low / high (+ optional step)
-  #   float       : low / high (+ optional log: true for log-uniform sampling)
-  # All other dcrnn params not listed here keep their fixed values above.
   # ---------------------------------------------------------------------------
   hpo:
     trials: 1000
     studies_path: studies/
     tensorboard_monitoring: true
     pruner: median
-    pruner_n_startup_trials: 20   # trials before pruner activates
+    pruner_n_startup_trials: 20
     pruner_n_warmup_steps: 1
-    # Cross-validation: expanding-window, same idea as hpo_cl.py
     n_folds: 3
-    min_train_date: '2024-03-31'  # end of chunk-0 (always training); folds validate on [2024-07-31 … 2025-08-01]
-    n_val_stations: 50            # use first N stations from val_files as HPO val set
-    # max training epochs per trial (usually shorter than the final run)
+    min_train_date: '2024-03-31'
+    n_val_stations: 50
     max_epochs_per_trial: 100
     patience_per_trial: 10
 
     params:
-      # DCGRU hidden dimension (no divisibility constraint)
       next_n_ecmwf:
         type: int
         low: 0
@@ -157,15 +148,11 @@ dcrnn:
         low: 1
         high: 3
 
-      # NWP attention heads — sampled first; nwp_out_dim is then forced to be
-      # a multiple of nwp_heads via nwp_out_per_head (see hpo_dcrnn.py)
       nwp_heads:
         type: int
         low: 1
         high: 6
 
-      # Per-head output dimension of the NWP attention layer.
-      # nwp_out_dim = nwp_heads * nwp_out_per_head (enforced in hpo_dcrnn.py)
       nwp_out_per_head:
         type: int
         low: 4
@@ -232,4 +219,4 @@ cache:
 
 output:
   path: 'results/geostatistics'
-  prefix: 'spatial_interp'   # prepended to all output filenames
+  prefix: 'spatial_interp'

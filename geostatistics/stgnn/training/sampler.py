@@ -44,6 +44,7 @@ class TrainingSampler:
         base_graph: HeteroData,
         target_feat_idx: int = 0,
         station_coords: np.ndarray | None = None,  # (N_all, 2) [lat, lon] raw degrees
+        hist_wind_available: bool = False,
     ) -> None:
         self.cfg = model_config
         self.tc  = model_config.training
@@ -52,6 +53,7 @@ class TrainingSampler:
         self.te = model_config.temporal_encoding
         self.target_feat_idx = target_feat_idx
         self.station_coords  = station_coords  # needed for radius filtering
+        self.hist_wind_available = hist_wind_available
 
     # ------------------------------------------------------------------
 
@@ -216,7 +218,8 @@ class TrainingSampler:
         ground_truth = torch.from_numpy(gt_target.copy().astype(np.float32))
 
         # Zero target measurements (original M features only)
-        meas_hist[:, target_mask_np, :] = 0.0
+        if not self.hist_wind_available:
+            meas_hist[:, target_mask_np, :] = 0.0
 
         # Kriging lag feature: append as extra channel after zeroing so target nodes
         # still carry an external prior estimate (not zeroed, always available).
@@ -306,7 +309,8 @@ class TrainingSampler:
         e2_grid_full = ecmwf_nwp[t_hist_abs:t_run_abs + H_fore]
 
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
-        meas_hist[:, N_train:, :] = 0.0
+        if not self.hist_wind_available:
+            meas_hist[:, N_train:, :] = 0.0
 
         if interpol_meas is not None:
             rk_slice = interpol_meas[t_hist_abs:t_run_abs, :][:, all_global, np.newaxis]

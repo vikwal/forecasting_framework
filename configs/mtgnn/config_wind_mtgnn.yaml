@@ -75,6 +75,7 @@ mtgnn:
   max_target_stations: 10
   max_neighbor_stations: 90
   next_n_neighbors: 90   # spatial kNN subsample (analog to DCRNN); HPO varies 60-120
+  hist_wind_available: false    # true = historical measurements kept for target nodes (ablation)
   topk_graph: 20         # top-k neighbours per row in A (paper Eqs. 4-6); null = dense; HPO varies 5-40
   handle_nans: break
   loss_weights_by_horizon: true
