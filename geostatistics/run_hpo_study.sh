@@ -26,8 +26,10 @@ SESSIONS=(
     #"0  hpo_dcrnn_nwp      geostatistics/hpo_dcrnn.py    configs/dcrnn/config_wind_dcrnn.yaml"
     #"1  hpo_dcrnn_nwp_hist geostatistics/hpo_dcrnn.py    configs/dcrnn/config_wind_dcrnn_nwp_hist.yaml"
     #"2  hpo_mtgnn          geostatistics/hpo_mtgnn.py    configs/mtgnn/config_wind_mtgnn.yaml"
-    "2  hpo_wavenet        geostatistics/hpo_wavenet.py  configs/wavenet/config_wind_wavenet.yaml"
-    # "3  hpo_mtgnn_nwp      geostatistics/hpo_mtgnn.py    configs/mtgnn/config_wind_mtgnn_nwp.yaml"
+    "3  hpo_wavenet        geostatistics/hpo_wavenet.py  configs/wavenet/config_wind_wavenet.yaml"
+    "3  hpo_mtgnn          geostatistics/hpo_mtgnn.py    configs/mtgnn/config_wind_mtgnn.yaml"
+    "4  hpo_mtgnn_nwp      geostatistics/hpo_mtgnn.py    configs/mtgnn/config_wind_mtgnn_nwp.yaml"
+    "5  hpo_mtgnn_nwp      geostatistics/hpo_mtgnn.py    configs/mtgnn/config_wind_mtgnn_nwp.yaml"
 )
 
 total=0
