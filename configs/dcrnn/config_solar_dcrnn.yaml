@@ -1,0 +1,104 @@
+data:
+  use_case: solar                                 # routes to solar preprocessing in train_dcrnn.py
+  path: '/mnt/nvme1/synthetic/raw/solar'          # Station_XXXXX.parquet with ghi, dhi, temperature_2m, …
+  nwp_path: '/mnt/nvme1/icon-d2/parquet'          # SL files under {nwp_path}/SL/{run_hour:02d}/{station_id}/
+  interpol_path: '/mnt/nvme1/synthetic/interpol/solar'    # rk_pred per-station Parquets from run_solar_interpolation.py
+  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/solar' # KNN fallback Parquets ({col}_knn*.parquet)
+  stations_master: 'data/stations_master.csv'
+  files: [
+            '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
+            '03730', '05792', '05856', '15000', '05779', '04271', '02638', '02961', '05490', '05426',
+            '03761', '00303', '02483', '00596', '03513', '00691', '01200', '02014', '02667', '04036',
+            '04911', '00662', '00232', '05109', '01605', '05871', '15813', '05142', '01691', '01544',
+            '07370', '04931', '05797', '05705', '01001', '00161', '07341', '00433', '00298', '02932',
+            '02023', '01048', '02794', '13674', '03668', '05538', '01975', '04625', '01270', '02171',
+            '04104', '05100', '01503', '03093', '03098', '03287', '03086', '04393', '03402', '04094',
+            '00704', '05349', '01766', '02985', '06163', '01357', '01468', '00880', '04371', '01886',
+            '01420', '03015', '04464', '03196', '04466', '00853', '02044', '06344', '00963', '03321',
+            '02559', '07351', '04280', '02597', '00164', '07389', '03231', '01639', '06197', '06314',
+            '02485', '02856', '07396']
+  val_files: [
+            '01550', '02907', '07393', '02497', '01757', '07367', '02812', '05397', '07412', '06159',
+            '00591', '05825', '03821', '04887', '03366', '05480', '05516', '02712', '05029', '07368',
+            '00701', '03167', '01358', '03126', '05800', '01587', '01694', '00282', '01869', '03925',
+            '03376', '19171', '07374', '00656', '02115', '01078', '03811', '03244', '04642', '15207',
+            '04745', '01580', '02261', '05629', '03379', '02252', '05930', '13965', '03028', '07369']
+  test_files: [
+            '00096', '00427', '00603', '05371', '00840', '00867', '00891', '00953', '01262', '01303',
+            '05906', '01612', '01803', '01832', '02290', '02429', '02564', '02601', '07410', '02878',
+            '02925', '02928', '03166', '03268', '03362', '03660', '03897', '03946', '03987', '04024',
+            '04032', '00198', '04039', '04177', '04336', '13711', '04501', '04928', '05158', '05347',
+            '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342']
+  test_start: '2025-08-01'
+  test_end:   '2025-10-31'
+  freq: '1h'
+  train_frac: 1
+  val_frac: 0.25
+
+
+dcrnn:
+  # ── Features ───────────────────────────────────────────────────────────────
+  # Special derived names (computed from raw SL columns before resampling):
+  #   ghi_nwp       = aswdir_s + aswdifd_s   (global horizontal irradiance)
+  #   dhi_nwp       = aswdifd_s               (diffuse horizontal irradiance)
+  #   bhi_nwp       = aswdir_s                (direct beam on horizontal)
+  #   wind_speed_nwp = sqrt(u_10m² + v_10m²)
+  # All other names are treated as direct column names in the SL parquet.
+  icond2_features: ['ghi_nwp', 'dhi_nwp', 'clct', 'alb_rad', 't_2m']
+  ecmwf_features: []             # set next_n_ecmwf: 0 to disable entirely
+  measurement_features: ['ghi', 'dhi']
+  target_col: 'ghi'
+  n_workers: 16
+  n_ahead_prefetch: 8
+  prefetch_workers: 2
+  handle_nans: break
+  interpolate_history: false
+
+  # ── Graph ───────────────────────────────────────────────────────────────────
+  next_n_icond2: 4
+  next_n_ecmwf: 0                # ECMWF disabled for solar (no surface radiation fields)
+  station_connectivity: delaunay
+  use_altitude_diff: true
+  use_direction_features: true
+  use_distance_features: true
+  icond2_run_hours: [6]
+
+  # ── Time windows ────────────────────────────────────────────────────────────
+  history_length: 48
+  forecast_horizon: 48
+  temporal_encoding: gru
+
+  # ── DCRNN architecture ──────────────────────────────────────────────────────
+  hidden: 64
+  num_layers: 1
+  K_hop: 1
+  nwp_out_dim: 64
+  nwp_heads: 4
+  dropout: 0.1
+  teacher_forcing_ratio: 0.3
+
+  # ── Station subgraph sampling ───────────────────────────────────────────────
+  min_target_stations: 1
+  max_target_stations: 10
+  next_n_neighbors: 90
+
+  # ── Training ────────────────────────────────────────────────────────────────
+  loss_fn: mse
+  loss_weights_by_horizon: true
+  horizon_decay: 0.85
+  lr: 3.0e-4
+  weight_decay: 1.0e-3
+  batch_size: 64
+  max_epochs: 50
+  patience: 10
+  gradient_clip: 1.0
+  scheduler: plateau
+
+
+cache:
+  use_cache: true
+  cache_dir: 'data_cache/gnns'
+
+output:
+  path: 'results/geostatistics'
+  prefix: 'solar_spatial_interp'

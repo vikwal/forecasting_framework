@@ -33,9 +33,11 @@ import argparse
 import logging
 import os
 import pickle
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +86,7 @@ def load_station_measurements(
     data_path: str,
     station_ids: list[str],
     cols: list[str],
+    freq: str = "1h",
 ) -> tuple[np.ndarray, pd.DatetimeIndex]:
     """
     Load per-station measurement CSVs and return a (T, N, M) array.
@@ -91,23 +94,22 @@ def load_station_measurements(
     Returns
     -------
     meas :       (T, N, M) float32, NaN where data is missing
-    timestamps : hourly DatetimeIndex (UTC)
+    timestamps : DatetimeIndex (UTC) at the given freq
     """
     pivots = []
     common_index = None
     for col in cols:
         dfs = []
         for sid in station_ids:
-            fpath = os.path.join(data_path, f"Station_{sid}.csv")
-            df = pd.read_csv(fpath, usecols=["timestamp", col],
-                             parse_dates=["timestamp"])
+            fpath = os.path.join(data_path, f"Station_{sid}.parquet")
+            df = pd.read_parquet(fpath, columns=["timestamp", col])
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
             dfs.append(df.set_index("timestamp")[col].rename(sid))
-        # closed="left", label="left": hour 0 = [00:00, 00:50], hour 1 = [01:00, 01:50], …
+        # closed="left", label="left": [00:00, freq) → first bin, etc.
         pivot = (
             pd.concat(dfs, axis=1)
             .sort_index()
-            .resample("1h", closed="left", label="left")
+            .resample(freq, closed="left", label="left")
             .mean()
         )
         if common_index is None:
@@ -117,162 +119,12 @@ def load_station_measurements(
     return np.stack(pivots, axis=-1), common_index   # (T, N, M)
 
 
-def load_interpol_imputation(
-    interpol_path: str,
-    station_ids: list[str],
-    timestamps: pd.DatetimeIndex,
-) -> np.ndarray:
-    """
-    Load Regression-Kriging predictions (``rk_pred``) from pre-computed
-    interpolation CSVs and align them to ``timestamps``.
-
-    Used to impute missing ``wind_speed`` values in ``meas_raw``:
-    wherever ``meas_raw[:, n, ws_idx]`` is NaN the corresponding
-    ``rk_pred`` value fills the gap.
-
-    Returns
-    -------
-    rk_pred : (T, N) float32  — NaN where the interpol file has no entry
-              for that timestamp.
-    """
-    series = []
-    for sid in station_ids:
-        fpath = os.path.join(interpol_path, f"Station_{sid}.csv")
-        if not os.path.exists(fpath):
-            # Station has no interpol file → all-NaN column (no imputation)
-            series.append(pd.Series(np.nan, index=timestamps, name=sid, dtype="float32"))
-            continue
-        df = pd.read_csv(fpath, usecols=["timestamp", "rk_pred"], parse_dates=["timestamp"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        s = df.set_index("timestamp")["rk_pred"].rename(sid)
-        series.append(s)
-
-    pivot = pd.concat(series, axis=1).reindex(timestamps)
-    return pivot.values.astype(np.float32)
-
-
-def load_knn_imputation(
-    knnimputer_path: str,
-    feature: str,
-    station_ids: list[str],
-    timestamps: pd.DatetimeIndex,
-) -> np.ndarray:
-    """
-    Load a pre-computed KNN-imputed parquet from ``knnimputer_path`` for the
-    given ``feature`` (e.g. ``"wind_direction"`` or ``"wind_speed"``) and
-    return a (T, N) float32 array aligned to ``timestamps``.
-
-    The parquet contains 10-min resolution data; it is resampled to 1 h by
-    mean before alignment.  Columns are station IDs (5-digit strings).
-    Missing stations or timestamps are left as NaN.
-
-    Parameters
-    ----------
-    knnimputer_path : directory that contains the parquet files
-    feature         : e.g. ``"wind_direction"``
-    station_ids     : ordered list of station IDs to extract
-    timestamps      : hourly UTC DatetimeIndex to align to
-
-    Returns
-    -------
-    arr : (T, N) float32 — NaN where the file has no entry
-    """
-    import glob
-
-    pattern = os.path.join(knnimputer_path, f"{feature}_knn*.parquet")
-    matches = sorted(glob.glob(pattern))
-    if not matches:
-        logger.warning(
-            "KNN imputation: no parquet found for '%s' in %s — skipping",
-            feature, knnimputer_path,
-        )
-        return np.full((len(timestamps), len(station_ids)), np.nan, dtype=np.float32)
-
-    fpath = matches[-1]   # use the most recent file
-    logger.info("KNN imputation: loading %s", os.path.basename(fpath))
-    df = pd.read_parquet(fpath)
-
-    # Resample 10-min → 1 h (closed="left", label="left" matches measurement loader)
-    df.index = pd.to_datetime(df.index, utc=True)
-    df = df.resample("1h", closed="left", label="left").mean()
-
-    # Select requested stations (fill missing stations with NaN)
-    available = [s for s in station_ids if s in df.columns]
-    missing   = [s for s in station_ids if s not in df.columns]
-    if missing:
-        logger.warning(
-            "KNN imputation '%s': %d stations not in parquet: %s",
-            feature, len(missing), missing[:10],
-        )
-    df = df.reindex(columns=station_ids)   # missing → NaN columns
-
-    # Align to timestamps
-    df = df.reindex(timestamps)
-    logger.info(
-        "KNN imputation '%s': loaded %d/%d stations, NaN remaining: %d",
-        feature, len(available), len(station_ids),
-        int(np.isnan(df.values).sum()),
-    )
-    return df.values.astype(np.float32)   # (T, N)
-
-
-def apply_knn_imputation(
-    meas_raw: np.ndarray,
-    knn_arr: np.ndarray,
-    measurement_cols: list[str],
-    feature: str,
-) -> np.ndarray:
-    """
-    Fill NaN entries in the ``feature`` channel of ``meas_raw`` with the
-    corresponding values from ``knn_arr``.
-
-    Parameters
-    ----------
-    meas_raw         : (T, N, M) float32 — may contain NaN
-    knn_arr          : (T, N)   float32 — pre-imputed values
-    measurement_cols : list of column names (same order as last dim of meas_raw)
-    feature          : column to impute (e.g. ``"wind_direction"``)
-
-    Returns
-    -------
-    meas_raw with NaN in the feature channel replaced (modified in-place).
-    """
-    if feature not in measurement_cols:
-        return meas_raw
-    idx  = measurement_cols.index(feature)
-    mask = np.isnan(meas_raw[:, :, idx]) & ~np.isnan(knn_arr)
-    meas_raw[:, :, idx][mask] = knn_arr[mask]
-    return meas_raw
-
-
-def apply_interpol_imputation(
-    meas_raw: np.ndarray,
-    rk_pred: np.ndarray,
-    measurement_cols: list[str],
-    target_col: str = "wind_speed",
-) -> np.ndarray:
-    """
-    Fill NaN entries in the ``target_col`` channel of ``meas_raw`` with
-    the corresponding ``rk_pred`` values.
-
-    Parameters
-    ----------
-    meas_raw         : (T, N, M) float32 — may contain NaN
-    rk_pred          : (T, N)   float32 — interpolated values
-    measurement_cols : list of column names (same order as last dim of meas_raw)
-    target_col       : column to impute (default: "wind_speed")
-
-    Returns
-    -------
-    meas_raw with NaN in the target channel replaced by rk_pred.
-    The array is modified in-place and returned.
-    """
-    if target_col not in measurement_cols:
-        return meas_raw
-    idx = measurement_cols.index(target_col)
-    mask = np.isnan(meas_raw[:, :, idx])
-    meas_raw[:, :, idx][mask] = rk_pred[mask]
-    return meas_raw
+from utils.imputation import (                          # noqa: re-exported
+    load_interpol_imputation,
+    load_knn_imputation,
+    apply_interpol_imputation,
+    apply_knn_imputation,
+)
 
 
 def load_station_metadata(
@@ -608,13 +460,36 @@ def load_icond2_ml_runs(
         else:
             logger.warning("Station %s: no grid keys found", station_ids[si])
 
-    # Drop runs that have any NaN across grid nodes or leads
-    complete_mask = ~np.isnan(grid_runs).any(axis=(1, 2, 3))  # (R,)
-    n_dropped = int((~complete_mask).sum())
-    if n_dropped:
-        logger.info("ICON-D2 ML: dropping %d incomplete run(s) with missing grid data", n_dropped)
-        grid_runs        = grid_runs[complete_mask]
-        run_times_global = run_times_global[complete_mask]
+    nan_count = int(np.isnan(grid_runs).sum())
+    if nan_count > 0:
+        nan_runs        = np.where(np.isnan(grid_runs).any(axis=(1, 2, 3)))[0]
+        nan_grid_mask   = np.isnan(grid_runs).any(axis=(0, 1, 3))   # (N_grid,)
+        nan_grid_idx    = np.where(nan_grid_mask)[0]
+        affected_sta    = np.where(np.isin(station_nearest_grid, nan_grid_idx))[0]
+
+        grid_info = [
+            f"  grid[{gi:4d}]  lat={grid_coords[gi, 0]:.4f}  lon={grid_coords[gi, 1]:.4f}"
+            for gi in nan_grid_idx
+        ]
+        bad_info = [
+            f"  run {ri:4d}  {run_times_global[ri]}  "
+            f"NaN: {int(np.isnan(grid_runs[ri]).sum())} / {grid_runs[ri].size}"
+            for ri in nan_runs[:10]
+        ]
+        if len(nan_runs) > 10:
+            bad_info.append(f"  ... and {len(nan_runs) - 10} more runs")
+        affected_names = [station_ids[si] for si in affected_sta]
+        logger.warning(
+            "ICON-D2 grid data contains %d NaN value(s) after loading "
+            "(%d run(s), %d grid node(s) affected). "
+            "Affected runs will be excluded from training.\n"
+            "Affected grid node(s):\n%s\n"
+            "Affected stations (%d): %s\n%s",
+            nan_count, len(nan_runs), len(nan_grid_idx),
+            "\n".join(grid_info),
+            len(affected_sta), affected_names,
+            "\n".join(bad_info),
+        )
 
     return run_times_global, grid_coords, grid_runs, station_nearest_grid
 
@@ -682,6 +557,29 @@ def _ecmwf_raw_db_cols(features: list[str]) -> list[str]:
             if v_col in _ECMWF_DB_COLS:
                 needed.add(v_col)
     return sorted(needed)
+
+
+def _parse_ecmwf_sl_filename(fname: str) -> tuple[float, float] | None:
+    """Parse '<lat_int>_<lat_frac>_<lon_int>_<lon_frac>[_*]_sl.parquet' into (lat, lon)."""
+    m = re.match(r"^(-?\d+)_([0-9]+)_(-?\d+)_([0-9]+)(?:_[^.]+)?_sl\.parquet$", fname)
+    if not m:
+        return None
+    lat_i, lat_f, lon_i, lon_f = m.groups()
+    try:
+        return float(f"{lat_i}.{lat_f}"), float(f"{lon_i}.{lon_f}")
+    except ValueError:
+        return None
+
+
+@lru_cache(maxsize=8)
+def _list_ecmwf_split_files(split_dir: str) -> list[tuple[float, float, str]]:
+    out: list[tuple[float, float, str]] = []
+    for p in Path(split_dir).glob("*_sl.parquet"):
+        coords = _parse_ecmwf_sl_filename(p.name)
+        if coords is None:
+            continue
+        out.append((coords[0], coords[1], str(p)))
+    return out
 
 
 def _fetch_ecmwf_with_coords(
@@ -841,19 +739,40 @@ def load_ecmwf_parquet_at_stations_and_grid(
     next_n_grid_per_station: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Load ECMWF NWP natively from a Parquet file.
-    Does not require PostgreSQL. Extremely fast memory-mapped loading.
+    Load ECMWF NWP from parquet (single file or split SL directory).
     """
-    logger.info("Loading ECMWF from parquet: %s", parquet_path)
-    df = pd.read_parquet(parquet_path)
-
     ts_min = timestamps[0].normalize()
     ts_max = timestamps[-1].normalize() + pd.Timedelta(hours=13)
-    df = df[(df["valid_time"] >= ts_min) & (df["valid_time"] <= ts_max)].copy()
+    parquet_source = Path(parquet_path)
+    split_dir = parquet_source / "SL" if parquet_source.is_dir() and (parquet_source / "SL").is_dir() else parquet_source
 
-    df = _compute_derived_features(df, features)
-
-    unique_grids = df[["grid_lat", "grid_lon"]].drop_duplicates().values
+    # ------------------------------------------------------------------
+    # Source A: split SL parquet files (preferred)
+    # ------------------------------------------------------------------
+    if split_dir.is_dir():
+        split_files = _list_ecmwf_split_files(str(split_dir))
+        if not split_files:
+            raise FileNotFoundError(f"No '*_sl.parquet' files found in {split_dir}")
+        logger.info("Loading ECMWF from split parquet directory: %s", split_dir)
+        unique_grids = np.array([(lat, lon) for lat, lon, _ in split_files], dtype=np.float64)
+        path_by_key = {
+            (round(float(lat), 5), round(float(lon), 5)): fpath
+            for lat, lon, fpath in split_files
+        }
+        use_split = True
+        df = None
+    # ------------------------------------------------------------------
+    # Source B: single parquet file (legacy)
+    # ------------------------------------------------------------------
+    else:
+        if not parquet_source.exists():
+            raise FileNotFoundError(f"ECMWF parquet source not found: {parquet_source}")
+        logger.info("Loading ECMWF from parquet file: %s", parquet_source)
+        df = pd.read_parquet(parquet_source)
+        df = df[(df["valid_time"] >= ts_min) & (df["valid_time"] <= ts_max)].copy()
+        df = _compute_derived_features(df, features)
+        unique_grids = df[["grid_lat", "grid_lon"]].drop_duplicates().values
+        use_split = False
 
     Ns = len(station_lats)
     Ng = len(unique_grids)
@@ -878,6 +797,10 @@ def load_ecmwf_parquet_at_stations_and_grid(
 
     grid_keys = sorted(list(global_needed_grids))
     N_grid = len(grid_keys)
+    grid_idx_by_key = {
+        (round(float(k[0]), 5), round(float(k[1]), 5)): i
+        for i, k in enumerate(grid_keys)
+    }
     grid_coords = np.array(grid_keys, dtype=np.float32)
     grid_alts = np.zeros(N_grid, dtype=np.float32)
 
@@ -887,40 +810,55 @@ def load_ecmwf_parquet_at_stations_and_grid(
     station_nwp = np.full((T, Ns, F), np.nan, dtype=np.float32)
     grid_nwp = np.full((T, N_grid, F), np.nan, dtype=np.float32)
 
-    df["grid_key"] = list(zip(df["grid_lat"].round(5), df["grid_lon"].round(5)))
-    needed_keys_round = { (round(float(k[0]), 5), round(float(k[1]), 5)) for k in grid_keys }
-
-    df = df[df["grid_key"].isin(needed_keys_round)]
-
-    logger.info("Executing Pandas Hash Grouping to avoid expensive DataFrame iteration...")
-    grouped = df.groupby("grid_key")
-
-    logger.info("Filling ECMWF grid arrays ...")
-    from tqdm import tqdm
-    for gi, key in enumerate(tqdm(grid_keys, desc="Filling ECMWF Grid Arrays")):
-        k_round = (round(float(key[0]), 5), round(float(key[1]), 5))
-        try:
-            gdf = grouped.get_group(k_round)
-        except KeyError:
-            continue
-        gdf = gdf.drop_duplicates("valid_time", keep="last")
-        gdf = gdf.set_index("valid_time").sort_index()
-        for fi, feat in enumerate(features):
-            if feat in gdf.columns:
-                grid_nwp[:, gi, fi] = gdf[feat].reindex(timestamps).values
+    if use_split:
+        for gi, key in enumerate(tqdm(grid_keys, desc="Filling ECMWF Grid Arrays")):
+            k_round = (round(float(key[0]), 5), round(float(key[1]), 5))
+            fpath = path_by_key.get(k_round)
+            if not fpath:
+                continue
+            gdf = pd.read_parquet(fpath)
+            if "starttime" in gdf.columns and "forecasttime" in gdf.columns:
+                gdf.sort_values(by=["starttime", "forecasttime"], inplace=True)
+            if "valid_time" in gdf.columns:
+                gdf["valid_time"] = pd.to_datetime(gdf["valid_time"], utc=True)
+                gdf = gdf[(gdf["valid_time"] >= ts_min) & (gdf["valid_time"] <= ts_max)]
+            else:
+                gdf["starttime"] = pd.to_datetime(gdf["starttime"], utc=True)
+                gdf["valid_time"] = gdf["starttime"] + pd.to_timedelta(gdf["forecasttime"], unit="h")
+                gdf = gdf[(gdf["valid_time"] >= ts_min) & (gdf["valid_time"] <= ts_max)]
+            if gdf.empty:
+                continue
+            gdf = _compute_derived_features(gdf, features)
+            gdf = gdf.drop_duplicates("valid_time", keep="last")
+            gdf = gdf.set_index("valid_time").sort_index()
+            for fi, feat in enumerate(features):
+                if feat in gdf.columns:
+                    grid_nwp[:, gi, fi] = gdf[feat].reindex(timestamps).values
+    else:
+        df["grid_key"] = list(zip(df["grid_lat"].round(5), df["grid_lon"].round(5)))
+        needed_keys_round = {(round(float(k[0]), 5), round(float(k[1]), 5)) for k in grid_keys}
+        df = df[df["grid_key"].isin(needed_keys_round)]
+        logger.info("Executing Pandas Hash Grouping to avoid expensive DataFrame iteration...")
+        grouped = df.groupby("grid_key")
+        for gi, key in enumerate(tqdm(grid_keys, desc="Filling ECMWF Grid Arrays")):
+            k_round = (round(float(key[0]), 5), round(float(key[1]), 5))
+            try:
+                gdf = grouped.get_group(k_round)
+            except KeyError:
+                continue
+            gdf = gdf.drop_duplicates("valid_time", keep="last")
+            gdf = gdf.set_index("valid_time").sort_index()
+            for fi, feat in enumerate(features):
+                if feat in gdf.columns:
+                    grid_nwp[:, gi, fi] = gdf[feat].reindex(timestamps).values
 
     for si in tqdm(range(Ns), desc="Filling ECMWF Station Tensors"):
         nearest_key = station_nearest[si][0]
         k_round = (round(float(nearest_key[0]), 5), round(float(nearest_key[1]), 5))
-        try:
-            gdf = grouped.get_group(k_round)
-        except KeyError:
+        gi = grid_idx_by_key.get(k_round)
+        if gi is None:
             continue
-        gdf = gdf.drop_duplicates("valid_time", keep="last")
-        gdf = gdf.set_index("valid_time").sort_index()
-        for fi, feat in enumerate(features):
-            if feat in gdf.columns:
-                station_nwp[:, si, fi] = gdf[feat].reindex(timestamps).values
+        station_nwp[:, si, :] = grid_nwp[:, gi, :]
 
     logger.info("ECMWF Parquet: %d unique grid nodes allocated for %d stations", N_grid, Ns)
     return station_nwp, grid_coords, grid_nwp, grid_alts
@@ -1113,9 +1051,6 @@ def main() -> None:
     if test_start:
         ts_cutoff = pd.Timestamp(test_start, tz="UTC")
         split_t = int(np.searchsorted(timestamps, ts_cutoff, side="left"))
-    else:
-        val_frac = data_cfg.get("val_frac", 0.2)
-        split_t = int(T * (1 - val_frac))
     split_time = timestamps[split_t]
     run_cutoff = pd.Timestamp(test_end, tz="UTC") if test_end else None
     logger.info("Temporal split — train_T: %d  val_T: %d  (split at %s)",
@@ -1152,20 +1087,26 @@ def main() -> None:
     # ------------------------------------------------------------------
     db_url = os.environ.get("ECMWF_WIND_SL_URL")
 
-    ecmwf_parquet_dir = data_cfg.get("ecmwf_path", "/mnt/lambda1/nvme1/ecmwf/parquet")
-    ecmwf_parquet_file = os.path.join(ecmwf_parquet_dir, "ecmwf_wind_sl_full.parquet")
+    ecmwf_parquet_root = data_cfg.get("ecmwf_path", "/mnt/nvme1/ecmwf/parquet")
+    ecmwf_candidates = [
+        ecmwf_parquet_root,
+        os.path.join(ecmwf_parquet_root, "SL"),
+        os.path.join(ecmwf_parquet_root, "ecmwf_wind_sl_full_prefect.parquet"),
+        os.path.join(ecmwf_parquet_root, "ecmwf_wind_sl_full.parquet"),
+    ]
+    ecmwf_parquet_source = next((p for p in ecmwf_candidates if os.path.exists(p)), None)
 
-    if os.path.exists(ecmwf_parquet_file):
+    if ecmwf_parquet_source:
         station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
             load_ecmwf_parquet_at_stations_and_grid(
-                parquet_path=ecmwf_parquet_file,
+                parquet_path=ecmwf_parquet_source,
                 station_lats=lats, station_lons=lons,
                 features=ecmwf_features, timestamps=timestamps,
                 next_n_grid_per_station=stgnn_cfg.get("next_n_ecmwf", 4),
             )
         logger.info("ECMWF grid nodes: %d  features: %s", len(ecmwf_coords), ecmwf_features)
     else:
-        logger.warning(f"Parquet file {ecmwf_parquet_file} not found. Using fallbacks...")
+        logger.warning(f"No ECMWF parquet source found under {ecmwf_parquet_root}. Using fallbacks...")
         # if db_url:
         #     logger.info("Loading ECMWF NWP data from database …")
         #     station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
@@ -1192,7 +1133,6 @@ def main() -> None:
     weather_db_url = os.environ.get("WEATHER_DB_URL")
     if stgnn_cfg.get("use_altitude_diff", False):
         if weather_db_url and db_url:
-            logger.info("Loading NWP elevations from grid-point tables …")
             icond2_alts, ecmwf_alts = load_nwp_elevations(
                 weather_db_url=weather_db_url,
                 ecmwf_db_url=db_url,        # ECMWF_WIND_SL_URL, already read above
@@ -1219,7 +1159,6 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Scalers — fit on training data only
     # ------------------------------------------------------------------
-    logger.info("Fitting scalers on training data …")
 
     M_meas = len(measurement_cols)
     meas_scaler = StandardScaler()
@@ -1379,7 +1318,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     eval_df: pd.DataFrame | None = None
     if args.eval:
-        logger.info("Running 4-pass LOO evaluation on val run pairs …")
+        logger.info("Running per-station evaluation on val run pairs …")
         trainer.load_best()
         ws_feat_idx_i2 = find_ws_feat_idx(icond2_features)
         eval_df = run_evaluation(

@@ -23,6 +23,7 @@ logs/
 GEMINI.md
 data_cache/
 runs/
+literature/
 
 # Distribution / packaging
 .Python

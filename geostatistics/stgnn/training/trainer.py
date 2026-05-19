@@ -71,7 +71,7 @@ class InductiveTrainer:
         else:
             self.scheduler = None
 
-        self._best_val_loss    = math.inf
+        self._best_val_rmse    = math.inf
         self._patience_counter = 0
         self._checkpoint_path  = Path(self.tc.checkpoint_path)
 
@@ -142,10 +142,10 @@ class InductiveTrainer:
             if isinstance(self.scheduler, CosineAnnealingLR):
                 self.scheduler.step()
             elif isinstance(self.scheduler, ReduceLROnPlateau):
-                self.scheduler.step(va_loss)
+                self.scheduler.step(va_rmse)
 
-            if va_loss < self._best_val_loss:
-                self._best_val_loss    = va_loss
+            if va_rmse < self._best_val_rmse:
+                self._best_val_rmse    = va_rmse
                 self._patience_counter = 0
                 self._save_checkpoint()
             else:
@@ -153,14 +153,14 @@ class InductiveTrainer:
                 if self._patience_counter >= self.tc.patience:
                     stopped_epoch = epoch
                     logger.info(
-                        "Early stopping at epoch %d (best val_loss=%.4f)",
-                        epoch, self._best_val_loss,
+                        "Early stopping at epoch %d (best val RMSE=%.4f)",
+                        epoch, self._best_val_rmse,
                     )
                     break
 
         return {
             "history": history,
-            "best_val_loss": self._best_val_loss,
+            "best_val_rmse": self._best_val_rmse,
             "stopped_epoch": stopped_epoch,
         }
 
@@ -275,7 +275,7 @@ class InductiveTrainer:
             {
                 "model_state":     self.model.state_dict(),
                 "optimiser_state": self.optimiser.state_dict(),
-                "best_val_loss":   self._best_val_loss,
+                "best_val_rmse":   self._best_val_rmse,
             },
             self._checkpoint_path,
         )
@@ -285,6 +285,6 @@ class InductiveTrainer:
         ckpt = torch.load(self._checkpoint_path, map_location=self.device)
         self.model.load_state_dict(ckpt["model_state"])
         logger.info(
-            "Loaded best checkpoint (val_loss=%.4f) from %s",
-            ckpt["best_val_loss"], self._checkpoint_path,
+            "Loaded best checkpoint (val RMSE=%.4f) from %s",
+            ckpt["best_val_rmse"], self._checkpoint_path,
         )

@@ -1,0 +1,72 @@
+data:
+  path: '/mnt/nvme1/synthetic/raw/solar'       # Station_XXXXX.parquet with ghi, dhi, …
+  nwp_path: '/mnt/nvme1/icon-d2/parquet'       # SL files under {nwp_path}/SL/{run_hour:02d}/{station_id}/
+  files: ['04336', '02023', '03126', '05797', '01357', '07341', '01346', '01759', '07367', '00701',
+          '07394', '00603', '07396', '05158', '03362', '01200', '00691', '04039', '03244', '05109', '03158', '14138', '02014', '19171', '05347', '13711', '03231', '02597', '06314', '03366', '02812', '07412', '01468', '05100', '01694', '03376', '04271', '04104', '04928', '03946', '01832', '00953', '05825', '02115', '02925', '05349', '02485', '01886', '01691', '03093', '19207', '04745', '05490', '00198', '05371', '00662', '03015', '02429', '00963', '01048', '00596', '04464', '04887', '03321', '05029', '02928', '05546', '00164', '13674', '05516', '06344', '00427', '06163', '01303', '02559', '05142', '07393']
+  stations_master: 'data/stations_master.csv'
+  knn_cache_path: '/mnt/nvme1/synthetic/knnimputer/solar'
+  target_col: 'ghi'
+  extra_cols: ['dhi']            # additional columns to KNN-impute (for train_dcrnn.py fallback)
+  run_hours: [6,9,12,15]
+  # Optional time-range filter
+  # test_start: '2023-01-01'
+  # test_end:   '2025-10-31'
+
+
+interpolation:
+  get_theta_opt: false           # true → load best params from hpo.study_name
+  k_neighbors: 30                # k-nearest neighbours per prediction
+  idw_power: 2.0
+  variogram_model: 'gaussian'    # spherical | gaussian | exponential
+  n_variogram_lags: 30
+  max_variogram_dist: 1000       # km; null = automatic (half max pairwise dist)
+  variogram_segments: 1          # 1 = global variogram
+  variogram_detrend: true
+  rk_nan_threshold: 0.5          # drop timestamp if >50% stations have NaN in any RK feature
+  knn_impute_neighbors: 10
+  anisotropy:
+    enabled: false
+    angle: 0
+    ratio: 1.0
+  rk_features:
+    - altitude
+    - ghi_nwp                    # ICON-D2 SL derived: aswdir_s + aswdifd_s
+
+
+output:
+  path: 'results/geostatistics'
+  target_path: '/mnt/nvme1/synthetic/interpol/solar'  # per-station rk_pred parquets
+  prefix: 'solar_interp'
+
+
+hpo:
+  trials: 500
+  study_name: 'solar_interpol'
+  subsample_hours: 5000          # timestamps sampled per trial for speed
+  seed: 42
+  params:
+    k_neighbors:
+      type: int
+      low: 10
+      high: 150
+    n_variogram_lags:
+      type: int
+      low: 15
+      high: 60
+    variogram_detrend:
+      type: categorical
+      choices: [true, false]
+    anisotropy_enabled:
+      type: categorical
+      choices: [true, false]
+    anisotropy_angle:
+      type: float
+      low: 0.0
+      high: 180.0
+    anisotropy_ratio:
+      type: float
+      low: 0.1
+      high: 0.9
+    use_ghi_nwp:
+      type: categorical
+      choices: [true, false]

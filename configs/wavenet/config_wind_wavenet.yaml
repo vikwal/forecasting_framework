@@ -1,0 +1,190 @@
+data:
+  path: '/mnt/nvme1/synthetic/raw/wind'
+  nwp_path: '/mnt/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/nvme1/ecmwf/parquet'
+  files: [
+            '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
+            '03730', '05792', '05856', '15000', '05779', '04271', '02638', '02961', '05490', '05426',
+            '03761', '00303', '02483', '00596', '03513', '00691', '01200', '02014', '02667', '04036',
+            '04911', '00662', '00232', '05109', '01605', '05871', '15813', '05142', '01691', '01544',
+            '07370', '04931', '05797', '05705', '01001', '00161', '07341', '00433', '00298', '02932',
+            '02023', '01048', '02794', '13674', '03668', '05538', '01975', '04625', '01270', '02171',
+            '04104', '05100', '01503', '03093', '03098', '03287', '03086', '04393', '03402', '04094',
+            '00704', '05349', '01766', '02985', '06163', '01357', '01468', '00880', '04371', '01886',
+            '01420', '03015', '04464', '03196', '04466', '00853', '02044', '06344', '00963', '03321',
+            '02559', '07351', '04280', '02597', '00164', '07389', '03231', '01639', '06197', '06314',
+            '02485', '02856', '07396']
+  val_files: [
+            '01550', '02907', '07393', '02497', '01757', '07367', '02812', '05397', '07412', '06159',
+            '00591', '05825', '03821', '04887', '03366', '05516', '02712', '05029', '07368', '05480',
+            '00701', '03167', '01358', '03126', '05800', '01587', '01694', '00282', '01869', '03925',
+            '03376', '19171', '07374', '00656', '02115', '01078', '03811', '03244', '04642', '15207',
+            '04745', '01580', '02261', '05629', '03379', '02252', '05930', '13965', '03028', '07369']
+  test_files: [
+            '00096', '00427', '00603', '05371', '00840', '00867', '00891', '00953', '01262', '01303',
+            '05906', '01612', '01803', '01832', '02290', '02429', '02564', '02601', '07410', '02878',
+            '02925', '02928', '03166', '03268', '03362', '03660', '03897', '03946', '03987', '04024',
+            '04032', '00198', '04039', '04177', '04336', '13711', '04501', '04928', '05158', '05347',
+            '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342']
+  test_start: '2025-08-01'
+  test_end:   '2025-10-31'
+  interpol_path: '/mnt/nvme1/synthetic/interpol/wind'
+  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/wind'
+  stations_master: 'data/stations_master.csv'
+  freq: '1h'
+  val_frac: 0.25
+  use_case: wind
+
+wavenet:
+  # Input features
+  # dir_in_deg mode requires u/v pairs — use the list below instead of speed-only:
+  #   icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m']
+  #   ecmwf_features:  ['u_wind10m', 'v_wind10m', 'wind_speed_10m']
+  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m'] # 'wind_speed_38m'
+  ecmwf_features:  ['u_wind10m', 'v_wind10m', 'wind_speed_10m']
+  icond2_feature_mode: dir_in_deg   # absolute | components | both | dir_in_deg
+  ecmwf_feature_mode:  dir_in_deg   # absolute | components | both | dir_in_deg
+  measurement_features: ['wind_speed', 'wind_direction']
+  target_col: 'wind_speed'
+  n_workers: 8
+  icond2_run_hours: [6,9,12,15]
+
+  # NWP aggregation
+  nwp_nodes: false                         # true → GATv2 over k grid points; false → concat into station.x
+  next_n_icond2: 4                          # nearest ICON-D2 grid points per station; HPO varies 1-7
+  next_n_ecmwf: 4                           # nearest ECMWF grid points (0 = disabled)
+  aggregate_nwp: false                       # true: IDW-mean  false: concat all k points
+  # nwp_out_dim: 32                          # GATv2 output dim per station (only used when nwp_nodes=true)
+  # nwp_heads: 4                             # GATv2 attention heads (only used when nwp_nodes=true)
+
+  # Time windows
+  history_length: 48
+  forecast_horizon: 48
+
+  # Architecture
+  hidden: 64
+  n_blocks: 12         # cycle [1,2,4,8,16,32]×2 → RF=127, covers T_total=96
+  K_hop: 2       # hops in MultiHopDiffusion (paper default K=2); HPO varies 1-4
+  emb_dim: 64
+  graph_alpha: 3.0
+  kernel_size: 2
+  dropout: 0.2
+
+  # Training
+  min_target_stations: 1
+  max_target_stations: 10
+  max_neighbor_stations: 90
+  next_n_neighbors: 90   # spatial kNN subsample (analog to DCRNN); HPO varies 60-120
+  handle_nans: break
+  loss_weights_by_horizon: true
+  horizon_decay: 0.90
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  scheduler: cosine
+  grad_accum: 4
+  max_epochs: 200
+  patience: 15
+  gradient_clip: 5.0
+
+  # ---------------------------------------------------------------------------
+  # HPO bounds — read by hpo_wavenet.py
+  # ---------------------------------------------------------------------------
+  hpo:
+    trials: 1000
+    studies_path: studies/
+    tensorboard_monitoring: true
+    pruner: median
+    pruner_n_startup_trials: 20
+    pruner_n_warmup_steps: 1
+    n_folds: 3
+    min_train_date: '2024-03-31'
+    n_val_stations: 50
+    max_epochs_per_trial: 100
+    patience_per_trial: 10
+
+    params:
+      next_n_icond2:
+        type: int
+        low: 1
+        high: 7
+
+      next_n_ecmwf:
+        type: int
+        low: 0
+        high: 4
+
+      hidden:
+        type: int
+        low: 32
+        high: 128
+
+      n_blocks:
+        type: int
+        low: 8
+        high: 18
+
+      kernel_size:
+        type: int
+        low: 2
+        high: 4
+
+      dropout:
+        type: float
+        low: 0.0
+        high: 0.4
+
+      lr:
+        type: float
+        low: 1.0e-5
+        high: 1.0e-3
+        log: true
+
+      weight_decay:
+        type: float
+        low: 1.0e-6
+        high: 1.0e-3
+        log: true
+
+      horizon_decay:
+        type: float
+        low: 0.5
+        high: 0.99
+
+      gradient_clip:
+        type: float
+        low: 0.5
+        high: 10.0
+
+      grad_accum:
+        type: int
+        low: 1
+        high: 64
+
+      K_hop:
+        type: int
+        low: 1
+        high: 3
+
+      emb_dim:
+        type: int
+        low: 16
+        high: 128
+        step: 4
+
+      graph_alpha:
+        type: float
+        low: 1.0
+        high: 6.0
+
+      next_n_neighbors:
+        type: int
+        low: 50
+        high: 90
+
+      icond2_feature_mode:
+        type: categorical
+        choices: [absolute, dir_in_deg]
+
+      ecmwf_feature_mode:
+        type: categorical
+        choices: [absolute, dir_in_deg]

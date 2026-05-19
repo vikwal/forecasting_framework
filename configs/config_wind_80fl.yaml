@@ -21,14 +21,14 @@ data:
           '00433', '02712', '05029', '06197', '07374',
           '03660', '02597', '05800', '03196', '00867'] # Specific client files to lo
   power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
-  nwp_path: '/mnt/nvme1/icon-d2/csv' # '/mnt/nas/open-meteo/wind'
-  #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
+  nwp_path: '/mnt/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/nvme1/ecmwf/parquet'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2025-08-01'
-  test_end: '2025-10-31'
+  test_start: '2024-08-01'
+  test_end: '2024-10-31'
   retrain_interval: 1
   eval_interval: 1
   target_col: 'power'
@@ -48,22 +48,14 @@ params:
              'Vestas V112-3.45',
              'Vestas V80-1.8'
             ]
+  nwp_models: ['icon-d2', 'ecmwf']
+  ecmwf_features: ['u_wind100m', 'v_wind100m', 'u_wind200m', 'v_wind200m']
   known_features: [
-    #'wind_speed_h10', 'wind_speed_h38', 'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184', 'wind_speed_h247',
-    # #'density_h10', 'density_h38', 'density_h78', 'density_h127', 'density_h184', 'density_h247',
-    # 'temperature_h10', 'temperature_h38', 'temperature_h78', 'temperature_h127', 'temperature_h184', 'temperature_h247',
-    # 'pressure_h10', 'pressure_h38', 'pressure_h78', 'pressure_h127', 'pressure_h184', 'pressure_h247',
-    # 'relative_humidity_h10', 'relative_humidity_h38', 'relative_humidity_h78', 'relative_humidity_h127', 'relative_humidity_h184', 'relative_humidity_h247'
-    'wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184',
-    #'density_h78', 'density_h127', 'density_h184',
-    #'wind_speed_h127', 'temperature_h127', 'pressure_h127', 'relative_humidity_h127',
-    #'wind_speed_h184', 'temperature_h184', 'pressure_h184', 'relative_humidity_h184',
-    #'wind_speed_h127', 'density_h127'
-    #'wind_speed_h10'
-    'density_rotor_eq', # 'wind_speed_rotor_eq',
-    #'wind_speed_80m', 'wind_speed_120m','wind_speed_180m', # 'wind_speed_10m',
-    #'density_80m', 'density_120m', 'density_180m', # 'density_10m'
-    #'wind_speed_hub'
+    'wind_speed_h78',
+    'wind_speed_h127',
+    'wind_speed_h184',
+    'ecmwf_wind_speed_h100',
+    'ecmwf_wind_speed_h200',
                    ]
   observed_features: [
                       'power',
@@ -79,14 +71,14 @@ params:
     'altitude'
   ]
   aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
-  get_density: True
-  # openmeteo:
-  #   nwp_models: ['icon_d2', 'icon_eu', 'icon_global']
+  get_density: False
   turbines_per_park: 1
-  #random_seeds: [69, 90, 43, 75, 43, 45, 48, 69]
   random_seed: 42
-  next_n_grid_points: 1 # Number of nearest grid points to include
+  next_n_grid_points: 1
+  next_n_stations: 0
   aggregate_grid_points: False
+  get_next_grid_points_method: 'geodesic_next'
+  extrapolate: null
 
 model:
   num_workers: 0 # 'auto' for all physical cores
@@ -260,6 +252,8 @@ fl:
     beta_1: 0.9
     beta_2: 0.99
     tau: 0.001
+  fedprox:
+    mu: 0.0     # 0.0 = disabled (FedAvg behavior). Typical values: 0.001–0.1
   force_retrain: True
   global_scaler: True
   verbose: True

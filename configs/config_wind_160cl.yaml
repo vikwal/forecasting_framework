@@ -17,18 +17,19 @@ data:
           '03231', '04104', '05856', '00953', '05109', '01358', '04928', '05142', '02429', '02290', # O
           '01346', '01048', '05397', '04371', '00840', '03287', '04887', '02985', '03897', '00701'] # P
   power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
-  nwp_path: '/mnt/nvme1/icon-d2/csv'
+  nwp_path: '/mnt/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/nvme1/ecmwf/parquet'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
   val_frac: 0.25 # abs from train_frac
-  test_start: '2025-08-01'
-  test_end: '2025-10-31'
+  test_start: '2024-08-01'
+  test_end: '2024-10-31'
   retrain_interval: 1
   eval_interval: 1
-  target_col: 'wind_speed'
+  target_col: 'power'
   scale_x: True
-  scale_y: True
+  scale_y: False
   use_pca: False
   pca_components: 3
   lag_in_col: False
@@ -44,31 +45,39 @@ params:
              'Vestas V80-1.8'
             ]
   known_features: [
-    'wind_speed_h10', 'wind_speed_h38'
+    #'wind_speed_h10', 'wind_speed_h38'
+    'wind_speed_h78',
+    'wind_speed_h127',
+    'wind_speed_h184',
+    'ecmwf_wind_speed_h100',
+    'ecmwf_wind_speed_h200',
                    ]
   observed_features: [
-                      #'power'
+                      'power'
                       #'wind_speed' #, 'wind_direction_next'
                       ] # lag features
   static_features: [
-    # 'park_age',
-    # 'cut_in',
-    # 'cut_out',
-    # 'rated_wind_speed',
-    # 'hub_height',
-    # 'rotor_diameter',
+    'park_age',
+    'cut_in',
+    'cut_out',
+    'rated_wind_speed',
+    'hub_height',
+    'rotor_diameter',
     'altitude',
     # 'latitude',
     # 'longitude',
     # 'station_rel_lat',
     # 'station_rel_lon'
   ]
+  nwp_models: ['icon-d2', 'ecmwf']
+  ecmwf_features: ['u_wind100m', 'v_wind100m', 'u_wind200m', 'v_wind200m']
   aggregate_nwp_layers: 'weighted_mean' # options: 'not', 'pivot', 'weighted_mean', 'mean'
-  get_density: True
+  get_density: False
   turbines_per_park: 1
   random_seed: 42
-  next_n_grid_points: 4 # Number of nearest grid points to include
+  next_n_grid_points: 1 # Number of nearest grid points to include
   next_n_stations: 0 # Number of nearest stations whose features to include (0 = disabled)
+  nwp_models: ['icon-d2', 'ecmwf']
   aggregate_grid_points: False
   get_next_grid_points_method: 'geodesic_next' # options: 'geodesic_next', 'relative_position'
   extrapolate: null #'wind_speed_h10' # null # Spaltenname für Power-Law-Extrapolation auf Nabenhöhe (z.B. 'wind_speed_h10'), nur wenn target_col='power'
@@ -105,7 +114,7 @@ model:
     dropout: 0.5
   tft:
     n_heads: 8
-    hidden_dim: 40
+    hidden_dim: 64
     dropout: 0.1
     rnn_type: 'lstm'
     n_lstm_layers: 1  # Same for encoder and decoder
@@ -218,39 +227,76 @@ eval:
 
 fl:
   clients:
-    clientA: ['00298', '02907', '02564', '05930', '15813', '02932', '01759', '07403', '05404', '00662']
-    clientB: ['00596', '03098', '04642', '03366', '03158', '03362', '03032', '00591', '02812', '03946']
-    clientC: ['00303', '00891', '04336', '15000', '01694', '05490', '01605', '04271', '00656', '00691']
-    clientD: ['03761', '00198', '01443', '06163', '04464', '03513', '01975', '00427', '01691', '07394']
-    clientE: ['07370', '05906', '03093', '03268', '15444', '00282', '05440', '05779', '00460', '00856']
-    clientF: ['00963', '00704', '04745', '00342', '01766', '01544', '05516', '04466', '01200', '02171']
-    clientG: ['00880', '02794', '04393', '07369', '03126', '00232', '00164', '02261', '07393', '05158']
-    clientH: ['07412', '03379', '05349', '07341', '03028', '13674', '01684', '02925', '04177', '07368']
-    clientI: ['01303', '07395', '03015', '04280', '01262', '00183', '05546', '01587', '07410', '03631']
-    clientJ: ['00433', '02712', '05029', '06197', '07374', '03660', '02597', '05800', '03196', '00867']
-    clientK: ['03668', '05100', '05347', '02961', '07351', '04024', '02115', '07396', '01270', '03730']
-    clientL: ['01832', '15207', '02483', '07367', '02928', '02044', '01001', '01580', '04911', '01503']
-    clientM: ['01612', '02601', '01639', '03166', '00096', '05371', '02023', '03086', '03821', '01078']
-    clientN: ['02559', '05705', '02014', '00722', '02667', '05792', '03987', '00161', '02485', '02638']
-    clientO: ['03231', '04104', '05856', '00953', '05109', '01358', '04928', '05142', '02429', '02290']
-    clientP: ['01346', '01048', '05397', '04371', '00840', '03287', '04887', '02985', '03897', '00701']
-  strategy: 'fedadam'
-  n_rounds: 1
+    clientA: ['00298'] #, '02907', '02564', '05930', '15813', '02932', '01759', '07403', '05404', '00662']
+    clientB: ['00596'] #, '03098', '04642', '03366', '03158', '03362', '03032', '00591', '02812', '03946']
+    clientC: ['00303'] #, '00891', '04336', '15000', '01694', '05490', '01605', '04271', '00656', '00691']
+    clientD: ['03761'] #, '00198', '01443', '06163', '04464', '03513', '01975', '00427', '01691', '07394']
+    clientE: ['07370'] #, '05906', '03093', '03268', '15444', '00282', '05440', '05779', '00460', '00856']
+    clientF: ['00963'] #, '00704', '04745', '00342', '01766', '01544', '05516', '04466', '01200', '02171']
+    clientG: ['00880'] #, '02794', '04393', '07369', '03126', '00232', '00164', '02261', '07393', '05158']
+    clientH: ['07412'] #, '03379', '05349', '07341', '03028', '13674', '01684', '02925', '04177', '07368']
+    clientI: ['01303'] #, '07395', '03015', '04280', '01262', '00183', '05546', '01587', '07410', '03631']
+    clientJ: ['00433'] #, '02712', '05029', '06197', '07374', '03660', '02597', '05800', '03196', '00867']
+    clientK: ['03668'] #, '05100', '05347', '02961', '07351', '04024', '02115', '07396', '01270', '03730']
+    clientL: ['01832'] #, '15207', '02483', '07367', '02928', '02044', '01001', '01580', '04911', '01503']
+    clientM: ['01612'] #, '02601', '01639', '03166', '00096', '05371', '02023', '03086', '03821', '01078']
+    clientN: ['02559'] #, '05705', '02014', '00722', '02667', '05792', '03987', '00161', '02485', '02638']
+    clientO: ['03231'] #, '04104', '05856', '00953', '05109', '01358', '04928', '05142', '02429', '02290']
+    clientP: ['01346'] #, '01048', '05397', '04371', '00840', '03287', '04887', '02985', '03897', '00701']
+  global_scaler: True
+  shared_layer_patterns:
+    tft:
+      - 'static_embed'
+      - 'static_variable_selection'
+      - 'static_context_grn'
+      - 'static_enrichment_grn'
+      - 'static_state_h_grn'
+      - 'lstm_encoder'
+      - 'lstm_decoder'
+      - 'lstm_gate'
+      - 'lstm_ln'
+      - 'enrichment_grn'
+      - 'attn_gate'
+      - 'attn_ln'
+      - 'positionwise_grn'
+    tcn-tft:
+      - 'tcn_observed'
+      - 'tcn_known'
+      - 'tcn_proj'
+    tcn-gru:
+      - 'conv_stack'
+  strategy: 'fedsgd'
+  n_rounds: 500
   n_local_epochs: 1
-  personalize: True
-  fine_tune: True
+  personalize: false
+  fine_tune: False
+  fine_tune_epochs: 20
+  save_history: False
+  max_concurrent_actors: 16
   early_stopping:
     enabled: False
-    patience: 10
+    patience: 15
     min_delta: 0.0001
     monitor: 'val_rmse'
     mode: 'min'
     restore_best_weights: True
+  global_early_stopping:
+    enabled: True
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
   fedopt:
     server_lr: 0.0005
     beta_1: 0.9
     beta_2: 0.99
     tau: 0.001
+  fedprox:
+    mu: 0.0     # 0.0 = disabled (FedAvg behavior). Typical values: 0.001–0.1
+  fedsgd:
+    gradient_weighting: 'uniform'   # 'uniform' | 'weighted' (by batch size)
+    server_optimizer: 'adam'        # 'adam' (FedAdam) | 'sgd' (FedAvgM)
+    gradient_clip: null             # null = disabled; e.g. 7.0 to clip grad norm
+    personal_lr: null               # null = falls back to model.lr; local lr for personal layers
   force_retrain: True
   verbose: True
-  save_history: False

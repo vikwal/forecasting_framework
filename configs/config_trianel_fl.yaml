@@ -1,0 +1,279 @@
+# ============================================================
+# Trianel Federated TFT Experiment
+# 2×2 Factorial Design: Synthetic Augmentation × Static Features
+# ============================================================
+
+data:
+  # --- Trianel-specific paths ---
+  real_data_path:             '/mnt/nvme2/trianel_hourly'
+  real_synthetic_data_path:   '/mnt/nvme2/synthetic/trianel_parks'
+  synthetic_data_path:        '/mnt/nvme1/synthetic/wind/era5_fric_wind_hourly_age'
+  nwp_path:                   '/mnt/nvme2/icon-d2/trianel_parks'
+  wind_parameter_file:        '/mnt/nvme2/synthetic/trianel_parks/wind_parameter.csv'
+  turbine_parameter_file:     '/mnt/nvme2/synthetic/trianel_parks/turbine_parameter.csv'
+
+  # --- Required by pipeline() / preprocessing utilities ---
+  path:        '/mnt/nvme2/synthetic/trianel_parks'  # fallback for any legacy code
+  files:       []
+  stations_master: 'data/stations_master.csv'        # not used by preprocess_trianel_tft
+  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'  # not used for trianel
+
+  # Paths for 160-station fully-synthetic data (5-digit IDs in fl.clients).
+  # synthetic_data_path overrides data.path when loading generic stations.
+  synth_stations_nwp_path:          '/mnt/nvme1/icon-d2/parquet'
+  synth_stations_ecmwf_path:        '/mnt/nvme1/ecmwf/parquet'
+  synth_stations_power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
+
+  freq:        '1h'
+  target_col:  'power'
+  train_frac:  1        # train_start / test_start / test_end control the split
+  val_frac:    0.0
+  # These are overwritten per fold in trianel_fl.py:
+  train_start: '2023-07-24'
+  test_start:  '2024-04-01'
+  test_end:    '2024-05-31'
+
+  scale_x:     true
+  scale_y:     false    # power is pre-normalised to [0,1]
+  use_pca:     false
+  pca_components: 0
+  lag_in_col:  false
+  n_neighbors: 5
+  icond2_source: 'csv'  # 'csv' or 'database'
+  forecast_hours: ['06', '09', '12', '15']
+  ecmwf_path: '/mnt/nvme2/ecmwf/parquet/SL'
+  ecmwf_features:
+    - 'wind_speed_h100'
+    - 'wind_speed_h200'
+  data_cutoff: '2024-06-01'   # real SCADA data ends here; discard everything beyond
+  retrain_interval: 1
+  eval_interval:    1
+
+params:
+  # NWP feature configuration (same as config_wind_100.yaml)
+  known_features:
+    - 'wind_speed_h78'
+    - 'wind_speed_h127'
+    - 'wind_speed_h184'
+    # - 'density_rotor_eq'
+    # - 'wind_speed_rotor_eq'
+    - 'wind_speed_h100'   # ECMWF 100 m
+    - 'wind_speed_h200'   # ECMWF 200 m
+  observed_features:
+    - 'power'
+  # Static features — only used in scenarios B and D (controlled by trianel_fl.py)
+  static_features:
+    - 'altitude'
+    - 'park_age'
+    - 'hub_height'
+    - 'rotor_diameter'
+    - 'cut_in'
+    - 'cut_out'
+    - 'rated_wind_speed'
+    #- 'turbine_count'
+
+  aggregate_nwp_layers: 'weighted_mean'
+  get_density:          true
+  next_n_grid_points:   1
+  aggregate_grid_points: false
+  get_next_grid_points_method: 'geodesic_next'
+  get_synthetic_real_parks: false
+  random_seed: 42
+
+model:
+  name:        'tft'
+  fl:          true         # disables torch.compile in FL mode
+  output_dim:  48
+  lookback:    48
+  horizon:     48
+  step_size:   48
+  batch_size:  64
+  lr:          0.0005
+  optimizer:   'adam'
+  loss:        'mse'
+  metrics:     ['mae', 'rmse', 'r^2']
+  shuffle:     true
+  num_workers: 0
+  callbacks:   false
+  save_model:  false
+  force_retrain: true
+  lookup_hpo:  false    # no HPO lookup — use config values directly
+  verbose:     1
+  parallelize: false
+
+  tft:
+    n_heads:             4
+    hidden_dim:          64
+    dropout:             0.1
+    n_lstm_layers:       1
+    static_embedding_dim: 128
+    num_quantiles:       1
+    clipnorm:            7.0
+
+  early_stopping:
+    enabled:             true
+    patience:            10
+    min_delta:           0.0001
+    monitor:             'val_rmse'
+    mode:                'min'
+    restore_best_weights: true
+
+  # Unused architecture sections (required by hpo.get_hyperparameters to avoid KeyError)
+  fnn:
+    units:       128
+    n_layers:    2
+  cnn:
+    filters:     64
+    kernel_size: 3
+    n_cnn_layers: 4
+    increase_filters: false
+  rnn:
+    n_rnn_layers: 2
+    units:       64
+    dropout:     0.1
+  attention_heads: 8
+  stemgnn:
+    units:       32
+    stack_cnt:   2
+    multi_layer: 5
+    dropout:     0.5
+
+# hpo section: values are ranges for HPO mode, but also used as defaults
+# when lookup_hpo=false (the else branch reads config['hpo']['tft']['clipnorm'] etc.)
+hpo:
+  studies_path: 'studies/optuna.db'
+  objectives:
+    - metric: 'val_rmse'
+      direction: 'minimize'
+  trials: 100
+  kfolds: 3
+  min_train_date: '2023-07-24'
+  val_split: 1
+  pruning:
+    use_median_pruner: false
+    n_startup_trials: 10
+    n_warmup_steps: 2
+    interval_steps: 1
+    disable_pruning: true
+  batch_size:      [32, 256]
+  epochs:          [10, 100]
+  n_layers:        [1, 4]
+  n_cnn_layers:    [1, 8]
+  n_rnn_layers:    [1, 4]
+  learning_rate:   [0.0001, 0.01]
+  attention_heads: [1, 8]
+  fnn:
+    units:   [32, 256]
+  cnn:
+    filters:          [16, 128]
+    kernel_size:      [2, 5]
+    increase_filters: false
+  rnn:
+    units:   [16, 128]
+    dropout: [0.0, 0.5]
+  tft:
+    n_heads:             [1, 8]
+    hidden_dim:          [16, 128]
+    dropout:             [0.01, 0.5]
+    n_lstm_layers:       [1, 3]
+    static_embedding_dim: [8, 64]
+    num_quantiles:       [1]
+    clipnorm:            7.0   # scalar → passed directly to hyperparameters
+  fl:
+    strategy:   'fedavg'
+    personalize: false
+    n_rounds:   [1, 30]
+    server_lr:  [0.0001, 0.1]
+    beta_1:     [0.0, 1.0]
+    beta_2:     [0.0, 1.0]
+    tau:        [0.0001, 0.1]
+
+eval:
+  results_path: 'results/trianel'
+  eval_on_all_test_data: true
+  retrain_interval: 0
+  t_0: 0
+
+fl:
+  global_scaler: true     # FedPS: aggregate local scalers before training
+  # Which layers to aggregate globally (shared) vs keep locally (personal).
+  # Listed substrings are matched against state_dict keys — any match → shared.
+  # Overrides the hardcoded SHARED_LAYER_PATTERNS in federated.py.
+  shared_layer_patterns:
+    tft:
+      - 'static_embed'
+      - 'static_variable_selection'
+      - 'static_context_grn'
+      - 'static_enrichment_grn'
+      - 'static_state_h_grn'
+      # - 'lstm_encoder'
+      # - 'lstm_decoder'
+      # - 'lstm_gate'
+      # - 'lstm_ln'
+      # - 'enrichment_grn'
+      # - 'attn_gate'
+      # - 'attn_ln'
+      # - 'positionwise_grn'
+    tcn-tft:
+      - 'tcn_observed'
+      - 'tcn_known'
+      - 'tcn_proj'
+    tcn-gru:
+      - 'conv_stack'
+  strategy:      'fedsgd'   # 'fedavg' | 'fedprox' | 'fedopt' | 'fedsgd'
+  # --pretrained_context: which layers are transferred from the pretrained CL model
+  pretrained_weights_freeze: false    # true = freeze during FL; false = train with pretrained_weights_lr
+  pretrained_weights_lr:    0.00001  # lr for pretrained layers when not frozen (main lr used for rest)
+  fedprox:
+    mu: 0.0     # 0.0 = disabled (FedAvg behavior). Typical values: 0.001–0.1
+  fedsgd:
+    gradient_weighting: 'uniform'   # 'uniform' | 'weighted' (by batch size)
+    server_optimizer: 'adam'        # 'adam' (FedAdam) | 'sgd' (FedAvgM)
+    gradient_clip: null             # null = disabled; e.g. 7.0 to clip grad norm
+    personal_lr: null               # null = falls back to model.lr; local lr for personal layers
+    # Fair-comparison note: FedAvg E=1 does ~N/batch_size steps/round.
+    # FedSGD does 1 step/round → needs ~N/batch_size × more rounds.
+    # Trianel: ~1000 samples/client, batch=64 → ~16× more rounds than FedAvg.
+  n_rounds:      500
+  n_local_epochs: 1       # lokale Epochen pro FL-Runde pro Client
+  personalize:   true
+  fine_tune:     false
+  fine_tune_epochs: 20
+  save_history:  false
+  max_concurrent_actors: 12
+  early_stopping:         # lokales Early Stopping pro Client-Runde
+    enabled:    false
+    patience:   5
+    min_delta:  0.0001
+    mode:       'min'
+    restore_best_weights: true
+  global_early_stopping:  # stoppt FL-Runden wenn val_rmse stagniert
+    enabled:    true
+    patience:   10
+    min_delta:  0.0001
+    monitor:    'val_rmse'
+    mode:       'min'
+  fedopt:
+    server_lr: 0.001
+    beta_1:    0.9
+    beta_2:    0.99
+    tau:       0.001
+  # One FL client per wind park.
+  # To augment with generic synthetic stations (use_synthetic=True scenarios B/C),
+  # add 5-digit station IDs from synth_stations_path to each client's list, e.g.:
+  #   barlt_west: ['barlt_west', '00298', '02907', '02564']
+  # 5-digit IDs are ignored when use_synthetic=False (scenarios A/D).
+  clients:
+    barlt_west:      ['barlt_west'] #,     '00298'] #, '02907', '02564', '05930', '15813']
+    eggstedt:        ['eggstedt'] #,       '00596'] #, '03098', '04642', '03366', '03158']
+    eisleben:        ['eisleben'] #,       '00303'] #, '00891', '04336', '15000', '01694']
+    hoeheinoed:      ['hoeheinoed'] #,     '03761'] #, '00198', '01443', '06163', '04464']
+    jessin_grimmen:  ['jessin_grimmen'] #, '07370'] #, '05906', '03093', '03268', '15444']
+    jettebruch:      ['jettebruch'] #,     '00963'] #, '00704', '04745', '00342', '01766']
+    kengen:          ['kengen'] #,         '00880'] #, '02794', '04393', '07369', '03126']
+    lintern:         ['lintern'] #,        '07412'] #, '03379', '05349', '07341', '03028']
+    mattenberg:      ['mattenberg'] #,     '01303'] #, '07395', '03015', '04280', '01262']
+    rheurdt:         ['rheurdt'] #,        '00433'] #, '02712', '05029', '06197', '07374']
+    trendelburg:     ['trendelburg'] #,    '03668'] #, '05100', '05347', '02961', '07351']
+    twv_windpark:    ['twv_windpark'] #,   '01832'] #, '15207', '02483', '07367', '02928']
+    #vogelsberg:      ['vogelsberg']

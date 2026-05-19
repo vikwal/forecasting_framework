@@ -1,12 +1,13 @@
 """
 Seq2Seq Autoregressive Decoder with NWP node attention.
 
-NWP messages for all T_fore steps are pre-computed in one vectorised
-GATv2 call (forward_sequence), then the autoregressive loop indexes into them.
+NWP messages are computed per forecast step using the current last-layer
+hidden state H[-1] as the GATv2 attention query, matching the encoder.
 
 Per forecast step t ∈ [0, T_fore):
 
-  1. nwp_msg = nwp_msgs[t]  (pre-computed before the loop)
+  1. NWP attention:
+       nwp_msg_t = GATv2(icond2_fore_t, ecmwf_fore_t → station | H[-1])
 
   2. DCGRU step:
        input_t = cat( y_{t-1}, nwp_msg_t, static )   → (N_s, 1 + nwp_out_dim + S)
@@ -66,22 +67,32 @@ class DCGRUDecoder(nn.Module):
         ecmwf_dim: int = 3,
         nwp_heads: int = 4,
         edge_dim: int = 3,
+        nwp_nodes: bool = True,
+        station_nwp_dim: int = 0,
     ) -> None:
         super().__init__()
         self.forecast_horizon = forecast_horizon
-        self.num_layers = num_layers
+        self.num_layers       = num_layers
+        self.nwp_nodes        = nwp_nodes
+        self.nwp_out_dim      = nwp_out_dim
 
-        self.nwp_attn = NWPAttentionLayer(
-            icond2_dim=icond2_dim,
-            ecmwf_dim=ecmwf_dim,
-            station_dim=hidden_dim,
-            nwp_out_dim=nwp_out_dim,
-            heads=nwp_heads,
-            edge_dim=edge_dim,
-            dropout=dropout,
-        )
+        if nwp_nodes and nwp_out_dim > 0:
+            self.nwp_attn = NWPAttentionLayer(
+                icond2_dim=icond2_dim,
+                ecmwf_dim=ecmwf_dim,
+                station_dim=hidden_dim,
+                nwp_out_dim=nwp_out_dim,
+                heads=nwp_heads,
+                edge_dim=edge_dim,
+                dropout=dropout,
+            )
 
-        gru_input_dim = 1 + nwp_out_dim + static_dim   # scalar y + nwp_msg + static
+        if nwp_nodes:
+            gru_input_dim = 1 + nwp_out_dim + static_dim
+        else:
+            # station_nwp_dim = I2 + E2 from station.x (nearest grid point)
+            gru_input_dim = 1 + station_nwp_dim + static_dim
+
         self.cells = nn.ModuleList([
             DCGRUCell(
                 gru_input_dim if i == 0 else hidden_dim,
@@ -107,6 +118,10 @@ class DCGRUDecoder(nn.Module):
         target_mask: Tensor,                # (N_s,) bool
         teacher_forcing_targets: Tensor | None = None,  # (N_target, T_fore)
         teacher_forcing_ratio: float = 0.5,
+        wind_dir_fore: Tensor | None = None,    # (T_fore, N_s) degrees, met. convention
+        s2s_dist_norm: Tensor | None = None,    # (E_s2s,) — normalised distance
+        s2s_bearing: Tensor | None = None,      # (E_s2s,) — azimuth src→dst in radians
+        station_nwp_fore: Tensor | None = None, # (T_fore, N_s, I2+E2) when nwp_nodes=False
     ) -> Tensor:
         """
         Returns
@@ -115,35 +130,45 @@ class DCGRUDecoder(nn.Module):
         """
         T_fore = self.forecast_horizon
         device = icond2_fore.device
-        use_tf = (
-            teacher_forcing_targets is not None
-            and self.training
-        )
+        use_tf  = teacher_forcing_targets is not None and self.training
+        use_dir = wind_dir_fore is not None
 
         N_s = static.size(0)
         H = [h.clone() for h in H_init]
         y_prev = y_last_hist.clone()          # (N_s,)
         preds_list: list[Tensor] = []
 
-        # Pre-compute all forecast NWP messages in one vectorised GATv2 call
-        nwp_msgs = self.nwp_attn.forward_sequence(
-            icond2_fore, ecmwf_fore, N_s,
-            i2s_edge_index, i2s_edge_attr,
-            e2s_edge_index, e2s_edge_attr,
-        )                                     # (T_fore, N_s, nwp_out_dim)
-
         for t in range(T_fore):
-            nwp_msg = nwp_msgs[t]            # (N_s, nwp_out_dim)
+            if self.nwp_nodes and self.nwp_out_dim > 0:
+                # GATv2 attention conditioned on current last-layer hidden state
+                nwp_msg = self.nwp_attn.forward(
+                    icond2_fore[t], ecmwf_fore[t], H[-1],
+                    i2s_edge_index, i2s_edge_attr,
+                    e2s_edge_index, e2s_edge_attr,
+                )                            # (N_s, nwp_out_dim)
+            elif self.nwp_nodes:
+                # nwp_injection bypass: no NWP at all
+                nwp_msg = torch.zeros(N_s, 0, device=device)
+            else:
+                # nwp_nodes=False: nearest-grid-point NWP from station.x
+                nwp_msg = station_nwp_fore[t]  # (N_s, I2+E2)
+
+            ew_t = (
+                DCGRUCell.directional_edge_weight(
+                    wind_dir_fore[t], s2s_edge_index[0], s2s_dist_norm, s2s_bearing
+                )
+                if use_dir else s2s_edge_weight
+            )
 
             # --- Build decoder input ---
             input_t = torch.cat(
                 [y_prev.unsqueeze(-1), nwp_msg, static], dim=-1
-            )                                # (N_s, 1 + nwp_out_dim + S)
+            )                                # (N_s, 1 + nwp_dim + S)
 
             # --- DCGRU step ---
             x_t = input_t
             for l, cell in enumerate(self.cells):
-                H[l] = cell(x_t, H[l], s2s_edge_index, s2s_edge_weight)
+                H[l] = cell(x_t, H[l], s2s_edge_index, ew_t)
                 x_t  = H[l]
 
             # --- Output projection ---

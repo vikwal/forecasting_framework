@@ -77,13 +77,15 @@ forecasting_framework/
 ## Docs-Verzeichnis
 
 Detaillierte Feature-Dokumentation in `docs/`:
+- [dcrnn_implementation_fixes.md](docs/dcrnn_implementation_fixes.md) — **NEU (Mai 2026)**: Analyse der Paper-Abweichungen, Fixes für BiDirDiffConv + zeitabhängige NWP-Attention, Performanz-Implikationen
 - [early_stopping_config.md](docs/early_stopping_config.md) — Lokales FL Early Stopping vs. Fine-Tuning Early Stopping
 - [fine_tuning_feature.md](docs/fine_tuning_feature.md) — Fine-Tuning nach FL
 - [global_early_stopping.md](docs/global_early_stopping.md) — Early Stopping über globale FL-Runden
 - [preprocess_icond2_wind.md](docs/preprocess_icond2_wind.md) — ICON-D2 Wind Preprocessing: Datenstruktur, Features, Luftdichte, Lookback/Horizon-Zusammenhang, bekannte Limitierungen
 - [predict_wind.md](docs/predict_wind.md) — Wind-Zielgrößen (`wind_speed` & `power`), `extrapolate`-Parameter (Power Law auf Nabenhöhe, `wind_speed_hub_extrap`), NWP-Baseline, Skill_NWP, MultiIndex-Handling, bekannte Fallstricke
 - [optuna_dashboard.md](docs/optuna_dashboard.md) — Deployment (systemd), Datenbank-Anbindung via `OPTUNA_STORAGE`, Passwort-geschütztes Study-Löschen
-- [icond2_database_integration.md](docs/icond2_database_integration.md) — **NEU (April 2026)**: PostgreSQL-Datenbankzugriff für ICON-D2 (Config: `data.icond2_source: 'database'`), Performance, Fehlerbehandlung, Migration CSV→DB
+- [icond2_database_integration.md](docs/icond2_database_integration.md) — PostgreSQL-Datenbankzugriff für ICON-D2 (Config: `data.icond2_source: 'database'`), Performance, Fehlerbehandlung, Migration CSV→DB
+- [train_dcrnn.md](docs/train_dcrnn.md) — DCRNN Training: CLI-Argumente, HPO-Integration (`--hpo-study`), Config-Section, Datenpipeline, Output-Format (`.pt` + Pickle-Dict), **Architektur-Updates (Mai 2026)**
 
 ## Wichtige Hinweise
 

@@ -110,13 +110,17 @@ class HeterogeneousGraphBuilder:
         data["icond2", "informs", "station"].edge_attr = i2s_ea
 
         # --- ECMWF → station edges ---
-        e2s_ei, e2s_ea = self._build_nwp_to_station_edges(
-            nwp_coords=ecmwf_grid_coords,
-            station_coords=station_coords,
-            nwp_altitudes=ecmwf_altitudes,
-            station_altitudes=station_altitudes,
-            k=self.cfg.next_n_ecmwf_grid_points,
-        )
+        if self.cfg.next_n_ecmwf_grid_points > 0:
+            e2s_ei, e2s_ea = self._build_nwp_to_station_edges(
+                nwp_coords=ecmwf_grid_coords,
+                station_coords=station_coords,
+                nwp_altitudes=ecmwf_altitudes,
+                station_altitudes=station_altitudes,
+                k=self.cfg.next_n_ecmwf_grid_points,
+            )
+        else:
+            e2s_ei = torch.zeros((2, 0), dtype=torch.long)
+            e2s_ea = torch.zeros((0, 1), dtype=torch.float32)
         data["ecmwf", "informs", "station"].edge_index = e2s_ei
         data["ecmwf", "informs", "station"].edge_attr = e2s_ea
 

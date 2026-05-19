@@ -40,6 +40,8 @@ def main() -> None:
     parser.add_argument('-c', '--config', type=str, help='Select config')
     parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix for study name (default: empty)')
     parser.add_argument('--save_model', action='store_true', default=False, help='Save trained model to models directory (default: False)')
+    parser.add_argument('--test-mode', action='store_true', default=False,
+                        help='Final evaluation mode: trains on files+val_files, evaluates on test_files')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
@@ -130,29 +132,70 @@ def main() -> None:
         study_name_suffix += f'_{args.suffix}'
     study_name = f'cl_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}' # .yaml delete later when renamed the hpo studies
 
-    # Load data - REUSE EXISTING PREPROCESSING
+    # ── Data loading ─────────────────────────────────────────────────────────
+    # Normal mode  : train on 'files',  validate/test on 'val_files'
+    # --test-mode  : train on 'files'+'val_files', evaluate on 'test_files'
+    test_mode = args.test_mode
+    if test_mode and not config['data'].get('test_files'):
+        raise ValueError("--test-mode requires 'test_files' to be set in the config.")
+
     dfs = preprocessing.get_data(
         data_dir=data_dir,
         config=config,
         freq=freq,
-        features=features
+        features=features,
+        files_key='files',
     )
 
-    # Optional separate validation/test stations (val_files).
-    # When present: training sequences come from dfs (up to test_start) and
-    # test/validation sequences come from val_dfs (test_start → test_end),
-    # scaled with the scaler fitted on dfs training data.
     val_dfs = None
-    if config['data'].get('val_files'):
+    if test_mode:
+        logging.info("--test-mode: merging val_files into training set, using test_files for evaluation.")
+        if config['data'].get('val_files'):
+            val_files_dfs = preprocessing.get_data(
+                data_dir=data_dir,
+                config=config,
+                freq=freq,
+                features=features,
+                files_key='val_files',
+            )
+            dfs = {**dfs, **val_files_dfs}
+            logging.info("Merged %d val_files stations into training set (%d total).",
+                         len(val_files_dfs), len(dfs))
+        val_dfs = preprocessing.get_data(
+            data_dir=data_dir,
+            config=config,
+            freq=freq,
+            features=features,
+            files_key='test_files',
+        )
+        logging.info("Loaded %d test stations for evaluation.", len(val_dfs))
+    elif config['data'].get('val_files'):
         logging.info("val_files found — loading separate validation/test stations.")
         val_dfs = preprocessing.get_data(
             data_dir=data_dir,
             config=config,
             freq=freq,
             features=features,
-            files_key='val_files'
+            files_key='val_files',
         )
-        logging.info(f"Loaded {len(val_dfs)} val stations, {len(dfs)} training stations.")
+        logging.info("Loaded %d val stations, %d training stations.", len(val_dfs), len(dfs))
+
+    # ── NaN audit ────────────────────────────────────────────────────────────
+    target_col_data = config['data'].get('target_col', 'power')
+    handle_nans = config.get('data', {}).get('handle_nans', 'warn')
+    _all_dfs = {**dfs, **(val_dfs or {})}
+    _nan_stations = [k for k, df in _all_dfs.items()
+                     if target_col_data in df.columns and df[target_col_data].isna().any()]
+    if _nan_stations:
+        total_nan = sum(int(_all_dfs[k][target_col_data].isna().sum()) for k in _nan_stations)
+        msg = (f"{len(_nan_stations)} station(s) still have NaN in '{target_col_data}' "
+               f"after imputation ({total_nan} total NaN). "
+               f"Stations: {[os.path.basename(k) for k in _nan_stations[:5]]}"
+               + (" …" if len(_nan_stations) > 5 else ""))
+        if handle_nans == 'break':
+            raise ValueError(msg)
+        else:
+            logging.warning(msg)
 
     logging.info(f'Config: {json.dumps(params, indent=2)}')
 
@@ -490,7 +533,9 @@ def main() -> None:
         for park_key, (X_test_park, y_test_park, index_test_park, scaler_y_park) in test_data.items():
             logging.debug(f'Evaluating park: {park_key}')
 
-            park_df = dfs.get(park_key) or (val_dfs.get(park_key) if val_dfs else None)
+            park_df = dfs.get(park_key)
+            if park_df is None and val_dfs:
+                park_df = val_dfs.get(park_key)
             if park_df is None:
                 logging.warning(f"No raw data found for park {park_key}, skipping evaluation.")
                 continue
@@ -619,10 +664,10 @@ def main() -> None:
             logging.info(f"Chronos-2 model saved to: {model_path}/")
             scaler_path = os.path.join('models', 'scaler', f'scaler_chronos_{study_name}.pkl')
         else:
-            model_path = os.path.join('models', f'{study_name}.pt')
+            model_path = os.path.join('models', f'{study_name}{study_name_suffix}.pt')
             torch.save(model.state_dict(), model_path)
             logging.info(f"Model saved to: {model_path}")
-            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}.pkl')
+            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}{study_name_suffix}.pkl')
 
         with open(scaler_path, 'wb') as f:
             pickle.dump(global_scaler_x, f)

@@ -6,6 +6,8 @@ import re
 import copy
 import gc
 import math
+from pathlib import Path
+from functools import lru_cache
 import pandas as pd
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -87,9 +89,11 @@ def _get_data_from_config_files(config: dict,
 
     def _process_file(file_idx_file):
         file_idx, file = file_idx_file
-        file_path = os.path.join(base_path, f"synth_{file}.csv")
+        file_path = os.path.join(base_path, f"synth_{file}.parquet")
         if not os.path.exists(file_path):
-            logging.warning(f"File not found: {file_path}")
+            file_path = os.path.join(base_path, f"synth_{file}.csv")
+        if not os.path.exists(file_path):
+            logging.warning(f"File not found: {os.path.join(base_path, f'synth_{file}.[csv|parquet]')}")
             return file, None
 
         try:
@@ -223,10 +227,37 @@ def get_data(data_dir: str,
         files_key: Which key in config['data'] holds the file list.
                    'files' (default) for training stations, 'val_files' for a
                    separate validation/test set whose scaler is fitted on 'files'.
+
+    Optional config keys applied after loading (config['data']):
+        interpol_path    : path to per-station Kriging rk_pred parquets; fills NaN
+                           in target_col before the downstream pipeline.
+        knnimputer_path  : path to wide spatial-KNN parquets; fills NaN in the
+                           columns listed under knn_impute_cols.
+        knn_impute_cols  : list of column names to spatial-KNN impute (e.g. ['dhi']).
     """
     # Check if parks are specified in config - if so, use config-based loading
     if files_key in config.get('data', {}):
-        return _get_data_from_config_files(config, freq, features, target_col, files_key=files_key)
+        dfs = _get_data_from_config_files(config, freq, features, target_col, files_key=files_key)
+
+        data_cfg = config.get('data', {})
+        _target = data_cfg.get('target_col', target_col)
+
+        # Kriging imputation: fill NaN in target_col
+        interpol_path = data_cfg.get('interpol_path')
+        if interpol_path:
+            from utils.imputation import impute_dfs_with_kriging
+            logging.info("Kriging imputation (interpol_path) for '%s' …", _target)
+            dfs = impute_dfs_with_kriging(dfs, interpol_path, _target)
+
+        # Spatial-KNN imputation: fill NaN in secondary columns
+        knnimputer_path = data_cfg.get('knnimputer_path')
+        knn_cols = [str(c) for c in data_cfg.get('knn_impute_cols', [])]
+        if knnimputer_path and knn_cols:
+            from utils.imputation import impute_dfs_with_knn
+            logging.info("Spatial-KNN imputation for columns %s …", knn_cols)
+            dfs = impute_dfs_with_knn(dfs, knnimputer_path, knn_cols, freq=freq)
+
+        return dfs
 
     # Otherwise, use the existing dataset_name-based loading
     elif 'wind' in data_dir:
@@ -441,6 +472,10 @@ def _process_files(target_dir: str, preprocess_func, preprocess_kwargs: dict, fi
 
 def knn_imputer(data: pd.DataFrame,
                n_neighbors: int = 5):
+    # Fast exit when there are no missing values — avoids expensive KNN fit.
+    if not data.isnull().values.any():
+        return data
+
     # To help KNNImputer estimating the temporal saisonalities we add encoded temporal features.
     index = data.index
     if type(index) == pd.core.indexes.multi.MultiIndex:
@@ -802,12 +837,27 @@ def _process_csv_file(args):
     csv_file, distance, grid_lat, grid_lon, csv_path, config, i, turbines = args
 
     try:
-        # Load CSV file
-        df_grid = pd.read_csv(csv_path)
+        _nwp_lower = config['data'].get('train_start')
+        _nwp_upper = config['data'].get('data_cutoff') or config['data'].get('test_end')
+
+        if csv_path.endswith('.parquet'):
+            df_grid = pd.read_parquet(csv_path, engine='pyarrow')
+        else:
+            parquet_path = csv_path[:-4] + '.parquet'
+            if os.path.exists(parquet_path):
+                df_grid = pd.read_parquet(parquet_path, engine='pyarrow')
+            else:
+                df_grid = pd.read_csv(csv_path)
         df_grid.drop_duplicates(subset=['starttime', 'forecasttime', 'toplevel', 'bottomlevel'], keep='last', inplace=True)
 
-        # Convert timestamp
+        # Convert timestamp — must happen before date filtering
         df_grid['starttime'] = pd.to_datetime(df_grid['starttime'], utc=True)
+
+        # Date-range filter (applied after conversion since starttime is stored as string)
+        if _nwp_lower:
+            df_grid = df_grid[df_grid['starttime'] >= pd.Timestamp(_nwp_lower, tz='UTC') - pd.Timedelta(days=7)]
+        if _nwp_upper:
+            df_grid = df_grid[df_grid['starttime'] <= pd.Timestamp(_nwp_upper, tz='UTC')]
         df_grid['timestamp'] = df_grid['starttime'] + pd.to_timedelta(df_grid['forecasttime'], unit='h')
 
         # Calculate wind speed from u and v components
@@ -1105,7 +1155,7 @@ def _load_icon_d2_from_database(
 ) -> Tuple[pd.DataFrame, Any, float, float]:
     """
     Load ICON-D2 multilevel data from PostgreSQL database.
-    
+
     Args:
         station_lat: Station latitude
         station_lon: Station longitude
@@ -1115,7 +1165,7 @@ def _load_icon_d2_from_database(
         end_time: End timestamp (UTC)
         config: Configuration dictionary
         turbines: DataFrame with turbine specs
-    
+
     Returns:
         Tuple of (df_final, nearest_label, station_rel_lat, station_rel_lon)
     """
@@ -1126,31 +1176,31 @@ def _load_icon_d2_from_database(
         n_points=next_n_grid_points,
         method=get_method
     )
-    
+
     if not grid_points:
         raise ValueError(f"No grid points found near station ({station_lat}, {station_lon})")
-    
+
     logging.debug(f"Found {len(grid_points)} grid points via DB (method={get_method})")
-    
+
     # Extract height levels from requested features
     known_features = config['params'].get('known_features', [])
     observed_features = config['params'].get('observed_features', [])
     all_features = known_features + observed_features
-    
+
     # Parse height levels from feature names like 'wind_speed_h78', 'density_h127'
     height_levels = set()
     for feat in all_features:
         match = re.search(r'_h(\d+)', feat)
         if match:
             height_levels.add(int(match.group(1)))
-    
+
     if not height_levels:
         # Fallback: use common height levels
         height_levels = {10, 38, 78, 127, 184, 247}
         logging.warning(f"No height levels found in features, using defaults: {sorted(height_levels)}")
-    
+
     height_levels = sorted(list(height_levels))
-    
+
     # Determine which DB features to load.
     # qs is only needed when relative_humidity or density must be computed.
     need_humidity = (
@@ -1176,35 +1226,35 @@ def _load_icon_d2_from_database(
     except Exception as e:
         logging.error(f"Failed to load data from database: {e}")
         raise
-    
+
     if df_raw.empty:
         raise ValueError("Database query returned no data")
-    
+
     logging.debug(f"Loaded {len(df_raw)} rows from database")
-    
+
     # Process each grid point's data (similar to CSV processing)
     all_grid_dfs = []
-    
+
     for grid_lon, grid_lat, label in grid_points:
         # Select columns for this grid point (suffix matches label)
-        grid_cols = [col for col in df_raw.columns 
+        grid_cols = [col for col in df_raw.columns
                     if col.endswith(f'_{label}') or col in ['timestamp', 'starttime', 'forecasttime']]
-        
+
         if len(grid_cols) <= 3:  # Only metadata columns
             logging.warning(f"No data columns found for grid point label '{label}'")
             continue
-        
+
         df_grid = df_raw[grid_cols].copy()
-        
+
         # Calculate wind speed from u and v components
         for height in height_levels:
             u_col = f'u_wind_h{height}_{label}'
             v_col = f'v_wind_h{height}_{label}'
             ws_col = f'wind_speed_h{height}_{label}'
-            
+
             if u_col in df_grid.columns and v_col in df_grid.columns:
                 df_grid[ws_col] = np.sqrt(df_grid[u_col]**2 + df_grid[v_col]**2)
-        
+
         # Calculate relative humidity from specific humidity (qs), identical to CSV path.
         if need_humidity:
             for height in height_levels:
@@ -1241,13 +1291,13 @@ def _load_icon_d2_from_database(
                         relhum=df_grid[relhum_col],
                         sat_vap_ps=sat_vap_ps
                     )
-        
+
         all_grid_dfs.append(df_grid)
-    
+
     # Merge all grid points
     if not all_grid_dfs:
         raise ValueError("No grid point data could be processed")
-    
+
     df_final = all_grid_dfs[0]
     for df_grid in all_grid_dfs[1:]:
         df_final = df_final.merge(
@@ -1255,17 +1305,17 @@ def _load_icon_d2_from_database(
             on=['timestamp', 'starttime', 'forecasttime'],
             how='outer'
         )
-    
+
     # Calculate rotor-equivalent wind speed if requested
     if config['params'].get('aggregate_nwp_layers') == 'weighted_mean':
         for grid_lon, grid_lat, label in grid_points:
-            wind_cols = [col for col in df_final.columns 
+            wind_cols = [col for col in df_final.columns
                         if col.startswith('wind_speed_h') and col.endswith(f'_{label}')]
-            
+
             if wind_cols and len(turbines) > 0:
                 # Extract heights from column names
                 heights = sorted([int(re.search(r'_h(\d+)_', col).group(1)) for col in wind_cols])
-                
+
                 if len(heights) > 1:
                     midpoints = [(heights[j] + heights[j + 1]) / 2 for j in range(len(heights) - 1)]
                     layers = []
@@ -1273,24 +1323,24 @@ def _load_icon_d2_from_database(
                     for j in range(len(midpoints) - 1):
                         layers.append((midpoints[j], midpoints[j+1], heights[j+1]))
                     layers.append((midpoints[-1], np.inf, heights[-1]))
-                    
+
                     area_weights = get_A_weights(turbines, layers)
                     weighted_speed_cubed = pd.Series(0.0, index=df_final.index)
-                    
+
                     for j, (lower, upper, level) in enumerate(layers):
                         wind_col = f'wind_speed_h{level}_{label}'
                         if wind_col in df_final.columns and area_weights[j] > 0:
                             weighted_speed_cubed += area_weights[j] * (df_final[wind_col] ** 3)
-                    
+
                     df_final[f'wind_speed_rotor_eq_{label}'] = weighted_speed_cubed ** (1/3)
-            
+
             # Same for density
-            density_cols = [col for col in df_final.columns 
+            density_cols = [col for col in df_final.columns
                            if col.startswith('density_h') and col.endswith(f'_{label}')]
-            
+
             if density_cols and len(turbines) > 0:
                 heights = sorted([int(re.search(r'_h(\d+)_', col).group(1)) for col in density_cols])
-                
+
                 if len(heights) > 1:
                     midpoints = [(heights[j] + heights[j + 1]) / 2 for j in range(len(heights) - 1)]
                     layers = []
@@ -1298,39 +1348,39 @@ def _load_icon_d2_from_database(
                     for j in range(len(midpoints) - 1):
                         layers.append((midpoints[j], midpoints[j+1], heights[j+1]))
                     layers.append((midpoints[-1], np.inf, heights[-1]))
-                    
+
                     area_weights = get_A_weights(turbines, layers)
                     weighted_density = pd.Series(0.0, index=df_final.index)
-                    
+
                     for j, (lower, upper, level) in enumerate(layers):
                         dens_col = f'density_h{level}_{label}'
                         if dens_col in df_final.columns and area_weights[j] > 0:
                             weighted_density += area_weights[j] * df_final[dens_col]
-                    
+
                     df_final[f'density_rotor_eq_{label}'] = weighted_density
-    
+
     # Determine nearest label and relative position
     nearest_label = grid_points[0][2]  # First point is always nearest
     station_rel_lat = None
     station_rel_lon = None
-    
+
     if get_method == 'relative_position' and len(grid_points) > 0:
         # Calculate normalized relative position
         lats = [lat for _, lat, _ in grid_points]
         lons = [lon for lon, _, _ in grid_points]
-        
+
         if len(lats) > 1:
             lat_range = max(lats) - min(lats)
             lon_range = max(lons) - min(lons)
-            
+
             if lat_range > 0:
                 station_rel_lat = (station_lat - min(lats)) / lat_range
             if lon_range > 0:
                 station_rel_lon = (station_lon - min(lons)) / lon_range
-    
+
     # Sort by timestamp
     df_final = df_final.sort_values('timestamp').reset_index(drop=True)
-    
+
     return df_final, nearest_label, station_rel_lat, station_rel_lon
 
 
@@ -1348,15 +1398,18 @@ def _process_forecast_hour(args):
             logging.warning(f"Icon-D2 data path not found: {icon_d2_base_path}")
             return None, forecast_hour
 
-        # Get all CSV files for this station
-        csv_files = [f for f in os.listdir(icon_d2_base_path) if f.endswith('_ML.csv')]
+        # Collect NWP grid files: parquet preferred, fall back to CSV for each grid point
+        _parquet_files = {f for f in os.listdir(icon_d2_base_path) if f.endswith('_ML.parquet')}
+        _csv_files     = [f for f in os.listdir(icon_d2_base_path) if f.endswith('_ML.csv')
+                          and f[:-4] + '.parquet' not in _parquet_files]
+        csv_files = list(_parquet_files) + _csv_files
 
         # Parse coordinates from filenames. Geodesic distance computation is deferred to
         # after grid point selection so that it is only called for the N selected files,
         # not for every file in the directory (which can be 50+ for a single station).
         file_coords = []  # (csv_file, grid_lat, grid_lon)
         for csv_file in csv_files:
-            parts = csv_file.replace('_ML.csv', '').split('_')
+            parts = csv_file.replace('_ML.parquet', '').replace('_ML.csv', '').split('_')
             if len(parts) >= 4:
                 try:
                     grid_lat = float(f"{parts[0]}.{parts[1]}")
@@ -1440,7 +1493,6 @@ def _process_forecast_hour(args):
                 result = future.result()
                 if result[0] is not None:
                     dfs_list.append((result[0], result[1]))  # (dataframe, index)
-
         # Sort by index to maintain order
         dfs_list.sort(key=lambda x: x[1])
         dfs_list = [df for df, _ in dfs_list]
@@ -1688,6 +1740,117 @@ def _fetch_ecmwf_data(station_lat: float,
     return df
 
 
+def _parse_ecmwf_sl_filename(fname: str) -> tuple[float, float] | None:
+    """
+    Parse ECMWF split filename '<lat_int>_<lat_frac>_<lon_int>_<lon_frac>_wind_sl.parquet'
+    (or legacy '_SL.parquet') into (lat, lon).
+    """
+    m = re.match(r"^(-?\d+)_([0-9]+)_(-?\d+)_([0-9]+)_(?:wind_sl|SL)\.parquet$", fname)
+    if not m:
+        return None
+    lat_i, lat_f, lon_i, lon_f = m.groups()
+    try:
+        lat = float(f"{lat_i}.{lat_f}")
+        lon = float(f"{lon_i}.{lon_f}")
+    except ValueError:
+        return None
+    return lat, lon
+
+
+@lru_cache(maxsize=8)
+def _list_ecmwf_split_files(split_dir: str) -> list[tuple[float, float, str]]:
+    """
+    Return [(grid_lat, grid_lon, file_path), ...] for all split ECMWF files.
+    """
+    out: list[tuple[float, float, str]] = []
+    for p in Path(split_dir).glob("*_wind_sl.parquet"):
+        coords = _parse_ecmwf_sl_filename(p.name)
+        if coords is None:
+            continue
+        out.append((coords[0], coords[1], str(p)))
+    for p in Path(split_dir).glob("*_SL.parquet"):
+        coords = _parse_ecmwf_sl_filename(p.name)
+        if coords is None:
+            continue
+        out.append((coords[0], coords[1], str(p)))
+    return out
+
+
+def _fetch_ecmwf_data_from_split_parquets(
+    station_lat: float,
+    station_lon: float,
+    next_n_grid_points: int,
+    parquet_path: str,
+    raw_columns: list[str],
+    starttime_min: pd.Timestamp = None,
+    starttime_max: pd.Timestamp = None,
+) -> pd.DataFrame:
+    """
+    Fetch ECMWF data from per-gridpoint SL parquet files for the nearest grids.
+
+    Returns DataFrame compatible with `_fetch_ecmwf_data`:
+    starttime, forecasttime, rank, <raw_columns>, _st_key
+    """
+    base = Path(parquet_path)
+    split_dir = base / "SL" if base.is_dir() and (base / "SL").is_dir() else base
+    if not split_dir.exists() or not split_dir.is_dir():
+        raise FileNotFoundError(f"ECMWF split parquet directory not found: {split_dir}")
+
+    files = _list_ecmwf_split_files(str(split_dir))
+    if not files:
+        raise FileNotFoundError(f"No '*_SL.parquet' files found in {split_dir}")
+
+    # Select nearest k split files by geodesic distance
+    file_dist = [
+        (fpath, geodesic((station_lat, station_lon), (glat, glon)).kilometers, glat, glon)
+        for glat, glon, fpath in files
+    ]
+    file_dist.sort(key=lambda x: x[1])
+    nearest = file_dist[:next_n_grid_points]
+    if not nearest:
+        return pd.DataFrame()
+
+    # Normalize requested raw columns to parquet naming style
+    requested_cols = [re.sub(r"_(\d+m)$", r"\1", c) for c in raw_columns]
+
+    frames = []
+    for rank, (fpath, _dist, _lat, _lon) in enumerate(nearest, start=1):
+        df = pd.read_parquet(fpath)
+        if df.empty:
+            continue
+        if "starttime" not in df.columns or "forecasttime" not in df.columns:
+            logging.warning(f"ECMWF split file missing starttime/forecasttime: {fpath}")
+            continue
+
+        df["starttime"] = pd.to_datetime(df["starttime"], utc=True)
+        if starttime_min is not None and starttime_max is not None:
+            df = df[(df["starttime"] >= starttime_min) & (df["starttime"] <= starttime_max)]
+            if df.empty:
+                continue
+
+        keep_cols = ["starttime", "forecasttime"] + [c for c in requested_cols if c in df.columns]
+        missing = [c for c in requested_cols if c not in df.columns]
+        if missing:
+            logging.warning(
+                "ECMWF split file %s missing requested columns: %s",
+                fpath, missing
+            )
+        df = df[keep_cols].copy()
+        df["forecasttime"] = df["forecasttime"].astype(int)
+        df["rank"] = int(rank)
+        df["_st_key"] = (
+            df["starttime"].dt.year * 1000000
+            + df["starttime"].dt.month * 10000
+            + df["starttime"].dt.day * 100
+            + df["starttime"].dt.hour
+        ).astype(np.int64)
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def preprocess_synth_wind_icond2(path: str,
                           config: dict,
                           freq: str = '1H',
@@ -1718,15 +1881,42 @@ def preprocess_synth_wind_icond2(path: str,
         station_id = filename_no_ext
 
     # Load synthetic wind data and turbine parameters (analog zu openmeteo)
-    synth_path = os.path.join(config['data']['path'], f'synth_{station_id}.csv')
     wind_parameter_path = os.path.join(config['data']['path'], 'wind_parameter.csv')
     turbine_parameter_path = os.path.join(config['data']['path'], 'turbine_parameter.csv')
     power_curves_path = os.path.join(config['data']['power_curves_path'], 'turbine_power.csv')
 
-    # Load synthetic wind data and parameters
-    df_synth = pd.read_csv(synth_path, sep=';')
-    df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
-    df_synth.set_index('timestamp', inplace=True)
+    # Build date-range filters to avoid loading the full history.
+    # Add a 7-day safety margin before train_start so the first sequences
+    # have enough lookback rows after sequence creation.
+    _pq_filters = []
+    _lower_str = config['data'].get('train_start')
+    _upper_str = config['data'].get('data_cutoff') or config['data'].get('test_end')
+    if _lower_str:
+        _lower_ts = pd.Timestamp(_lower_str, tz='UTC') - pd.Timedelta(days=7)
+        _pq_filters.append(('timestamp', '>=', _lower_ts))
+    if _upper_str:
+        _pq_filters.append(('timestamp', '<=', pd.Timestamp(_upper_str, tz='UTC')))
+
+    # Load synthetic wind data — prefer parquet, fall back to CSV
+    _synth_parquet = os.path.join(config['data']['path'], f'synth_{station_id}.parquet')
+    _synth_csv     = os.path.join(config['data']['path'], f'synth_{station_id}.csv')
+    if os.path.exists(_synth_parquet):
+        df_synth = pd.read_parquet(_synth_parquet, engine='pyarrow')
+        if 'timestamp' in df_synth.columns:
+            df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
+            df_synth.set_index('timestamp', inplace=True)
+        else:
+            df_synth.index = pd.to_datetime(df_synth.index, utc=True)
+    else:
+        df_synth = pd.read_csv(_synth_csv, sep=';')
+        df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
+        df_synth.set_index('timestamp', inplace=True)
+
+    # Date-range filter applied after index conversion (timestamp stored as string in parquet)
+    if _lower_str:
+        df_synth = df_synth[df_synth.index >= _lower_ts]
+    if _upper_str:
+        df_synth = df_synth[df_synth.index <= pd.Timestamp(_upper_str, tz='UTC')]
 
     wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
     turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
@@ -1836,16 +2026,16 @@ def preprocess_synth_wind_icond2(path: str,
     get_method = config['params'].get('get_next_grid_points_method', 'geodesic_next')
     icond2_source = config['data'].get('icond2_source', 'csv')
     rel_features = list(set(features['known'] + features['observed'])) if features else []
-    
+
     # Check if we should use database or CSV
     if icond2_source == 'database':
         logging.debug(f"Loading ICON-D2 data from database for station {station_id}")
-        
+
         # Determine time range for DB query
         # Use full synthetic data range
         start_time = df_synth.index.min()
         end_time = df_synth.index.max()
-        
+
         # Load from database - will raise exception if it fails
         df_final, _nearest_label, _station_rel_lat, _station_rel_lon = _load_icon_d2_from_database(
             station_lat=station_lat,
@@ -1857,20 +2047,20 @@ def preprocess_synth_wind_icond2(path: str,
             config=config,
             turbines=turbines
         )
-        
+
         # Store relative position features if available
         if _station_rel_lat is not None:
             static_data['station_rel_lat'] = _station_rel_lat
             static_data['station_rel_lon'] = _station_rel_lon
-        
+
         logging.info(f"Successfully loaded {len(df_final)} rows from database")
-    
+
     elif icond2_source == 'csv':
         # Original CSV-based loading
         logging.debug(f"Loading ICON-D2 data from CSV for station {station_id}")
-        
-        forecast_hours = ['06', '09', '12', '15']  # Available forecast hours
-        
+
+        forecast_hours = config['data'].get('forecast_hours', ['06', '09', '12', '15'])
+
         # Prepare arguments for parallel forecast hour processing
         forecast_args = []
         for forecast_hour in forecast_hours:
@@ -1916,7 +2106,7 @@ def preprocess_synth_wind_icond2(path: str,
 
         # Combine all forecast hours - keep all columns including starttime, forecasttime
         df_final = pd.concat(all_forecast_dfs, ignore_index=False)
-    
+
     else:
         raise ValueError(f"Invalid icond2_source: '{icond2_source}'. Must be 'database' or 'csv'.")
 
@@ -1962,14 +2152,22 @@ def preprocess_synth_wind_icond2(path: str,
 
         for _rank, (_, _neighbor_row) in enumerate(_nearest.iterrows(), start=1):
             _neighbor_id = str(_neighbor_row['park_id'])
-            _neighbor_synth_path = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.csv')
-            if not os.path.exists(_neighbor_synth_path):
+            _neighbor_parquet = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.parquet')
+            _neighbor_csv     = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.csv')
+            if os.path.exists(_neighbor_parquet):
+                _df_neighbor = pd.read_parquet(_neighbor_parquet, engine='pyarrow')
+                if 'timestamp' in _df_neighbor.columns:
+                    _df_neighbor['timestamp'] = pd.to_datetime(_df_neighbor['timestamp'], utc=True)
+                    _df_neighbor.set_index('timestamp', inplace=True)
+                else:
+                    _df_neighbor.index = pd.to_datetime(_df_neighbor.index, utc=True)
+            elif os.path.exists(_neighbor_csv):
+                _df_neighbor = pd.read_csv(_neighbor_csv, sep=';')
+                _df_neighbor['timestamp'] = pd.to_datetime(_df_neighbor['timestamp'], utc=True)
+                _df_neighbor.set_index('timestamp', inplace=True)
+            else:
                 logging.warning(f"next_n_stations: synth file for neighbor {_neighbor_id} not found, skipping.")
                 continue
-
-            _df_neighbor = pd.read_csv(_neighbor_synth_path, sep=';')
-            _df_neighbor['timestamp'] = pd.to_datetime(_df_neighbor['timestamp'], utc=True)
-            _df_neighbor.set_index('timestamp', inplace=True)
 
             for _base_feat in _base_next_features:
                 _col_name = f'{_base_feat}_next_{_rank}'
@@ -1994,128 +2192,159 @@ def preprocess_synth_wind_icond2(path: str,
     ] if features else []
 
     if 'ecmwf' in _nwp_models and _ecmwf_features_cfg and _ecmwf_known_feats:
-        _db_url = os.environ.get('ECMWF_WIND_SL_URL')
-        if not _db_url:
-            logging.warning(
-                f"Station {station_id}: ECMWF_WIND_SL_URL not set — skipping ECMWF data. "
-                "Export the variable before running (e.g. export ECMWF_WIND_SL_URL=postgresql://...)."
+        # Determine date range from the already-loaded ICON-D2 data
+        _icon_starttimes = pd.to_datetime(df_merged['starttime'], utc=True)
+        _ecmwf_ts_min = _icon_starttimes.min().normalize()
+        _ecmwf_ts_max_data = _icon_starttimes.max().normalize() + pd.Timedelta(hours=13)
+        _test_end = config['data'].get('test_end')
+        if _test_end:
+            # +12h so the noon ECMWF run on test_end is included
+            _ecmwf_ts_max = min(
+                _ecmwf_ts_max_data,
+                pd.Timestamp(_test_end, tz='UTC') + pd.Timedelta(hours=12)
             )
         else:
-            # Determine date range from the already-loaded ICON-D2 data
-            _icon_starttimes = pd.to_datetime(df_merged['starttime'], utc=True)
-            _ecmwf_ts_min = _icon_starttimes.min().normalize()
-            _ecmwf_ts_max_data = _icon_starttimes.max().normalize() + pd.Timedelta(hours=13)
-            _test_end = config['data'].get('test_end')
-            if _test_end:
-                # +12h so the noon ECMWF run on test_end is included
-                _ecmwf_ts_max = min(
-                    _ecmwf_ts_max_data,
-                    pd.Timestamp(_test_end, tz='UTC') + pd.Timedelta(hours=12)
-                )
-            else:
-                _ecmwf_ts_max = _ecmwf_ts_max_data
+            _ecmwf_ts_max = _ecmwf_ts_max_data
 
+        _next_n_grid_ecmwf = config['params'].get('next_n_grid_ecmwf', next_n_grid_points)
+        _ecmwf_path = config.get('data', {}).get('ecmwf_path')
+        _df_ecmwf = pd.DataFrame()
+
+        # Preferred source: split ECMWF parquet files in <ecmwf_path>/SL (or directly in ecmwf_path).
+        if _ecmwf_path:
             try:
-                _next_n_grid_ecmwf = config['params'].get('next_n_grid_ecmwf', next_n_grid_points)
-                _df_ecmwf = _fetch_ecmwf_data(
+                _df_ecmwf = _fetch_ecmwf_data_from_split_parquets(
                     station_lat=station_lat,
                     station_lon=station_lon,
                     next_n_grid_points=_next_n_grid_ecmwf,
-                    db_url=_db_url,
+                    parquet_path=_ecmwf_path,
                     raw_columns=_ecmwf_features_cfg,
                     starttime_min=_ecmwf_ts_min,
                     starttime_max=_ecmwf_ts_max,
                 )
+                if not _df_ecmwf.empty:
+                    logging.debug(
+                        f"Station {station_id}: loaded ECMWF from split parquet files ({_ecmwf_path})."
+                    )
             except Exception as _ecmwf_exc:
-                logging.error(f"Station {station_id}: ECMWF fetch failed — {_ecmwf_exc}")
-                _df_ecmwf = pd.DataFrame()
-
-            if _df_ecmwf.empty:
-                logging.warning(f"Station {station_id}: ECMWF query returned no data.")
-            else:
-                # For each ICON-D2 row, compute the corresponding ECMWF (starttime, forecasttime):
-                #   ECMWF runs at 00:00 and 12:00 UTC.
-                #   Use the most recent ECMWF run <= icon starttime.
-                #   valid_time = icon_starttime + icon_forecasttime  →  ecmwf_forecasttime = valid_time - ecmwf_starttime
-                _icon_st = pd.to_datetime(df_merged['starttime'], utc=True)
-                _ecmwf_run_hour = np.where(_icon_st.dt.hour >= 12, 12, 0)
-                _ecmwf_starttime = _icon_st.dt.normalize() + pd.to_timedelta(_ecmwf_run_hour, unit='h')
-                # Ensure UTC timezone is preserved after arithmetic (guards against tz stripping)
-                if _ecmwf_starttime.dt.tz is None:
-                    _ecmwf_starttime = _ecmwf_starttime.dt.tz_localize('UTC')
-                _valid_time = _icon_st + pd.to_timedelta(df_merged['forecasttime'], unit='h')
-                _ecmwf_forecasttime = (
-                    (_valid_time - _ecmwf_starttime).dt.total_seconds() / 3600
-                ).astype(int)
-
-                df_merged = df_merged.copy()
-                # Use integer YYYYMMDDHH key instead of timestamp to avoid dtype mismatches
-                # between datetime64[ns, UTC] (CSV) and datetime64[us, UTC] (DB via SQLAlchemy)
-                df_merged['_ecmwf_st_key'] = (
-                    _ecmwf_starttime.dt.year * 1000000
-                    + _ecmwf_starttime.dt.month * 10000
-                    + _ecmwf_starttime.dt.day * 100
-                    + _ecmwf_starttime.dt.hour
-                ).astype(np.int64)
-                df_merged['_ecmwf_ft'] = _ecmwf_forecasttime
-
-                # Precompute test_end boundary for warning filter (rows beyond test_end are expected to have no match)
-                _test_end_ts = (
-                    pd.Timestamp(_test_end, tz='UTC') if _test_end else None
+                logging.warning(
+                    f"Station {station_id}: split-parquet ECMWF load failed ({_ecmwf_path}) — {_ecmwf_exc}. "
+                    "Falling back to database if available."
                 )
 
-                for _rank in sorted(_df_ecmwf['rank'].unique()):
-                    _df_rank = _df_ecmwf[_df_ecmwf['rank'] == _rank][
-                        ['_st_key', 'forecasttime'] + _ecmwf_features_cfg
-                    ].copy()
-                    _df_rank = _df_rank.rename(columns={
-                        '_st_key': '_ecmwf_st_key',
-                        'forecasttime': '_ecmwf_ft',
-                    })
+        # Fallback source: database
+        if _df_ecmwf.empty:
+            _db_url = os.environ.get('ECMWF_WIND_SL_URL')
+            if not _db_url:
+                logging.warning(
+                    f"Station {station_id}: no split ECMWF parquet data and ECMWF_WIND_SL_URL not set — "
+                    "skipping ECMWF data."
+                )
+            else:
+                try:
+                    _df_ecmwf = _fetch_ecmwf_data(
+                        station_lat=station_lat,
+                        station_lon=station_lon,
+                        next_n_grid_points=_next_n_grid_ecmwf,
+                        db_url=_db_url,
+                        raw_columns=_ecmwf_features_cfg,
+                        starttime_min=_ecmwf_ts_min,
+                        starttime_max=_ecmwf_ts_max,
+                    )
+                except Exception as _ecmwf_exc:
+                    logging.error(f"Station {station_id}: ECMWF database fetch failed — {_ecmwf_exc}")
+                    _df_ecmwf = pd.DataFrame()
 
-                    # Compute/rename output features based on known_features entries starting with 'ecmwf_'
-                    for _out_feat in _ecmwf_known_feats:
-                        _raw_name = _out_feat[len('ecmwf_'):]  # strip 'ecmwf_' prefix
-                        if _out_feat == 'ecmwf_wind_speed_h10':
-                            if 'u_wind10m' in _df_rank.columns and 'v_wind10m' in _df_rank.columns:
-                                _df_rank[f'ecmwf_wind_speed_h10_{_rank}'] = np.sqrt(
-                                    _df_rank['u_wind10m'] ** 2 + _df_rank['v_wind10m'] ** 2
-                                )
-                            else:
-                                logging.warning(
-                                    f"Station {station_id}: 'ecmwf_wind_speed_h10' requires "
-                                    "'u_wind10m' and 'v_wind10m' in ecmwf_features — skipping."
-                                )
-                        elif _raw_name in _df_rank.columns:
-                            _df_rank[f'{_out_feat}_{_rank}'] = _df_rank[_raw_name]
+        if _df_ecmwf.empty:
+            logging.warning(f"Station {station_id}: ECMWF query returned no data.")
+        else:
+            # For each ICON-D2 row, compute the corresponding ECMWF (starttime, forecasttime):
+            #   ECMWF runs at 00:00 and 12:00 UTC.
+            #   Use the most recent ECMWF run <= icon starttime.
+            #   valid_time = icon_starttime + icon_forecasttime  →  ecmwf_forecasttime = valid_time - ecmwf_starttime
+            _icon_st = pd.to_datetime(df_merged['starttime'], utc=True)
+            _ecmwf_run_hour = np.where(_icon_st.dt.hour >= 12, 12, 0)
+            _ecmwf_starttime = _icon_st.dt.normalize() + pd.to_timedelta(_ecmwf_run_hour, unit='h')
+            # Ensure UTC timezone is preserved after arithmetic (guards against tz stripping)
+            if _ecmwf_starttime.dt.tz is None:
+                _ecmwf_starttime = _ecmwf_starttime.dt.tz_localize('UTC')
+            _valid_time = _icon_st + pd.to_timedelta(df_merged['forecasttime'], unit='h')
+            _ecmwf_forecasttime = (
+                (_valid_time - _ecmwf_starttime).dt.total_seconds() / 3600
+            ).astype(int)
+
+            df_merged = df_merged.copy()
+            # Use integer YYYYMMDDHH key instead of timestamp to avoid dtype mismatches
+            # between datetime64[ns, UTC] (CSV) and datetime64[us, UTC] (DB via SQLAlchemy)
+            df_merged['_ecmwf_st_key'] = (
+                _ecmwf_starttime.dt.year * 1000000
+                + _ecmwf_starttime.dt.month * 10000
+                + _ecmwf_starttime.dt.day * 100
+                + _ecmwf_starttime.dt.hour
+            ).astype(np.int64)
+            df_merged['_ecmwf_ft'] = _ecmwf_forecasttime
+
+            # Precompute test_end boundary for warning filter (rows beyond test_end are expected to have no match)
+            _test_end_ts = (
+                pd.Timestamp(_test_end, tz='UTC') if _test_end else None
+            )
+
+            for _rank in sorted(_df_ecmwf['rank'].unique()):
+                _df_rank = _df_ecmwf[_df_ecmwf['rank'] == _rank][
+                    ['_st_key', 'forecasttime'] + _ecmwf_features_cfg
+                ].copy()
+                _df_rank = _df_rank.rename(columns={
+                    '_st_key': '_ecmwf_st_key',
+                    'forecasttime': '_ecmwf_ft',
+                })
+
+                # Compute/rename output features based on known_features entries starting with 'ecmwf_'
+                for _out_feat in _ecmwf_known_feats:
+                    _raw_name = _out_feat[len('ecmwf_'):]  # strip 'ecmwf_' prefix
+                    _ws_match = re.match(r'^wind_speed_h(\d+)$', _raw_name)
+                    if _ws_match:
+                        # ecmwf_wind_speed_hNNN → compute magnitude from u_windNNNm / v_windNNNm
+                        _h = _ws_match.group(1)
+                        _u_col, _v_col = f'u_wind{_h}m', f'v_wind{_h}m'
+                        if _u_col in _df_rank.columns and _v_col in _df_rank.columns:
+                            _df_rank[f'{_out_feat}_{_rank}'] = np.sqrt(
+                                _df_rank[_u_col] ** 2 + _df_rank[_v_col] ** 2
+                            )
                         else:
                             logging.warning(
-                                f"Station {station_id}: ECMWF column '{_raw_name}' not fetched "
-                                f"(not in ecmwf_features) — skipping '{_out_feat}'."
+                                f"Station {station_id}: '{_out_feat}' requires "
+                                f"'{_u_col}' and '{_v_col}' in ecmwf_features — skipping."
                             )
-
-                    _ecmwf_out_cols = [
-                        c for c in _df_rank.columns
-                        if c not in ('_ecmwf_st_key', '_ecmwf_ft') and c not in _ecmwf_features_cfg
-                    ]
-                    _df_rank = _df_rank[['_ecmwf_st_key', '_ecmwf_ft'] + _ecmwf_out_cols].drop_duplicates(
-                        subset=['_ecmwf_st_key', '_ecmwf_ft']
-                    )
-
-                    df_merged = df_merged.merge(
-                        _df_rank, on=['_ecmwf_st_key', '_ecmwf_ft'], how='left'
-                    )
-                    _missing_mask = df_merged[[c for c in _ecmwf_out_cols if c in df_merged.columns]].isna().any(axis=1)
-                    if _test_end_ts is not None:
-                        # Only warn for rows within test_end — rows beyond it have no ECMWF data by design
-                        _missing_mask = _missing_mask & (df_merged['starttime'] <= _test_end_ts)
-                    _missing = _missing_mask.sum()
-                    if _missing > 0:
+                    elif _raw_name in _df_rank.columns:
+                        _df_rank[f'{_out_feat}_{_rank}'] = _df_rank[_raw_name]
+                    else:
                         logging.warning(
-                            f"Station {station_id}: {_missing} rows within test_end have no ECMWF match for rank {_rank}."
+                            f"Station {station_id}: ECMWF column '{_raw_name}' not fetched "
+                            f"(not in ecmwf_features) — skipping '{_out_feat}'."
                         )
 
-                df_merged.drop(columns=['_ecmwf_st_key', '_ecmwf_ft'], inplace=True)
+                _ecmwf_out_cols = [
+                    c for c in _df_rank.columns
+                    if c not in ('_ecmwf_st_key', '_ecmwf_ft') and c not in _ecmwf_features_cfg
+                ]
+                _df_rank = _df_rank[['_ecmwf_st_key', '_ecmwf_ft'] + _ecmwf_out_cols].drop_duplicates(
+                    subset=['_ecmwf_st_key', '_ecmwf_ft']
+                )
+
+                df_merged = df_merged.merge(
+                    _df_rank, on=['_ecmwf_st_key', '_ecmwf_ft'], how='left'
+                )
+                _missing_mask = df_merged[[c for c in _ecmwf_out_cols if c in df_merged.columns]].isna().any(axis=1)
+                if _test_end_ts is not None:
+                    # Only warn for rows within test_end — rows beyond it have no ECMWF data by design
+                    _missing_mask = _missing_mask & (df_merged['starttime'] <= _test_end_ts)
+                _missing = _missing_mask.sum()
+                if _missing > 0:
+                    logging.warning(
+                        f"Station {station_id}: {_missing} rows within test_end have no ECMWF match for rank {_rank}."
+                    )
+
+            df_merged.drop(columns=['_ecmwf_st_key', '_ecmwf_ft'], inplace=True)
 
     # 4. Set MultiIndex strictly: ['starttime', 'forecasttime', 'timestamp']
     if 'starttime' in df_merged.columns and 'forecasttime' in df_merged.columns and 'timestamp' in df_merged.columns:
@@ -2320,6 +2549,19 @@ def preprocess_synth_wind_icond2(path: str,
 
     # Final cleanup
     df_merged.dropna(inplace=True)
+
+    # Re-filter to complete forecast runs only. Runs at the boundary of the test period
+    # lose rows after dropna() (NWP valid-times beyond test_end have no target) → skip them.
+    if 'starttime' in df_merged.columns:
+        _run_counts = df_merged.groupby('starttime').size()
+        if len(_run_counts) > 0:
+            _expected_run_len = int(_run_counts.value_counts().idxmax())
+            _valid_starts = _run_counts[_run_counts == _expected_run_len].index
+            _n_dropped = (len(_run_counts) - len(_valid_starts))
+            if _n_dropped > 0:
+                logging.debug(f"Station {station_id}: dropping {_n_dropped} incomplete boundary runs "
+                              f"(expected {_expected_run_len} steps each)")
+            df_merged = df_merged[df_merged['starttime'].isin(_valid_starts)].copy()
 
     # Ensure index is sorted (should already be, but safe is safe)
     df_merged.sort_index(inplace=True)
@@ -2596,6 +2838,600 @@ def preprocess_synth_wind_openmeteo(path: str,
     else:
         logging.debug(f"Time series already starts at valid hour {first_hour} (divisible by 3)")
     return df
+
+
+def _find_park_file(data_path: str, park_id: str, prefer_format: str = 'parquet') -> str:
+    """
+    Find park data file (CSV or Parquet) in directory.
+
+    Args:
+        data_path: Directory containing park files
+        park_id: Park identifier (e.g., 'Park_001')
+        prefer_format: Preferred format ('parquet' or 'csv')
+
+    Returns:
+        Path to the file (parquet if exists, else csv)
+
+    Raises:
+        FileNotFoundError: If neither parquet nor csv file found
+    """
+    import os
+
+    # Umlaut → ASCII fallback (e.g. höheinöd → hoeheinoed)
+    _umlaut_map = str.maketrans({'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss',
+                                  'Ä': 'Ae', 'Ö': 'Oe', 'Ü': 'Ue'})
+    park_id_ascii = park_id.translate(_umlaut_map)
+
+    for pid in ([park_id] if park_id == park_id_ascii else [park_id, park_id_ascii]):
+        for ext in ('.parquet', '.csv'):
+            p = os.path.join(data_path, f'{pid}{ext}')
+            if os.path.exists(p):
+                return p
+
+    raise FileNotFoundError(f"Park file not found for {park_id} in {data_path}")
+
+
+def _read_park_data_smart(file_path: str, usecols: list = None, nrows: int = None) -> pd.DataFrame:
+    """
+    Read park data from CSV or Parquet with smart format detection.
+    Auto-converts CSV→Parquet on first read for speed (optional).
+
+    Args:
+        file_path: Path to CSV or Parquet file
+        usecols: List of columns to load (faster with parquet, ignored for csv header reads)
+        nrows: Number of rows to read
+
+    Returns:
+        DataFrame with loaded data
+    """
+    if file_path.endswith('.parquet'):
+        # Fast path: read parquet directly
+        return pd.read_parquet(file_path, columns=usecols)
+    elif file_path.endswith('.csv'):
+        # CSV read — slower, but backwards compatible
+        return pd.read_csv(file_path, sep=';', usecols=usecols, nrows=nrows)
+    else:
+        raise ValueError(f"Unknown file format: {file_path}")
+
+
+def _ensure_parquet_exists(csv_file_path: str, force: bool = False) -> str:
+    """
+    Ensure a parquet file exists for a CSV file.
+    If parquet doesn't exist or force=True, converts CSV→Parquet.
+    Returns path to parquet file.
+
+    Args:
+        csv_file_path: Path to .csv file
+        force: If True, always re-convert (even if parquet exists)
+
+    Returns:
+        Path to .parquet file
+    """
+    if not csv_file_path.endswith('.csv'):
+        return csv_file_path  # Already not CSV
+
+    parquet_path = csv_file_path.replace('.csv', '.parquet')
+
+    if os.path.exists(parquet_path) and not force:
+        return parquet_path  # Parquet already exists
+
+    # Convert CSV → Parquet
+    logging.debug(f"[Parquet] Converting {os.path.basename(csv_file_path)} → parquet...")
+    df = pd.read_csv(csv_file_path, sep=';')
+    df.to_parquet(parquet_path, engine='pyarrow', compression='snappy')
+    logging.debug(f"[Parquet] ✓ {os.path.basename(parquet_path)} created")
+
+    return parquet_path
+    """Find a data file for a park ID (parquet or CSV), tolerating umlaut variants in filenames.
+
+    E.g. park_id='höheinöd' matches filename 'hoeheinöd.parquet' or 'hoeheinöd.csv'.
+
+    Args:
+        data_path: Directory containing park data files
+        park_id: Park identifier
+        prefer_format: 'parquet' (default, faster) or 'csv' (fallback)
+
+    Returns:
+        Path to found file (parquet preferred, csv fallback)
+
+    Raises:
+        FileNotFoundError: If neither parquet nor csv found
+    """
+    def _norm(s: str) -> str:
+        return s.lower().replace('ö', 'oe').replace('ü', 'ue').replace('ä', 'ae')
+
+    park_norm = _norm(park_id)
+    formats = ['parquet', 'csv'] if prefer_format == 'parquet' else ['csv', 'parquet']
+
+    for ext in formats:
+        # Try direct match first
+        direct = os.path.join(data_path, f'{park_id}.{ext}')
+        if os.path.exists(direct):
+            return direct
+
+        # Try with umlaut normalization
+        for fname in os.listdir(data_path):
+            if fname.endswith(f'.{ext}') and _norm(fname[:-len(ext)-1]) == park_norm:
+                return os.path.join(data_path, fname)
+
+    raise FileNotFoundError(f"No parquet or CSV file found for park '{park_id}' in '{data_path}'")
+
+
+def _load_ecmwf_for_park(park_id: str, config: dict) -> pd.DataFrame | None:
+    """
+    Load ECMWF single-level forecast data for one park.
+
+    Reads both 00 UTC and 12 UTC runs from
+        {ecmwf_path}/00/<park>.parquet  and  {ecmwf_path}/12/<park>.parquet
+    then computes wind speed magnitudes from u/v components.
+
+    Returns a DataFrame indexed by validtime (= starttime + forecasttime) containing
+    the feature columns listed in config['data']['ecmwf_features'].
+    When multiple ECMWF runs cover the same validtime, the one with the shortest
+    forecasttime (= most recently issued run) is kept.
+
+    Returns None when ecmwf_path is not configured or no file is found.
+    """
+    ecmwf_base = config['data'].get('ecmwf_path')
+    if not ecmwf_base:
+        return None
+
+    _umlaut_map = str.maketrans({'ä': 'ae', 'ö': 'oe', 'ü': 'ue', 'ß': 'ss',
+                                  'Ä': 'Ae', 'Ö': 'Oe', 'Ü': 'Ue'})
+    park_ascii = park_id.translate(_umlaut_map)
+
+    run_dfs = []
+    for run_hour in ['00', '12']:
+        candidates = ([park_id] if park_id == park_ascii else [park_id, park_ascii])
+        for pid in candidates:
+            fpath = os.path.join(ecmwf_base, run_hour, f'{pid}.parquet')
+            if os.path.exists(fpath):
+                run_dfs.append(pd.read_parquet(fpath))
+                break
+
+    if not run_dfs:
+        logging.warning(f'No ECMWF data found for park "{park_id}" in {ecmwf_base}')
+        return None
+
+    df = pd.concat(run_dfs, ignore_index=True)
+    df['starttime'] = pd.to_datetime(df['starttime'], utc=True)
+
+    # Data is complete only through 2024-06-30; later rows may be partial.
+    cutoff = pd.Timestamp('2024-07-01', tz='UTC')
+    df = df[df['starttime'] < cutoff].copy()
+
+    # Compute wind speed magnitudes from u/v component pairs
+    for height, ucol, vcol in [
+        (10,  'u_wind_10m',  'v_wind_10m'),
+        (100, 'u_wind_100m', 'v_wind_100m'),
+        (200, 'u_wind_200m', 'v_wind_200m'),
+    ]:
+        if ucol in df.columns and vcol in df.columns:
+            df[f'wind_speed_h{height}'] = np.sqrt(df[ucol] ** 2 + df[vcol] ** 2)
+
+    ecmwf_feature_cols = config['data'].get('ecmwf_features', [])
+    missing = [c for c in ecmwf_feature_cols if c not in df.columns]
+    if missing:
+        logging.warning(f'ECMWF features not found for {park_id}: {missing}')
+
+    df['forecasttime'] = df['forecasttime'].astype(float)
+    df['validtime'] = df['starttime'] + pd.to_timedelta(df['forecasttime'], unit='h')
+
+    keep_cols = ['validtime', 'forecasttime'] + [c for c in ecmwf_feature_cols if c in df.columns]
+    df = df[keep_cols].copy()
+
+    # Interpolate NaN within each run (identified by forecasttime continuity), then globally.
+    for col in ecmwf_feature_cols:
+        if col in df.columns and df[col].isna().any():
+            df.sort_values('validtime', inplace=True)
+            df[col] = df[col].interpolate(method='linear').ffill().bfill()
+
+    # For each validtime keep the row with the shortest forecasttime (= most recent ECMWF run).
+    df.sort_values(['validtime', 'forecasttime'], inplace=True)
+    df = df.drop_duplicates(subset='validtime', keep='first')
+
+    df.set_index('validtime', inplace=True)
+    df.drop(columns=['forecasttime'], inplace=True)
+    return df
+
+
+def _merge_ecmwf_onto_icon(df_icon: pd.DataFrame,
+                            df_ecmwf: pd.DataFrame) -> pd.DataFrame:
+    """
+    Attach ECMWF features to each ICON-D2 row by matching on validtime.
+
+    ICON validtime  = starttime + forecasttime hours  (= 'timestamp' column)
+    ECMWF validtime = starttime + forecasttime hours  (index of df_ecmwf)
+
+    Left-join on timestamp == ecmwf.index; rows beyond the ECMWF coverage window
+    (e.g. synthetic data that extends past the last ECMWF run) are filled forward
+    from the nearest earlier valid ECMWF entry so no rows are lost.
+    """
+    df = df_icon.copy()
+    ecmwf_cols = df_ecmwf.columns.tolist()
+    df = df.join(df_ecmwf, on='timestamp', how='left')
+
+    # Forward-fill then backward-fill ECMWF columns for rows beyond ECMWF coverage.
+    # Sort by timestamp so ffill propagates chronologically.
+    nan_mask = df[ecmwf_cols].isna().any(axis=1)
+    if nan_mask.any():
+        original_index = df.index
+        df = df.sort_values('timestamp')
+        df[ecmwf_cols] = df[ecmwf_cols].ffill().bfill()
+        df = df.loc[original_index]
+
+    return df
+
+
+def preprocess_trianel_tft(park_id: str,
+                            config: dict,
+                            freq: str = '1H',
+                            features: dict = None,
+                            fold_start: pd.Timestamp = None,
+                            use_real: bool = True) -> pd.DataFrame:
+    """
+    Preprocessing for Trianel wind parks: ICON-D2 NWP merged with either
+    real SCADA measurements or synthetic power data.
+
+    Mirrors the output format of preprocess_synth_wind_icond2() (MultiIndex
+    ['starttime', 'forecasttime', 'timestamp']) so the result is directly
+    compatible with prepare_data_for_tft() and create_tft_sequences().
+
+    Args:
+        park_id:    Park identifier (e.g. 'barlt_west', 'eisleben', 'höheinöd').
+        config:     Config dict.  Must contain:
+                      data.nwp_path            → ICON-D2 base dir (ML/<hour>/<park>/)
+                      data.real_data_path      → dir with <park>.csv 15-min measurements
+                      data.synthetic_data_path → dir with <park>.csv synthetic power data
+                      data.wind_parameter_file → path to wind_parameter.csv
+                      data.turbine_parameter_file → path to turbine_parameter.csv
+                      data.target_col
+                      params.{get_density, aggregate_nwp_layers, next_n_grid_points, …}
+        freq:       Target sampling frequency (default '1H').
+        features:   Dict with 'known', 'observed', 'static' feature lists.
+        fold_start: Reference timestamp for park_age calculation.
+                    Defaults to pd.Timestamp.now() when None.
+        use_real:   True  → load measured power from real_data_path.
+                    False → load synthetic power from synthetic_data_path.
+
+    Returns:
+        MultiIndex DataFrame indexed by ['starttime', 'forecasttime', 'timestamp'].
+    """
+    if features is None:
+        features = {'known': [], 'observed': [], 'static': []}
+
+    # ------------------------------------------------------------------ #
+    # 1. Parameter files
+    # ------------------------------------------------------------------ #
+    wind_param_path = config['data']['wind_parameter_file']
+    turbine_param_path = config['data']['turbine_parameter_file']
+
+    wind_parameter = pd.read_csv(wind_param_path, sep=';', dtype={'park_id': str})
+    turbine_parameter = pd.read_csv(turbine_param_path, sep=';', dtype={'park_id': str})
+
+    park_row = wind_parameter[wind_parameter['park_id'] == park_id]
+    if park_row.empty:
+        raise ValueError(f"Park '{park_id}' not found in {wind_param_path}")
+
+    altitude = float(park_row['altitude'].values[0])
+    station_lat = float(park_row['latitude'].values[0])
+    station_lon = float(park_row['longitude'].values[0])
+    commissioning_date = str(park_row['commissioning_date'].values[0])
+
+    # ------------------------------------------------------------------ #
+    # 2. Static features
+    # ------------------------------------------------------------------ #
+    static_feature_names = features.get('static', [])
+    static_data = {}
+
+    reference_date = fold_start if fold_start is not None else pd.Timestamp.now()
+    # Strip timezone for date-only arithmetic (commissioning_date is tz-naive)
+    ref_naive = reference_date.tz_localize(None) if reference_date.tzinfo else reference_date
+    if commissioning_date != '-':
+        park_age_years = (ref_naive - pd.to_datetime(commissioning_date)).days // 365
+    else:
+        park_age_years = 0
+
+    park_turbines_raw = turbine_parameter[turbine_parameter['park_id'] == park_id].copy()
+    # Replace physically impossible hub heights (≤ 0) with absolute value or fallback.
+    # Some entries in turbine_parameter.csv contain negative placeholders (e.g. -126, -53).
+    park_turbines = park_turbines_raw.copy()
+    neg_mask = park_turbines['hub_height'] <= 0
+    park_turbines.loc[neg_mask, 'hub_height'] = park_turbines.loc[neg_mask, 'hub_height'].abs()
+    # If abs() still gives 0, use a sensible default
+    park_turbines.loc[park_turbines['hub_height'] == 0, 'hub_height'] = 100.0
+
+    valid_hub_heights = park_turbines['hub_height']
+    hub_height_mean = float(valid_hub_heights.mean()) if len(valid_hub_heights) > 0 else 100.0
+
+    if static_feature_names:
+        static_data['altitude']        = altitude
+        static_data['park_age']        = park_age_years
+        static_data['hub_height']      = hub_height_mean
+        static_data['rotor_diameter']  = (float(park_turbines['diameter'].mean())
+                                          if len(park_turbines) > 0 else 0.0)
+        static_data['turbine_count']   = len(park_turbines)
+        static_data['cut_in']          = (float(park_turbines['cut_in'].mean())
+                                          if len(park_turbines) > 0 else 3.0)
+        static_data['cut_out']         = (float(park_turbines['cut_out'].mean())
+                                          if len(park_turbines) > 0 else 25.0)
+        static_data['rated_wind_speed'] = (float(park_turbines['rated'].mean())
+                                           if len(park_turbines) > 0 else 12.0)
+
+    # ------------------------------------------------------------------ #
+    # 3. Installed capacity — always derived from synthetic CSV
+    # ------------------------------------------------------------------ #
+    synthetic_path = config['data']['real_synthetic_data_path']
+    synth_file = _find_park_file(synthetic_path, park_id)
+
+    # Read header only to discover per-turbine power columns (faster than reading full file)
+    try:
+        synth_file_parquet = synth_file.replace('.csv', '.parquet') if synth_file.endswith('.csv') else synth_file
+        if os.path.exists(synth_file_parquet):
+            df_header = pd.read_parquet(synth_file_parquet)
+        else:
+            try:
+                df_header = pd.read_csv(synth_file, sep=';', nrows=0, encoding='utf-8')
+            except UnicodeDecodeError:
+                df_header = pd.read_csv(synth_file, sep=';', nrows=0, encoding='latin-1')
+    except Exception:
+        try:
+            df_header = pd.read_csv(synth_file, sep=';', nrows=0, encoding='utf-8')
+        except UnicodeDecodeError:
+            df_header = pd.read_csv(synth_file, sep=';', nrows=0, encoding='latin-1')
+    _power_t_cols = [c for c in df_header.columns if c.startswith('power_t')]
+
+    # Load only needed columns (timestamp + power_t*) to compute installed capacity
+    cols_to_load = ['timestamp'] + _power_t_cols if _power_t_cols else ['timestamp']
+    # Try parquet first (fast), fallback to CSV (slow)
+    try:
+        synth_file_parquet = synth_file.replace('.csv', '.parquet') if synth_file.endswith('.csv') else synth_file
+        if os.path.exists(synth_file_parquet):
+            _df_cap_sample = pd.read_parquet(synth_file_parquet, columns=cols_to_load).head(500)
+        else:
+            _df_cap_sample = pd.read_csv(synth_file, sep=';', usecols=cols_to_load, nrows=500)
+    except Exception:
+        _df_cap_sample = pd.read_csv(synth_file, sep=';', usecols=cols_to_load, nrows=500)
+
+    if _power_t_cols:
+        installed_capacity = float(_df_cap_sample[_power_t_cols].sum(axis=1).max())
+    else:
+        installed_capacity = None  # determined later from data
+    # ------------------------------------------------------------------ #
+    # 4. Load power data (real or synthetic)
+    # ------------------------------------------------------------------ #
+    if use_real:
+        real_file = _find_park_file(config['data']['real_data_path'], park_id)
+        # Load only first 2 columns (timestamp, power) — faster with parquet
+        try:
+            real_file_parquet = real_file.replace('.csv', '.parquet') if real_file.endswith('.csv') else real_file
+            if os.path.exists(real_file_parquet):
+                # Parquet might have "Zeit" column instead of "timestamp"
+                try:
+                    df_power_raw = pd.read_parquet(real_file_parquet, columns=['timestamp', 'power'])
+                except (KeyError, Exception):
+                    # Try alternate column names
+                    df_temp = pd.read_parquet(real_file_parquet)
+                    # Rename if needed: Zeit → timestamp
+                    if 'Zeit' in df_temp.columns:
+                        df_temp = df_temp.rename(columns={'Zeit': 'timestamp'})
+                    df_power_raw = df_temp[['timestamp', 'power']]
+            else:
+                # CSV with proper encoding handling
+                try:
+                    df_power_raw = pd.read_csv(real_file, sep=';', usecols=[0, 1], encoding='utf-8')
+                except UnicodeDecodeError:
+                    df_power_raw = pd.read_csv(real_file, sep=';', usecols=[0, 1], encoding='latin-1')
+        except Exception as e:
+            logging.warning(f"Failed to read parquet, trying CSV fallback: {e}")
+            try:
+                df_power_raw = pd.read_csv(real_file, sep=';', usecols=[0, 1], encoding='utf-8')
+            except UnicodeDecodeError:
+                df_power_raw = pd.read_csv(real_file, sep=';', usecols=[0, 1], encoding='latin-1')
+        # Standardise column names: first col = timestamp, second = power
+        df_power_raw.columns = ['timestamp', 'power']
+        df_power_raw['timestamp'] = pd.to_datetime(df_power_raw['timestamp'], utc=True)
+        df_power_raw.set_index('timestamp', inplace=True)
+        df_power = df_power_raw.resample('1H').mean()
+        # SCADA measurements are in kW; installed_capacity is derived from synthetic
+        # data which is in W → convert kW → W so both share the same denominator.
+        df_power['power'] = df_power['power'] * 1000.0
+    else:
+        # Load only needed columns (timestamp + power_t*) for synthetic data
+        cols_to_load_synth = ['timestamp'] + _power_t_cols if _power_t_cols else ['timestamp']
+        try:
+            synth_file_parquet = synth_file.replace('.csv', '.parquet') if synth_file.endswith('.csv') else synth_file
+            if os.path.exists(synth_file_parquet):
+                df_synth_raw = pd.read_parquet(synth_file_parquet, columns=cols_to_load_synth)
+            else:
+                try:
+                    df_synth_raw = pd.read_csv(synth_file, sep=';', usecols=cols_to_load_synth, encoding='utf-8')
+                except UnicodeDecodeError:
+                    df_synth_raw = pd.read_csv(synth_file, sep=';', usecols=cols_to_load_synth, encoding='latin-1')
+        except Exception:
+            try:
+                df_synth_raw = pd.read_csv(synth_file, sep=';', usecols=cols_to_load_synth, encoding='utf-8')
+            except UnicodeDecodeError:
+                df_synth_raw = pd.read_csv(synth_file, sep=';', usecols=cols_to_load_synth, encoding='latin-1')
+        df_synth_raw['timestamp'] = pd.to_datetime(df_synth_raw['timestamp'], utc=True)
+        df_synth_raw.set_index('timestamp', inplace=True)
+        # Each power_tN column represents one turbine in W; sum to get total park power.
+        _power_t_cols_synth = [c for c in df_synth_raw.columns if c.startswith('power_t')]
+        if _power_t_cols_synth:
+            df_synth_raw['power'] = df_synth_raw[_power_t_cols_synth].sum(axis=1)
+        elif 'power' not in df_synth_raw.columns:
+            raise ValueError(f"No power columns found in synthetic data for {park_id}")
+        df_power = df_synth_raw[['power']].resample('1H').mean()
+
+    # Normalise to [0, 1] using installed capacity (in W for both paths after kW→W above).
+    if installed_capacity is None:
+        installed_capacity = float(df_power['power'].max())
+    if installed_capacity > 0:
+        df_power['power'] = df_power['power'] / installed_capacity
+    df_power['power'] = df_power['power'].clip(0.0, 1.0)
+    # Fill the few SCADA measurement gaps with cubic interpolation.
+    df_power['power'] = df_power['power'].interpolate(method='cubic').ffill().bfill()
+
+    # ------------------------------------------------------------------ #
+    # 5. Load ICON-D2 NWP  (reuses _process_forecast_hour / _process_csv_file)
+    # ------------------------------------------------------------------ #
+    next_n_grid_points = config['params'].get('next_n_grid_points', 1)
+    icond2_source = config['data'].get('icond2_source', 'csv')
+    _station_rel_lat = _station_rel_lon = _nearest_label = None
+
+    if icond2_source == 'database':
+        df_final, _nearest_label, _station_rel_lat, _station_rel_lon = _load_icon_d2_from_database(
+            station_lat=station_lat,
+            station_lon=station_lon,
+            next_n_grid_points=next_n_grid_points,
+            get_method=config['params'].get('get_next_grid_points_method', 'geodesic_next'),
+            start_time=df_power.index.min(),
+            end_time=df_power.index.max(),
+            config=config,
+            turbines=park_turbines,
+        )
+    else:
+        forecast_hours = config['data'].get('forecast_hours', ['06', '09', '12', '15'])
+        forecast_args = [
+            (fh, config, park_id, station_lat, station_lon, next_n_grid_points, park_turbines)
+            for fh in forecast_hours
+        ]
+        all_forecast_dfs = []
+        max_workers = min(len(forecast_hours), mp.cpu_count())
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_hour = {executor.submit(_process_forecast_hour, arg): arg[0]
+                              for arg in forecast_args}
+            for future in as_completed(future_to_hour):
+                hour = future_to_hour[future]
+                result = future.result()
+                if result[0] is not None:
+                    all_forecast_dfs.append((result[0], hour))
+                    if len(result) > 2 and result[2] is not None and _station_rel_lat is None:
+                        _station_rel_lat = result[2]
+                        _station_rel_lon = result[3]
+                    if len(result) > 4 and result[4] is not None and _nearest_label is None:
+                        _nearest_label = result[4]
+
+        if _station_rel_lat is not None:
+            static_data['station_rel_lat'] = _station_rel_lat
+            static_data['station_rel_lon'] = _station_rel_lon
+
+        hour_order = {'06': 0, '09': 1, '12': 2, '15': 3}
+        all_forecast_dfs.sort(key=lambda x: hour_order.get(x[1], 99))
+        all_forecast_dfs = [df for df, _ in all_forecast_dfs]
+
+        if not all_forecast_dfs:
+            raise ValueError(f"No ICON-D2 NWP data found for park '{park_id}'")
+
+        df_final = pd.concat(all_forecast_dfs, ignore_index=False)
+
+    # ------------------------------------------------------------------ #
+    # 6. Filter and merge  (mirrors preprocess_synth_wind_icond2)
+    # ------------------------------------------------------------------ #
+    if 'forecasttime' in df_final.columns:
+        df_final = df_final[df_final['forecasttime'] != 0].copy()
+
+    if 'starttime' in df_final.columns:
+        counts = df_final.groupby('starttime').size()
+        valid_starttimes = counts[counts == 48].index
+        df_final = df_final[df_final['starttime'].isin(valid_starttimes)].copy()
+
+    if isinstance(df_final.index, pd.MultiIndex):
+        df_final.reset_index(inplace=True, drop=True)
+
+    # ------------------------------------------------------------------ #
+    # 6b. Cutoff: discard everything beyond the real-data horizon
+    # ------------------------------------------------------------------ #
+    _cutoff_str = config['data'].get('data_cutoff')
+    if _cutoff_str:
+        _cutoff_ts = pd.Timestamp(_cutoff_str, tz='UTC')
+        df_final = df_final[df_final['timestamp'] <= _cutoff_ts].copy()
+        if 'starttime' in df_final.columns:
+            counts = df_final.groupby('starttime').size()
+            valid_starttimes = counts[counts == 48].index
+            df_final = df_final[df_final['starttime'].isin(valid_starttimes)].copy()
+
+    # ------------------------------------------------------------------ #
+    # 6c. Merge ECMWF features (optional)
+    # ------------------------------------------------------------------ #
+    if config['data'].get('ecmwf_path'):
+        df_ecmwf = _load_ecmwf_for_park(park_id, config)
+        if df_ecmwf is not None:
+            df_final = _merge_ecmwf_onto_icon(df_final, df_ecmwf)
+
+    # Inner-join: only keep NWP rows whose validtime (starttime + forecasttime) has a SCADA match.
+    # Left-join would produce NaN for NWP timestamps beyond the SCADA measurement period.
+    df_merged = df_final.merge(df_power[['power']], left_on='timestamp', right_index=True, how='inner')
+
+    # Drop incomplete sequences: after the inner join, some starttimes may have fewer than
+    # 48 forecast hours because their last hours fell outside the SCADA range.
+    if 'starttime' in df_merged.columns:
+        counts = df_merged.groupby('starttime').size()
+        valid_starttimes = counts[counts == 48].index
+        df_merged = df_merged[df_merged['starttime'].isin(valid_starttimes)]
+
+    # ------------------------------------------------------------------ #
+    # 7. Set MultiIndex
+    # ------------------------------------------------------------------ #
+    if all(c in df_merged.columns for c in ['starttime', 'forecasttime', 'timestamp']):
+        df_merged.set_index(['starttime', 'forecasttime', 'timestamp'], inplace=True)
+        df_merged.sort_index(inplace=True)
+    else:
+        logging.error(f"preprocess_trianel_tft({park_id}): missing index columns — "
+                      "falling back to timestamp index")
+        df_merged.set_index('timestamp', inplace=True)
+
+    # ------------------------------------------------------------------ #
+    # 8. Feature selection  (same regex pattern as preprocess_synth_wind_icond2)
+    # ------------------------------------------------------------------ #
+    rel_features = list(set(features['known'] + features['observed'])) if features else []
+
+    if rel_features:
+        available_cols = []
+        patterns = [re.compile(f"^{re.escape(feat)}(_[A-Z0-9]+)?$") for feat in rel_features]
+        for col in df_merged.columns:
+            for pattern in patterns:
+                if pattern.match(col):
+                    if col not in available_cols:
+                        available_cols.append(col)
+                    break
+
+        target_col = config['data']['target_col']
+        if target_col not in available_cols:
+            available_cols.append(target_col)
+
+        # Materialise static features as constant columns
+        for sf in static_feature_names:
+            if sf in static_data:
+                df_merged[sf] = static_data[sf]
+                if sf not in available_cols:
+                    available_cols.append(sf)
+
+        available_cols = [c for c in available_cols if c in df_merged.columns]
+        df_merged = df_merged[available_cols]
+
+    # Cyclical encoding for wind direction
+    wind_dir_cols = [c for c in df_merged.columns if 'wind_direction' in c]
+    if wind_dir_cols:
+        for col in wind_dir_cols:
+            rad = np.deg2rad(df_merged[col])
+            df_merged[f'{col}_sin'] = np.sin(rad)
+            df_merged[f'{col}_cos'] = np.cos(rad)
+        df_merged.drop(columns=wind_dir_cols, inplace=True)
+
+    # Safety net: drop any rows that still have NaN (should not occur after interpolation above).
+    nan_count = df_merged.isnull().sum().sum()
+    if nan_count > 0:
+        nan_by_col = df_merged.isnull().sum()
+        nan_by_col = nan_by_col[nan_by_col > 0].to_dict()
+        logging.warning(f"preprocess_trianel_tft({park_id}): {nan_count} NaN remaining after merge — dropping rows. NaN by column: {nan_by_col}")
+        df_merged.dropna(inplace=True)
+    df_merged.sort_index(inplace=True)
+
+    if _nearest_label is not None:
+        df_merged.attrs['nwp_nearest_label'] = _nearest_label
+
+    return df_merged
 
 
 def get_features(config: dict = None) -> Dict[str, list]:

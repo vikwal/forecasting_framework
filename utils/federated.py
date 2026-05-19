@@ -1,4 +1,5 @@
 import ray
+import math
 import time
 import logging
 import numpy as np
@@ -155,6 +156,20 @@ class ServerOptimizer:
         # Convert back to state_dict
         return numpy_list_to_state_dict(final_weights_list, old_global_weights)
 
+    def step_from_gradients(self,
+                            global_weights: Dict[str, torch.Tensor],
+                            aggregated_gradients: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """FedSGD: apply server optimizer using raw gradients.
+        Converts to pseudo weight-delta (delta = -grad) then delegates to step().
+        Sign: pseudo = old - grad → delta_t = pseudo - old = -grad
+        Adam: m_t += (1-β₁)·(-grad), final = old + lr·m_hat/... = old - lr·grad/... ✓
+        """
+        pseudo_aggregated = {
+            k: global_weights[k].cpu() - g.cpu()
+            for k, g in aggregated_gradients.items()
+        }
+        return self.step(global_weights, pseudo_aggregated)
+
 
 def _log_gpu_mem(tag: str, device, client_id):
     """DEBUG HELPER — log GPU memory stats at key points. Remove when done debugging.
@@ -202,7 +217,9 @@ class ClientActor:
                  X_val: Any,
                  y_val: Any,
                  config: Dict[str, Any],
-                 hyperparameters: Dict[str, Any]):
+                 hyperparameters: Dict[str, Any],
+                 initial_personal_weights: Dict[str, Any] = None,
+                 initial_pretrained_weights: Dict[str, Any] = None):
         self.client_id = client_id
         self.X_train, self.y_train = X_train, y_train
         self.X_val, self.y_val = X_val, y_val
@@ -213,18 +230,62 @@ class ClientActor:
         import os
         os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
-        # Initialize GPU
-        tools.initialize_gpu()
+        # In Ray Actors, GPU is already allocated via Ray resource scheduling.
+        # Do NOT call tools.initialize_gpu() as it would override Ray's CUDA_VISIBLE_DEVICES.
+        # Ray sets CUDA_VISIBLE_DEVICES automatically for the Actor's GPU slice.
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Model stays on CPU at init; moved to GPU lazily in train()/evaluate()
         # and returned to CPU afterwards so idle actors don't occupy GPU memory.
         self.model = models.get_model(config=self.config, hyperparameters=self.hyperparameters)
+        # Names of params loaded from a pretrained model (used for per-group lr in train()).
+        self._pretrained_param_names: set = set()
+
+        if initial_pretrained_weights is not None:
+            freeze_pt = config['fl'].get('pretrained_weights_freeze', True)
+            sd = self.model.state_dict()
+            matched_pt = {k: v for k, v in initial_pretrained_weights.items() if k in sd}
+            if matched_pt:
+                sd.update(matched_pt)
+                self.model.load_state_dict(sd)
+                self._pretrained_param_names = set(matched_pt.keys())
+            if freeze_pt:
+                for name, param in self.model.named_parameters():
+                    if name in self._pretrained_param_names:
+                        param.requires_grad_(False)
+            n_frozen = sum(1 for n, p in self.model.named_parameters()
+                           if n in self._pretrained_param_names and not p.requires_grad)
+            pt_lr_val = config['fl'].get('pretrained_weights_lr', 'default*0.1')
+            logging.info(
+                f"[ClientActor {client_id}] pretrained_weights: loaded {len(matched_pt)} tensors, "
+                f"{'frozen' if freeze_pt else f'trainable at pretrained_lr={pt_lr_val}'} "
+                f"({n_frozen} params frozen)"
+            )
+
+        if initial_personal_weights is not None:
+            model_name = config['model']['name']
+            shared_keys = get_shared_keys(self.model.state_dict(), model_name, config=config)
+            sd = self.model.state_dict()
+            matched = {k: v for k, v in initial_personal_weights.items()
+                       if k in sd and k not in shared_keys}
+            if matched:
+                sd.update(matched)
+                self.model.load_state_dict(sd)
+            # Freeze personal parameters so the optimizer skips them every round.
+            # load_state_dict copies data in-place, so requires_grad stays False.
+            for name, param in self.model.named_parameters():
+                if name not in shared_keys:
+                    param.requires_grad_(False)
+            n_frozen = sum(1 for _, p in self.model.named_parameters() if not p.requires_grad)
+            logging.info(f"[ClientActor {client_id}] pretrained_context: loaded {len(matched)} "
+                         f"personal tensors, froze {n_frozen} parameters")
 
         self.logger = logging.getLogger(f"ClientActor_{self.client_id}")
         self.logger.setLevel(logging.INFO)
         # _log_gpu_mem("init", self.device, self.client_id)
-        logging.info(f"[ClientActor {self.client_id}] Initialized (CPU, will use {self.device} during train/eval).")
+        cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')
+        cuda_count = torch.cuda.device_count()
+        logging.info(f"[ClientActor {self.client_id}] device={self.device}  CUDA_VISIBLE_DEVICES={cuda_visible}  cuda_device_count={cuda_count}")
 
     def train(self, global_weights: Dict[str, torch.Tensor]):
         """Performs model training for a communication round using PyTorch."""
@@ -311,7 +372,24 @@ class ClientActor:
 
         # Setup optimizer and loss — train the EXISTING self.model
         lr = self.hyperparameters.get('learning_rate', self.hyperparameters.get('lr', 0.001))
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        freeze_pt     = self.config['fl'].get('pretrained_weights_freeze', True)
+        pretrained_lr = self.config['fl'].get('pretrained_weights_lr', lr * 0.1)
+
+        if self._pretrained_param_names and not freeze_pt:
+            # Two param groups: pretrained layers at lower lr, everything else at main lr.
+            pretrained_params = [p for n, p in self.model.named_parameters()
+                                 if p.requires_grad and n in self._pretrained_param_names]
+            other_params      = [p for n, p in self.model.named_parameters()
+                                 if p.requires_grad and n not in self._pretrained_param_names]
+            param_groups = []
+            if other_params:
+                param_groups.append({'params': other_params,      'lr': lr})
+            if pretrained_params:
+                param_groups.append({'params': pretrained_params, 'lr': pretrained_lr})
+            optimizer = torch.optim.Adam(param_groups)
+        else:
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+            optimizer = torch.optim.Adam(trainable_params, lr=lr)
         quantiles = self.config['model'].get('tft', {}).get('quantiles', None)
         if quantiles:
             criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
@@ -361,6 +439,22 @@ class ClientActor:
                 #     _log_gpu_mem("train_batch0_after_forward", self.device, self.client_id)
 
                 loss = criterion(predictions, targets)
+
+                # FedProx proximal term: (μ/2) * ||w_local - w_global||²
+                _mu = self.config.get('fl', {}).get('fedprox', {}).get('mu', 0.0)
+                if _mu > 0.0:
+                    _prox = torch.tensor(0.0, device=self.device)
+                    _personalize = self.config.get('fl', {}).get('personalize', False)
+                    if _personalize:
+                        _model_name = self.config['model']['name']
+                        _eligible = set(self._split_weights_by_layer_name(global_weights, _model_name)[0].keys())
+                    else:
+                        _eligible = set(global_weights.keys())
+                    for _name, _param in self.model.named_parameters():
+                        if _param.requires_grad and _name in _eligible:
+                            _prox = _prox + ((_param - global_weights[_name].to(self.device)) ** 2).sum()
+                    loss = loss + (_mu / 2.0) * _prox
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -555,6 +649,105 @@ class ClientActor:
 
         return results
 
+    def compute_gradient(self, global_weights: Dict[str, torch.Tensor]) -> Dict:
+        """FedSGD: sample one mini-batch and return raw gradients (no optimizer.step)."""
+        from . import tools
+        from torch.utils.data import TensorDataset, DataLoader
+
+        self.model = self.model.to(self.device)
+        personalize = self.config['fl'].get('personalize', False)
+
+        # Load weights (same personalization logic as train())
+        if personalize:
+            model_name = self.config['model']['name']
+            shared_global, _ = self._split_weights_by_layer_name(global_weights, model_name)
+            _, personal_local = self._split_weights_by_layer_name(self.model.state_dict(), model_name)
+            self.model.load_state_dict({**shared_global, **personal_local}, strict=False)
+        else:
+            self.model.load_state_dict(global_weights)
+
+        # Build DataLoader (same as train() L320–340)
+        batch_size = self.hyperparameters['batch_size']
+        is_tft = self.config['model']['name'] in ('tft', 'tcn-tft')
+        if isinstance(self.X_train, dict):
+            tensors = [torch.from_numpy(self.X_train['observed']).float(),
+                       torch.from_numpy(self.X_train['known']).float()]
+            if 'static' in self.X_train:
+                tensors.append(torch.from_numpy(self.X_train['static']).float())
+            tensors.append(torch.from_numpy(self.y_train).float())
+        else:
+            tensors = [torch.from_numpy(self.X_train).float(),
+                       torch.from_numpy(self.y_train).float()]
+        train_loader = DataLoader(TensorDataset(*tensors), batch_size=batch_size,
+                                  shuffle=self.config['model'].get('shuffle', True),
+                                  drop_last=True)
+
+        # Loss (same as train() L379–384)
+        quantiles = self.config['model'].get('tft', {}).get('quantiles', None)
+        if quantiles:
+            criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
+        else:
+            criterion = nn.MSELoss()
+
+        # One batch: forward + backward, NO optimizer.step()
+        self.model.train()
+        self.model.zero_grad()
+        batch = next(iter(train_loader))
+
+        if is_tft:
+            if len(batch) == 4:
+                obs, known, static, targets = [b.to(self.device) for b in batch]
+                predictions = self.model(obs, known, static)
+            else:
+                obs, known, targets = [b.to(self.device) for b in batch]
+                predictions = self.model(obs, known)
+        else:
+            inputs, targets = [b.to(self.device) for b in batch]
+            predictions = self.model(inputs)
+
+        loss = criterion(predictions, targets)
+        loss.backward()
+
+        # Optional gradient clipping
+        grad_clip = self.config.get('fl', {}).get('fedsgd', {}).get('gradient_clip', None)
+        if grad_clip:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+
+        # Personalization: apply local gradient step for personal layers,
+        # then return only shared layer gradients to the server.
+        # Personal layers are updated in-place on self.model (persistent across rounds).
+        if personalize:
+            shared_keys = set(self._split_weights_by_layer_name(
+                global_weights, self.config['model']['name'])[0].keys())
+            _plr = self.config.get('fl', {}).get('fedsgd', {}).get('personal_lr')
+            personal_lr = _plr if _plr is not None else self.hyperparameters.get('learning_rate', 0.001)
+            with torch.no_grad():
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None and name not in shared_keys:
+                        param.data.sub_(personal_lr * param.grad)
+        else:
+            shared_keys = None
+
+        # Extract gradients to send to server (shared only when personalize=True)
+        gradients = {
+            name: (param.grad.detach().cpu().clone() if param.grad is not None
+                   else torch.zeros_like(param.data.cpu()))
+            for name, param in self.model.named_parameters()
+            if shared_keys is None or name in shared_keys
+        }
+
+        self.model.cpu()
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+
+        return {
+            'client_id': self.client_id,
+            'gradients': gradients,
+            'n_samples': targets.shape[0],
+            'metrics': {'train_loss': loss.item()},
+            'history': {'train_loss': [loss.item()]}
+        }
+
     def _split_weights_by_layer_name(self, state_dict, model_name):
         """
         Split weights into shared and personal based on model architecture.
@@ -564,7 +757,7 @@ class ClientActor:
             shared_weights: Weights to be aggregated globally
             personal_weights: Weights kept locally per client
         """
-        shared_keys = get_shared_keys(state_dict, model_name)
+        shared_keys = get_shared_keys(state_dict, model_name, config=self.config)
         shared_weights = {k: v for k, v in state_dict.items() if k in shared_keys}
         personal_weights = {k: v for k, v in state_dict.items() if k not in shared_keys}
         return shared_weights, personal_weights
@@ -573,27 +766,60 @@ class ClientActor:
 # Shared layer patterns per model — single source of truth for personalization split.
 # Edit here to change which layers are shared vs personal.
 SHARED_LAYER_PATTERNS = {
-    'tft': ['lstm_encoder', 'lstm_decoder', 'lstm_gate', 'lstm_ln'],
+    'tft': [#'static_embed', 'static_variable_selection', 'static_context_grn',
+            #'static_enrichment_grn', 'static_state_h_grn',
+            #'observed_embed',
+            #'known_embed',
+            #'vsn_past',
+            #'vsn_future',
+            'lstm_encoder',
+            'lstm_decoder',
+            'lstm_gate',
+            'lstm_ln',
+            'enrichment_grn',
+            'attn_gate',
+            'attn_ln',
+            'positionwise_grn',
+            #'output_gate',
+            #'output_ln',
+            #'output_layer',
+            ],
     # tcn-tft: TCN feature extractors + projection are shared globally;
     # VSN, LSTM, attention and all TFT core layers remain local.
     'tcn-tft': ['tcn_observed', 'tcn_known', 'tcn_proj'],
 }
 
 
-def get_shared_keys(state_dict: Dict[str, torch.Tensor], model_name: str) -> set:
+def get_shared_keys(state_dict: Dict[str, torch.Tensor], model_name: str,
+                    config: Dict[str, Any] = None) -> set:
     """
     Identify which keys in state_dict are shared (vs personal) for a given model.
+
+    Pattern priority:
+      1. fl.shared_layer_patterns.<model_name> from config (if present)
+      2. Hardcoded SHARED_LAYER_PATTERNS fallback (with tcn-gru negative-match logic)
 
     Args:
         state_dict: Model state dictionary
         model_name: Name of the model ('tcn-gru', 'tft', etc.)
+        config: Full experiment config dict (optional).  If supplied and
+                fl.shared_layer_patterns contains an entry for model_name,
+                that list of substrings is used instead of the hardcoded dict.
 
     Returns:
         Set of keys that should be shared across clients
     """
-    shared_keys = set()
     model_name_lower = model_name.lower()
 
+    # --- 1. Config-driven patterns (highest priority) ---
+    if config is not None:
+        cfg_patterns = config.get('fl', {}).get('shared_layer_patterns', {})
+        if model_name_lower in cfg_patterns:
+            patterns = cfg_patterns[model_name_lower]
+            return {k for k in state_dict if any(p in k for p in patterns)}
+
+    # --- 2. Hardcoded fallback ---
+    shared_keys = set()
     for key in state_dict.keys():
         is_shared = False
 
@@ -603,15 +829,11 @@ def get_shared_keys(state_dict: Dict[str, torch.Tensor], model_name: str) -> set
             elif 'rnn' not in key and 'attention' not in key and 'output_fc' not in key:
                 is_shared = True
 
-        elif model_name_lower == 'tft':
-            if any(s in key for s in SHARED_LAYER_PATTERNS['tft']):
-                is_shared = True
-
-        elif model_name_lower == 'tcn-tft':
-            if any(s in key for s in SHARED_LAYER_PATTERNS['tcn-tft']):
+        elif model_name_lower in SHARED_LAYER_PATTERNS:
+            if any(s in key for s in SHARED_LAYER_PATTERNS[model_name_lower]):
                 is_shared = True
         else:
-            # Unknown model - aggregate all weights
+            # Unknown model — aggregate all weights
             is_shared = True
 
         if is_shared:
@@ -647,7 +869,7 @@ def aggregate_weights(client_results: List[Dict[str, Any]], config: Dict[str, An
 
     if personalize and model_name:
         # Only aggregate SHARED weights when personalization is enabled
-        shared_keys = get_shared_keys(first_weights, model_name)
+        shared_keys = get_shared_keys(first_weights, model_name, config=config)
 
         # Only initialize aggregation for shared keys
         weights_agg = {k: torch.zeros_like(v) for k, v in first_weights.items() if k in shared_keys}
@@ -667,6 +889,31 @@ def aggregate_weights(client_results: List[Dict[str, Any]], config: Dict[str, An
 
     return weights_agg
 
+
+
+def aggregate_gradients(
+    client_results: List[Dict[str, Any]],
+    config: Dict[str, Any] = None
+) -> Dict[str, torch.Tensor]:
+    """Weighted or uniform average of raw gradients (FedSGD)."""
+    weighting = 'uniform'
+    if config:
+        weighting = config.get('fl', {}).get('fedsgd', {}).get('gradient_weighting', 'uniform')
+
+    n_clients = len(client_results)
+    total_samples = sum(r['n_samples'] for r in client_results)
+    aggregated = {}
+
+    for key in client_results[0]['gradients'].keys():
+        if weighting == 'weighted':
+            aggregated[key] = sum(
+                r['gradients'][key] * (r['n_samples'] / total_samples)
+                for r in client_results
+            )
+        else:  # uniform
+            aggregated[key] = sum(r['gradients'][key] for r in client_results) / n_clients
+
+    return aggregated
 
 
 def aggregate_metrics(client_results: List[Dict[str, Any]]):
@@ -822,7 +1069,9 @@ def run_simulation(partitions: Any,
                    config: Dict[str, Any],
                    hyperparameters: Dict[str, Any],
                    client_ids = None,
-                   global_val_data = None):
+                   global_val_data = None,
+                   initial_personal_weights: Dict[str, Any] = None,
+                   initial_pretrained_weights: Dict[str, Any] = None):
     """
     Perform FL simulation using Ray and PyTorch.
 
@@ -854,17 +1103,50 @@ def run_simulation(partitions: Any,
     strategy = config['fl'].get('strategy', 'fedavg').lower()
 
     # GPU configuration
+    # gpu_per_actor is derived from actors-per-GPU (ceiling), then floored to 1 decimal.
+    # This ensures per-GPU packing works: ceil(n_clients/n_gpus) actors each need
+    # floor(1/actors_per_gpu * 10)/10 GPU fractions → sum per GPU ≤ 1.0.
     total_num_gpus = torch.cuda.device_count()
-    gpu_per_actor = min(1, total_num_gpus / n_clients) if total_num_gpus > 0 else 0
+    if total_num_gpus > 0:
+        _actors_per_gpu = math.ceil(n_clients / total_num_gpus)
+        gpu_per_actor = max(0.1, min(1.0, math.floor(1.0 / _actors_per_gpu * 10) / 10))
+    else:
+        gpu_per_actor = 0
     max_concurrent = config['fl'].get('max_concurrent_actors', n_clients)
 
+    # Validate max_concurrent_actors
+    if max_concurrent <= 0:
+        logging.warning(
+            f"max_concurrent_actors={max_concurrent} is invalid (must be > 0). "
+            f"Setting to n_clients={n_clients}."
+        )
+        max_concurrent = n_clients
+    elif max_concurrent > n_clients:
+        logging.warning(
+            f"max_concurrent_actors={max_concurrent} > n_clients={n_clients}. "
+            f"Capping to {n_clients}."
+        )
+        max_concurrent = n_clients
+
+    # Check if CUDA_VISIBLE_DEVICES was already set (would break Ray GPU distribution)
+    import os
+    if os.environ.get('CUDA_VISIBLE_DEVICES'):
+        logging.warning(
+            f"[Ray-GPU] CUDA_VISIBLE_DEVICES is already set to '{os.environ.get('CUDA_VISIBLE_DEVICES')}'. "
+            f"This will prevent Ray from properly distributing GPUs to Actors. "
+            f"Clearing it to allow Ray GPU management."
+        )
+        del os.environ['CUDA_VISIBLE_DEVICES']
+
     logging.info(
-        f"FL Simulation: {n_clients} clients, {n_rounds} rounds, {total_num_gpus} GPUs, "
-        f"strategy={strategy}, max_concurrent_actors={max_concurrent}"
+        f"FL Simulation: {n_clients} clients, {n_rounds} rounds, {total_num_gpus} GPUs "
+        f"(gpu_per_actor={gpu_per_actor}), strategy={strategy}, max_concurrent_actors={max_concurrent}"
     )
 
-    # Initialize Ray
+    # Initialize Ray — cap the CPU worker pool to avoid spawning idle workers
+    # proportional to the full core count. Actors only need one slot each.
     ray.init(
+        num_cpus=max(n_clients, max_concurrent),
         num_gpus=total_num_gpus,
         ignore_reinit_error=True,
         include_dashboard=False,
@@ -884,7 +1166,9 @@ def run_simulation(partitions: Any,
             X_val=X_val,
             y_val=y_val,
             config=config,
-            hyperparameters=hyperparameters
+            hyperparameters=hyperparameters,
+            initial_personal_weights=initial_personal_weights,
+            initial_pretrained_weights=initial_pretrained_weights,
         )
         client_actors.append(actor)
 
@@ -906,15 +1190,21 @@ def run_simulation(partitions: Any,
         # When personalization is enabled, only initialize with shared weights
         personalize = config.get('fl', {}).get('personalize', False)
 
+        # FedSGD delegates to fedadam/fedavgm server optimizer internally
+        _opt_strategy = strategy
+        if strategy == 'fedsgd':
+            _sgd_sub = config['fl'].get('fedsgd', {}).get('server_optimizer', 'adam')
+            _opt_strategy = 'fedadam' if _sgd_sub == 'adam' else 'fedavgm'
+
         if personalize:
             model_name = config['model']['name']
-            shared_keys = get_shared_keys(global_weights, model_name)
+            shared_keys = get_shared_keys(global_weights, model_name, config=config)
             shared_weights = {k: v for k, v in global_weights.items() if k in shared_keys}
-            server_optimizer = ServerOptimizer(strategy, hyperparameters, shared_weights)
-            logging.info(f"[Server] Initialized ServerOptimizer with {len(shared_weights)} shared weights (personalization enabled)")
+            server_optimizer = ServerOptimizer(_opt_strategy, hyperparameters, shared_weights)
+            logging.info(f"[Server] Initialized ServerOptimizer({_opt_strategy}) with {len(shared_weights)} shared weights (personalization enabled)")
         else:
-            server_optimizer = ServerOptimizer(strategy, hyperparameters, global_weights)
-            logging.info(f"[Server] Initialized ServerOptimizer with {len(global_weights)} weights")
+            server_optimizer = ServerOptimizer(_opt_strategy, hyperparameters, global_weights)
+            logging.info(f"[Server] Initialized ServerOptimizer({_opt_strategy}) with {len(global_weights)} weights")
 
     # Log shared layer patterns for personalization
     personalize = config.get('fl', {}).get('personalize', False)
@@ -952,33 +1242,44 @@ def run_simulation(partitions: Any,
         # lives on GPU, Ray serialises CUDA tensors and every worker re-allocates them
         # on GPU during deserialisation, causing a spike proportional to n_concurrent.
         global_weights_cpu = {k: v.cpu() for k, v in global_weights.items()}
-        logging.debug(f"[Server] Start train jobs on clients (batch_size={max_concurrent}).")
         client_results = []
-        for batch_start in range(0, n_clients, max_concurrent):
-            batch_actors = client_actors[batch_start:batch_start + max_concurrent]
-            batch_results = ray.get([a.train.remote(global_weights_cpu) for a in batch_actors])
-            client_results.extend(batch_results)
-        logging.debug(f"[Server] All clients trained. Start aggregation.")
 
-        # Aggregate weights and metrics
-        aggregated_weights = aggregate_weights(client_results, config)
-        train_metrics_agg = aggregate_metrics(client_results)
-
-        # Apply server-side optimization
-        if server_optimizer:
-            # When personalization is enabled, aggregated_weights only contains shared weights
-            # We need to extract only shared weights from global_weights for proper shape matching
+        if strategy == 'fedsgd':
+            # FedSGD: clients return raw gradients from a single mini-batch
+            logging.debug(f"[Server] Start FedSGD gradient jobs on clients (batch_size={max_concurrent}).")
+            for batch_start in range(0, n_clients, max_concurrent):
+                batch_actors = client_actors[batch_start:batch_start + max_concurrent]
+                batch_results = ray.get([a.compute_gradient.remote(global_weights_cpu)
+                                         for a in batch_actors])
+                client_results.extend(batch_results)
+            logging.debug(f"[Server] All gradients collected. Aggregating.")
+            aggregated_gradients = aggregate_gradients(client_results, config)
+            train_metrics_agg = aggregate_metrics(client_results)
             personalize = config.get('fl', {}).get('personalize', False)
-
             if personalize:
-                # Extract only the shared weights from global_weights that match aggregated_weights
-                shared_global_weights = {k: v for k, v in global_weights.items() if k in aggregated_weights}
-                new_shared_weights = server_optimizer.step(shared_global_weights, aggregated_weights)
-                new_global_weights = new_shared_weights
+                shared_global_weights = {k: v for k, v in global_weights.items() if k in aggregated_gradients}
+                new_global_weights = server_optimizer.step_from_gradients(shared_global_weights, aggregated_gradients)
             else:
-                new_global_weights = server_optimizer.step(global_weights, aggregated_weights)
+                new_global_weights = server_optimizer.step_from_gradients(global_weights, aggregated_gradients)
         else:
-            new_global_weights = aggregated_weights
+            # FedAvg / FedAdam / FedAvgM: clients return updated weights after local training
+            logging.debug(f"[Server] Start train jobs on clients (batch_size={max_concurrent}).")
+            for batch_start in range(0, n_clients, max_concurrent):
+                batch_actors = client_actors[batch_start:batch_start + max_concurrent]
+                batch_results = ray.get([a.train.remote(global_weights_cpu) for a in batch_actors])
+                client_results.extend(batch_results)
+            logging.debug(f"[Server] All clients trained. Start aggregation.")
+            aggregated_weights = aggregate_weights(client_results, config)
+            train_metrics_agg = aggregate_metrics(client_results)
+            if server_optimizer:
+                personalize = config.get('fl', {}).get('personalize', False)
+                if personalize:
+                    shared_global_weights = {k: v for k, v in global_weights.items() if k in aggregated_weights}
+                    new_global_weights = server_optimizer.step(shared_global_weights, aggregated_weights)
+                else:
+                    new_global_weights = server_optimizer.step(global_weights, aggregated_weights)
+            else:
+                new_global_weights = aggregated_weights
 
         # Save client histories
         if save_history:
@@ -1071,7 +1372,17 @@ def run_simulation(partitions: Any,
         all_rounds_metrics_data.append(round_data)
 
         round_end_time = time.time()
-        logging.debug(f"Round {round_num} terminated in {round_end_time - round_start_time:.2f} seconds.")
+        # Build a compact per-round summary line at INFO level
+        _parts = [f"Round {round_num:>3}/{n_rounds}  ({round_end_time - round_start_time:.1f}s)"]
+        if train_metrics_agg:
+            _rmse = train_metrics_agg.get('rmse', train_metrics_agg.get('train_rmse'))
+            if _rmse is not None:
+                _parts.append(f"train_rmse={_rmse:.4f}")
+        if val_metrics_agg:
+            _vrmse = val_metrics_agg.get('rmse', val_metrics_agg.get('val_rmse'))
+            if _vrmse is not None:
+                _parts.append(f"val_rmse={_vrmse:.4f}")
+        logging.info("  ".join(_parts))
 
     end_time = time.time()
     logging.info(f"--- Simulation terminated in {end_time - start_time:.2f} seconds ---")

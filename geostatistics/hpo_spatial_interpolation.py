@@ -306,7 +306,7 @@ def main() -> None:
         interp_cfg["nwp_components"] = "both"
     if "ecmwf_components" in hpo_params:
         interp_cfg["ecmwf_components"] = "both"
-    
+
     rk_features = interp_cfg.get("rk_features") or []
     if "use_temperature_2m" in hpo_params and "temperature_2m" not in rk_features:
         rk_features.append("temperature_2m")
@@ -316,7 +316,7 @@ def main() -> None:
 
     # --- load data ONCE ---
     logger.info("=== Loading data (once for all trials) ===")
-    (pivot, lats, lons, alts, station_ids,
+    (pivot, _raw_pivot, lats, lons, alts, station_ids,
      u_matrix, v_matrix,
      rk_feature_names, rk_static_features, rk_dynamic_features) = load_data(config)
 
@@ -326,7 +326,7 @@ def main() -> None:
     dist_matrix = compute_distance_matrix(lats, lons)
 
     # --- create / load study ---
-    sampler = TPESampler(seed=int(hpo_cfg.get("seed", 42)))
+    sampler = TPESampler()
     study = optuna.create_study(
         study_name=study_name,
         storage=storage,

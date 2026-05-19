@@ -60,14 +60,34 @@ class DCRNN(nn.Module):
 
     def __init__(self, config: DCRNNConfig) -> None:
         super().__init__()
-        self.cfg   = config
-        self.T_hist = config.history_length
-        self.T_fore = config.forecast_horizon
-        self.M      = config.station_meas_features
-        self.target_feat_idx = config.target_feat_idx
+        self.cfg               = config
+        self.T_hist            = config.history_length
+        self.T_fore            = config.forecast_horizon
+        self.M                 = config.station_meas_features
+        self.target_feat_idx   = config.target_feat_idx
+        self.direction_to_adj  = config.direction_to_adj
+        self.wind_dir_meas_idx = config.wind_dir_meas_idx
+        self.wind_dir_cos_idx  = config.wind_dir_cos_idx
+        self._icond2_k         = config.graph.next_n_icond2_grid_points
+        self.nwp_nodes         = config.nwp_nodes
+        self.edge_weight_sigma = config.edge_weight_sigma
 
-        nwp_out_dim = config.nwp_out_dim
-        edge_dim    = config.edge_input_dim()
+        edge_dim = config.edge_input_dim()
+
+        if config.nwp_nodes:
+            # Standard path: GATv2 over explicit NWP nodes
+            enc_meas_dim     = config.station_meas_features          # M
+            nwp_out_dim      = config.nwp_out_dim
+            station_nwp_dim  = 0
+        else:
+            # nwp_nodes=False: k nearest NWP grid points concatenated into station.x, no GATv2
+            _k_i2 = config.graph.next_n_icond2_grid_points
+            enc_meas_dim    = (config.station_meas_features
+                               + _k_i2 * config.icond2_features_per_step
+                               + config.ecmwf_features_per_step)     # M + k*I2 + E2
+            nwp_out_dim     = 0
+            station_nwp_dim = (_k_i2 * config.icond2_features_per_step
+                               + config.ecmwf_features_per_step)     # k*I2 + E2
 
         shared_kwargs = dict(
             icond2_dim=config.icond2_features_per_step,
@@ -76,18 +96,20 @@ class DCRNN(nn.Module):
             static_dim=config.station_static_features,
             hidden_dim=config.hidden_dim,
             num_layers=config.num_layers,
-            K=config.diffusion_K,
+            K=config.K_hop,
             dropout=config.dropout,
             nwp_heads=config.nwp_heads,
             edge_dim=edge_dim,
+            nwp_nodes=config.nwp_nodes,
         )
 
         self.encoder = DCGRUEncoder(
-            meas_dim=config.station_meas_features,
+            meas_dim=enc_meas_dim,
             **shared_kwargs,
         )
         self.decoder = DCGRUDecoder(
             forecast_horizon=config.forecast_horizon,
+            station_nwp_dim=station_nwp_dim,
             **shared_kwargs,
         )
 
@@ -120,7 +142,6 @@ class DCRNN(nn.Module):
         # station.x  : (N_s, T, M+I2+E2)  — measurements in first M cols
         x_station = data["station"].x                  # (N_s, T, M+I2+E2)
         static    = data["station"].static             # (N_s, S)
-        meas      = x_station[:, :self.T_hist, :self.M]  # (N_s, T_hist, M)
 
         # icond2 / ecmwf sequences  (N_nwp, T, F_nwp)
         icond2_seq = data["icond2"].x                  # (N_i, T, I2)
@@ -129,19 +150,70 @@ class DCRNN(nn.Module):
         # ── Edge indices and attributes ────────────────────────────────
         s2s_ei = data[s2s_key].edge_index
         s2s_ea = data[s2s_key].edge_attr
-        s2s_ew = DCGRUCell.edge_weight_from_attr(s2s_ea)   # (E,)
+        s2s_ew = DCGRUCell.edge_weight_from_attr(s2s_ea, sigma=self.edge_weight_sigma)   # (E,)
 
         i2s_ei = data[i2s_key].edge_index
         i2s_ea = data[i2s_key].edge_attr
         e2s_ei = data[e2s_key].edge_index
         e2s_ea = data[e2s_key].edge_attr
 
-        # ── Transpose sequences for loop: (N, T, F) → (T, N, F) ──────
-        meas_seq     = meas.permute(1, 0, 2)              # (T_hist, N_s, M)
-        i2_hist      = icond2_seq[:, :self.T_hist, :].permute(1, 0, 2)  # (T_hist, N_i, I2)
-        e2_hist      = ecmwf_seq[:,  :self.T_hist, :].permute(1, 0, 2)  # (T_hist, N_e, E2)
-        i2_fore      = icond2_seq[:, self.T_hist:, :].permute(1, 0, 2)  # (T_fore, N_i, I2)
-        e2_fore      = ecmwf_seq[:,  self.T_hist:, :].permute(1, 0, 2)  # (T_fore, N_e, E2)
+        # ── Build meas_seq and station_nwp_fore ────────────────────────
+        if self.nwp_nodes:
+            # Standard path: only M measurement channels feed the encoder
+            meas      = x_station[:, :self.T_hist, :self.M]          # (N_s, T_hist, M)
+            meas_seq  = meas.permute(1, 0, 2)                         # (T_hist, N_s, M)
+            station_nwp_fore = None
+        else:
+            # nwp_nodes=False: all M+I2+E2 channels from station.x feed the encoder
+            meas_full        = x_station[:, :self.T_hist, :]          # (N_s, T_hist, M+I2+E2)
+            meas_seq         = meas_full.permute(1, 0, 2)             # (T_hist, N_s, M+I2+E2)
+            # NWP columns of the forecast window for the decoder
+            station_nwp_fore = x_station[:, self.T_hist:, self.M:].permute(1, 0, 2)
+            #                                                          # (T_fore, N_s, I2+E2)
+            meas = x_station[:, :self.T_hist, :self.M]  # needed for y_last below
+
+        # ── Transpose NWP sequences for loop: (N, T, F) → (T, N, F) ──
+        i2_hist = icond2_seq[:, :self.T_hist, :].permute(1, 0, 2)    # (T_hist, N_i, I2)
+        e2_hist = ecmwf_seq[:,  :self.T_hist, :].permute(1, 0, 2)    # (T_hist, N_e, E2)
+        i2_fore = icond2_seq[:, self.T_hist:, :].permute(1, 0, 2)    # (T_fore, N_i, I2)
+        e2_fore = ecmwf_seq[:,  self.T_hist:, :].permute(1, 0, 2)    # (T_fore, N_e, E2)
+
+        # ── Directional adjacency (wind-conditioned edge weights) ──────
+        # Encoder: flow direction from measured wind_direction (met. convention, degrees).
+        #          Target station measurements are zeroed by IGNNK masking → 0° for targets.
+        # Decoder: flow direction derived from NWP u/v components at nearest icond2 node.
+        dir_kwargs_enc: dict = {}
+        dir_kwargs_dec: dict = {}
+        if self.direction_to_adj:
+            import math
+            s2s_dist_norm = s2s_ea[:, 0]                                          # (E,)
+            s2s_bearing   = torch.atan2(s2s_ea[:, 1], s2s_ea[:, 2])              # (E,) rad
+
+            # Encoder: wind direction → flow direction (radians)
+            if self.wind_dir_cos_idx >= 0:
+                # sin/cos encoded: atan2(sin, cos) recovers the original angle
+                sin_wd = meas_seq[:, :, self.wind_dir_meas_idx]                   # (T_hist, N_s)
+                cos_wd = meas_seq[:, :, self.wind_dir_cos_idx]
+                flow_enc = torch.atan2(sin_wd, cos_wd) + math.pi                  # (T_hist, N_s) rad
+            else:
+                # raw degrees (legacy path)
+                wd_deg = meas_seq[:, :, self.wind_dir_meas_idx]                   # (T_hist, N_s)
+                flow_enc = wd_deg * (math.pi / 180.0) + math.pi                   # (T_hist, N_s) rad
+
+            # Decoder: u/v from data["icond2"].wind_uv (raw, NOT scaled model features)
+            wind_uv = data["icond2"].wind_uv                                      # (N_grid_batch, T, 2)
+            wind_uv_fore = wind_uv[:, self.T_hist:, :].permute(1, 0, 2)          # (T_fore, N_grid_batch, 2)
+            nearest_i2 = i2s_ei[0].reshape(-1, self._icond2_k)[:, 0]             # (N_s_total,)
+            u_dec = wind_uv_fore[:, nearest_i2, 0]                                # (T_fore, N_s)
+            v_dec = wind_uv_fore[:, nearest_i2, 1]                                # (T_fore, N_s)
+            flow_dec = torch.atan2(u_dec, v_dec)                                  # (T_fore, N_s) rad
+
+            dir_kwargs_enc = dict(
+                wind_dir_seq=flow_enc, s2s_dist_norm=s2s_dist_norm, s2s_bearing=s2s_bearing,
+            )
+            dir_kwargs_dec = dict(
+                wind_dir_fore=flow_dec, s2s_dist_norm=s2s_dist_norm, s2s_bearing=s2s_bearing,
+            )
 
         # ── Encoder ────────────────────────────────────────────────────
         H_list = self.encoder(
@@ -155,6 +227,7 @@ class DCRNN(nn.Module):
             i2s_edge_attr=i2s_ea,
             e2s_edge_index=e2s_ei,
             e2s_edge_attr=e2s_ea,
+            **dir_kwargs_enc,
         )
 
         # Last observed value for all nodes (target stations: 0, zeroed by sampler)
@@ -176,6 +249,8 @@ class DCRNN(nn.Module):
             target_mask=target_mask,
             teacher_forcing_targets=teacher_forcing_targets,
             teacher_forcing_ratio=teacher_forcing_ratio,
+            station_nwp_fore=station_nwp_fore,
+            **dir_kwargs_dec,
         )
 
         return preds   # (N_target, T_fore)

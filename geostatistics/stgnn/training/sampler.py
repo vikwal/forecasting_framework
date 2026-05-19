@@ -135,6 +135,9 @@ class TrainingSampler:
         icond2_static: np.ndarray,
         ecmwf_static: np.ndarray,
         train_station_indices: list[int],
+        interpol_meas: np.ndarray | None = None,          # (T, N_stations) Kriging lag, pre-scaled
+        grid_icond2_uv_runs: np.ndarray | None = None,   # (R, 48, N_grid, 2) raw u/v
+        station_k_nearest_grid: np.ndarray | None = None,  # (N_stations, k) — k nearest grid indices
     ) -> SampleBatch:
         H_hist  = self.cfg.history_length
         H_fore  = self.cfg.forecast_horizon
@@ -173,17 +176,31 @@ class TrainingSampler:
         target_mask_bool = torch.tensor([g in target_global for g in all_global], dtype=torch.bool)
         target_mask_np   = target_mask_bool.numpy()
 
-        # ICON-D2: fancy indexing puts advanced dim first → (N_sub, 48, I2)
-        nearest_for_sub = station_nearest_grid[all_global]
-        i2_hist = grid_icond2_runs[r_hist, :, nearest_for_sub, :]   # (N_sub, 48, I2)
-        i2_curr = grid_icond2_runs[r_curr, :, nearest_for_sub, :]   # (N_sub, 48, I2)
-        i2_full = np.concatenate([i2_hist, i2_curr], axis=1)        # (N_sub, 96, I2)
+        # ICON-D2: fancy indexing puts advanced dim first → (N_sub, 48, [k*]I2)
+        if station_k_nearest_grid is not None:
+            # k nearest grid points: (N_sub, k) → (N_sub, k, 48, I2) → (N_sub, 48, k*I2)
+            k_idx   = station_k_nearest_grid[all_global]             # (N_sub, k)
+            i2_hist = grid_icond2_runs[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
+            i2_curr = grid_icond2_runs[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
+        else:
+            nearest_for_sub = station_nearest_grid[all_global]
+            i2_hist = grid_icond2_runs[r_hist, :, nearest_for_sub, :]   # (N_sub, 48, I2)
+            i2_curr = grid_icond2_runs[r_curr, :, nearest_for_sub, :]   # (N_sub, 48, I2)
+        i2_full = np.concatenate([i2_hist, i2_curr], axis=1)        # (N_sub, 96, [k*]I2)
 
         # Grid NWP: plain indexing → (48, N_grid, I2), concat → (96, N_grid, I2)
         i2_grid_full = np.concatenate([
             grid_icond2_runs[r_hist],
             grid_icond2_runs[r_curr],
         ], axis=0)
+
+        # Raw u/v for directional edge weights (not model input features)
+        i2_uv_grid_full = None
+        if grid_icond2_uv_runs is not None:
+            i2_uv_grid_full = np.concatenate([
+                grid_icond2_uv_runs[r_hist],
+                grid_icond2_uv_runs[r_curr],
+            ], axis=0)   # (96, N_grid, 2)
 
         # ECMWF
         e2_full      = station_ecmwf_nwp[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
@@ -198,8 +215,14 @@ class TrainingSampler:
         gt_target    = gt[:, target_mask_np].T
         ground_truth = torch.from_numpy(gt_target.copy().astype(np.float32))
 
-        # Zero target measurements
+        # Zero target measurements (original M features only)
         meas_hist[:, target_mask_np, :] = 0.0
+
+        # Kriging lag feature: append as extra channel after zeroing so target nodes
+        # still carry an external prior estimate (not zeroed, always available).
+        if interpol_meas is not None:
+            rk_slice = interpol_meas[t_hist_abs:t_run_abs, :][:, all_global, np.newaxis]
+            meas_hist = np.concatenate([meas_hist, rk_slice], axis=2)
 
         stat_sub  = station_static[all_global, :]
         type_ind  = (~target_mask_bool).float().unsqueeze(1).numpy()
@@ -215,6 +238,7 @@ class TrainingSampler:
             ecmwf_nwp=e2_grid_full,
             icond2_static=icond2_static,
             ecmwf_static=ecmwf_static,
+            icond2_uv_nwp=i2_uv_grid_full,
         )
         return SampleBatch(data=data, target_mask=target_mask_bool, ground_truth=ground_truth)
 
@@ -233,6 +257,9 @@ class TrainingSampler:
         ecmwf_static: np.ndarray,
         train_station_indices: list[int],
         val_station_indices: list[int],
+        interpol_meas: np.ndarray | None = None,          # (T, N_stations) Kriging lag, pre-scaled
+        grid_icond2_uv_runs: np.ndarray | None = None,   # (R, 48, N_grid, 2) raw u/v
+        station_k_nearest_grid: np.ndarray | None = None,  # (N_stations, k) — k nearest grid indices
     ) -> SampleBatch:
         H_hist = self.cfg.history_length
         H_fore = self.cfg.forecast_horizon
@@ -251,15 +278,28 @@ class TrainingSampler:
         target_mask_bool = torch.zeros(N_all, dtype=torch.bool)
         target_mask_bool[N_train:] = True
 
-        nearest_for_all = station_nearest_grid[all_global]
-        i2_hist = grid_icond2_runs[r_hist, :, nearest_for_all, :]   # (N_all, 48, I2)
-        i2_curr = grid_icond2_runs[r_curr, :, nearest_for_all, :]   # (N_all, 48, I2)
-        i2_full = np.concatenate([i2_hist, i2_curr], axis=1)        # (N_all, 96, I2)
+        # ICON-D2: fancy indexing puts advanced dim first → (N_all, 48, [k*]I2)
+        if station_k_nearest_grid is not None:
+            k_idx   = station_k_nearest_grid[all_global]             # (N_all, k)
+            i2_hist = grid_icond2_runs[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
+            i2_curr = grid_icond2_runs[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
+        else:
+            nearest_for_all = station_nearest_grid[all_global]
+            i2_hist = grid_icond2_runs[r_hist, :, nearest_for_all, :]   # (N_all, 48, I2)
+            i2_curr = grid_icond2_runs[r_curr, :, nearest_for_all, :]   # (N_all, 48, I2)
+        i2_full = np.concatenate([i2_hist, i2_curr], axis=1)        # (N_all, 96, [k*]I2)
 
         i2_grid_full = np.concatenate([
             grid_icond2_runs[r_hist],
             grid_icond2_runs[r_curr],
         ], axis=0)
+
+        i2_uv_grid_full = None
+        if grid_icond2_uv_runs is not None:
+            i2_uv_grid_full = np.concatenate([
+                grid_icond2_uv_runs[r_hist],
+                grid_icond2_uv_runs[r_curr],
+            ], axis=0)   # (96, N_grid, 2)
 
         e2_full      = station_ecmwf_nwp[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
         e2_full      = e2_full.transpose(1, 0, 2)                    # (N_all, 96, E2)
@@ -267,6 +307,10 @@ class TrainingSampler:
 
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
         meas_hist[:, N_train:, :] = 0.0
+
+        if interpol_meas is not None:
+            rk_slice = interpol_meas[t_hist_abs:t_run_abs, :][:, all_global, np.newaxis]
+            meas_hist = np.concatenate([meas_hist, rk_slice], axis=2)
 
         gt = station_meas[t_run_abs:t_run_abs + H_fore, :, self.target_feat_idx][:, all_global]
         gt_val       = gt[:, N_train:].T
@@ -286,6 +330,7 @@ class TrainingSampler:
             ecmwf_nwp=e2_grid_full,
             icond2_static=icond2_static,
             ecmwf_static=ecmwf_static,
+            icond2_uv_nwp=i2_uv_grid_full,
         )
         return SampleBatch(data=data, target_mask=target_mask_bool, ground_truth=ground_truth)
 
@@ -294,14 +339,15 @@ class TrainingSampler:
     def _make_data(
         self,
         all_global: list[int],
-        meas_hist: np.ndarray,      # (H,     N_sub,  M)
-        i2_full: np.ndarray,        # (N_sub, 96,    I2)
-        e2_full: np.ndarray,        # (N_sub, 96,    E2)
-        stat_full: np.ndarray,      # (N_sub, S)
-        icond2_nwp: np.ndarray,     # (96,    N_grid, I2)
-        ecmwf_nwp: np.ndarray,      # (96,    N_ecmwf,E2)
+        meas_hist: np.ndarray,                  # (H,     N_sub,  M)
+        i2_full: np.ndarray,                    # (N_sub, 96,    I2)
+        e2_full: np.ndarray,                    # (N_sub, 96,    E2)
+        stat_full: np.ndarray,                  # (N_sub, S)
+        icond2_nwp: np.ndarray,                 # (96,    N_grid, I2)
+        ecmwf_nwp: np.ndarray,                  # (96,    N_ecmwf,E2)
         icond2_static: np.ndarray,
         ecmwf_static: np.ndarray,
+        icond2_uv_nwp: np.ndarray | None = None,  # (96, N_grid, 2) raw u/v for direction_to_adj
     ) -> HeteroData:
         H_hist = meas_hist.shape[0]
         N_sub  = i2_full.shape[0]
@@ -371,5 +417,12 @@ class TrainingSampler:
             ecmwf_x = ecmwf_nwp.transpose(1, 0, 2)
         data["ecmwf"].x      = torch.from_numpy(ecmwf_x.astype(np.float32))
         data["ecmwf"].static = torch.from_numpy(ecmwf_static.astype(np.float32))
+
+        # Optional: raw u/v for directional edge weights in the decoder.
+        # (96, N_grid, 2) → (N_grid, 96, 2) — NOT scaled, atan2 only needs direction.
+        if icond2_uv_nwp is not None:
+            data["icond2"].wind_uv = torch.from_numpy(
+                icond2_uv_nwp.transpose(1, 0, 2).astype(np.float32)
+            )
 
         return data

@@ -58,7 +58,10 @@ try:
 except ImportError:
     SummaryWriter = None  # type: ignore[assignment,misc]
 
-from geostatistics.train_dcrnn import resolve_feature_mode, feature_indices
+from geostatistics.train_dcrnn import (
+    resolve_feature_mode, feature_indices,
+    encode_circular_measurements, apply_dir_encoding,
+)
 from geostatistics.train_stgnn2 import (
     load_yaml,
     load_station_measurements,
@@ -212,7 +215,9 @@ def main() -> None:
     data_cfg = cfg["data"]
     dcrnn_cfg = cfg.get("dcrnn", {})
 
-    freq       = data_cfg.get("freq", "1h")
+    freq   = data_cfg.get("freq", "1h")
+    _freq_h_map = {"1h": 1.0, "1H": 1.0, "30min": 0.5, "30T": 0.5, "15min": 0.25, "15T": 0.25}
+    freq_h = _freq_h_map.get(freq, 1.0)
     H_fore_tmp = dcrnn_cfg.get("forecast_horizon", 48)
     # Mirror hpo_cl.py naming: cl_m-{model}_out-{output_dim}_freq-{freq}_{config}{suffix}
     study_name = f"cl_m-dcrnn_out-{H_fore_tmp}_freq-{freq}_{config_stem}"
@@ -270,10 +275,26 @@ def main() -> None:
     target_col       = dcrnn_cfg["target_col"]
     H   = dcrnn_cfg.get("history_length", 48)
     F_h = dcrnn_cfg.get("forecast_horizon", 48)
-    run_hours     = tuple(dcrnn_cfg.get("icond2_run_hours", [6, 9, 12, 15]))
-    next_n_icond2 = dcrnn_cfg.get("next_n_icond2", 4)
-    next_n_ecmwf  = dcrnn_cfg.get("next_n_ecmwf", 4)
-    n_workers     = dcrnn_cfg.get("n_workers", 8)
+    run_hours          = tuple(dcrnn_cfg.get("icond2_run_hours", [6, 9, 12, 15]))
+    next_n_icond2      = dcrnn_cfg.get("next_n_icond2", 4)
+    next_n_ecmwf       = dcrnn_cfg.get("next_n_ecmwf", 4)
+    n_workers          = dcrnn_cfg.get("n_workers", 8)
+
+    # When next_n_icond2 / next_n_ecmwf are HPO params, data must be loaded with
+    # the maximum bound so that trials sampling smaller values have enough grid
+    # points available.  Graph topology is then rebuilt per trial.
+    _i2_hpo_spec  = hpo_params.get("next_n_icond2")
+    _e2_hpo_spec  = hpo_params.get("next_n_ecmwf")
+    max_next_n_icond2 = _i2_hpo_spec["high"] if _i2_hpo_spec else next_n_icond2
+    max_next_n_ecmwf  = _e2_hpo_spec["high"] if _e2_hpo_spec else next_n_ecmwf
+    _rebuild_graph_per_trial = _i2_hpo_spec is not None or _e2_hpo_spec is not None
+    if _rebuild_graph_per_trial:
+        logger.info(
+            "next_n_icond2 or next_n_ecmwf in HPO params → "
+            "data loaded with max values (%d / %d), graph rebuilt per trial.",
+            max_next_n_icond2, max_next_n_ecmwf,
+        )
+    interpolate_history = dcrnn_cfg.get("interpolate_history", False)
     nwp_path      = data_cfg.get("nwp_path")
     data_path     = data_cfg["path"]
 
@@ -367,25 +388,48 @@ def main() -> None:
         logger.info("GNNCache MISS — loading raw data …")
 
         logger.info("Loading station measurements …")
-        meas_raw, timestamps = load_station_measurements(data_path, all_ids, cols=measurement_cols)
+        meas_raw, timestamps = load_station_measurements(data_path, all_ids, cols=measurement_cols, freq=freq)
         T = len(timestamps)
 
+        rk_pred = None   # kept for optional Kriging lag feature below
         interpol_path = data_cfg.get("interpol_path")
         if interpol_path:
             logger.info("Loading interpolation (rk_pred) for imputation from %s …", interpol_path)
-            rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)
+            rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)  # noqa: kept for Kriging lag feature
             nan_before = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
             meas_raw = apply_interpol_imputation(meas_raw, rk_pred, measurement_cols, target_col)
             nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
             logger.info("Imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, target_col)
 
+        # Fallback KNN for target_col (timestamps before Kriging coverage)
+        remaining_nan = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
+        if remaining_nan > 0:
+            knnimputer_path_fb = data_cfg.get("knnimputer_path")
+            if knnimputer_path_fb:
+                logger.info(
+                    "Kriging left %d NaN in '%s' — KNN fallback from %s …",
+                    remaining_nan, target_col, knnimputer_path_fb,
+                )
+                knn_fb = load_knn_imputation(knnimputer_path_fb, target_col, all_ids, timestamps, freq=freq)
+                meas_raw = apply_knn_imputation(meas_raw, knn_fb, measurement_cols, target_col)
+                logger.info(
+                    "KNN fallback: %d → %d NaN in '%s'",
+                    remaining_nan, int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum()),
+                    target_col,
+                )
+
+        # Secondary-column KNN imputation (e.g. wind_direction, dhi, …)
         knnimputer_path = data_cfg.get("knnimputer_path")
-        if knnimputer_path and "wind_direction" in measurement_cols:
-            knn_wd = load_knn_imputation(knnimputer_path, "wind_direction", all_ids, timestamps)
-            nan_before = int(np.isnan(meas_raw[:, :, measurement_cols.index("wind_direction")]).sum())
-            meas_raw = apply_knn_imputation(meas_raw, knn_wd, measurement_cols, "wind_direction")
-            nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index("wind_direction")]).sum())
-            logger.info("KNN imputation: %d NaN → %d NaN in 'wind_direction'", nan_before, nan_after)
+        if knnimputer_path:
+            secondary_cols = [c for c in measurement_cols if c != target_col]
+            for sec_col in secondary_cols:
+                if int(np.isnan(meas_raw[:, :, measurement_cols.index(sec_col)]).sum()) == 0:
+                    continue
+                knn_sec = load_knn_imputation(knnimputer_path, sec_col, all_ids, timestamps, freq=freq)
+                nan_before = int(np.isnan(meas_raw[:, :, measurement_cols.index(sec_col)]).sum())
+                meas_raw = apply_knn_imputation(meas_raw, knn_sec, measurement_cols, sec_col)
+                nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index(sec_col)]).sum())
+                logger.info("KNN imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, sec_col)
 
         _meas_nan_any = np.isnan(meas_raw).any(axis=(1, 2))
 
@@ -401,14 +445,14 @@ def main() -> None:
         lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=meta_path)
         station_coords = np.stack([lats, lons], axis=1)
 
-        logger.info("Loading ICON-D2 ML runs …")
+        logger.info("Loading ICON-D2 ML runs (next_n_grid=%d) …", max_next_n_icond2)
         run_times, icond2_coords, grid_icond2_runs, station_nearest_grid = load_icond2_ml_runs(
             nwp_path=nwp_path,
             station_ids=all_ids,
             station_coords=station_coords,
             features=icond2_features,
             run_hours=run_hours,
-            next_n_grid=next_n_icond2,
+            next_n_grid=max_next_n_icond2,
             n_workers=n_workers,
             cutoff=run_cutoff,
         )
@@ -417,41 +461,67 @@ def main() -> None:
         N_igrid = len(icond2_coords)
         logger.info("ICON-D2: %d grid nodes, %d runs", N_igrid, R)
 
-        ecmwf_parquet_file = os.path.join(
-            data_cfg.get("ecmwf_path", "/mnt/lambda1/nvme1/ecmwf/parquet"),
-            "ecmwf_wind_sl_full.parquet",
-        )
-        E2 = len(ecmwf_features)
-
-        if os.path.exists(ecmwf_parquet_file):
-            station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
-                load_ecmwf_parquet_at_stations_and_grid(
-                    parquet_path=ecmwf_parquet_file,
-                    station_lats=lats, station_lons=lons,
-                    features=ecmwf_features, timestamps=timestamps,
-                    next_n_grid_per_station=next_n_ecmwf,
-                )
+        ecmwf_parquet_file = data_cfg.get("ecmwf_path", "/mnt/nvme1/ecmwf/parquet")
+        if max_next_n_ecmwf == 0:
+            logger.info("next_n_ecmwf=0 — ECMWF nodes disabled, skipping ECMWF loading")
+            station_ecmwf_nwp = np.empty((T, len(all_ids), 0), dtype=np.float32)
+            ecmwf_coords      = np.empty((0, 2), dtype=np.float32)
+            ecmwf_nwp         = np.empty((T, 0, 0), dtype=np.float32)
+            ecmwf_alts        = np.empty(0, dtype=np.float32)
         else:
-            logger.warning("ECMWF parquet not found — using zeros")
-            station_ecmwf_nwp = np.zeros((T, len(all_ids), E2), dtype=np.float32)
-            ec_lats = np.arange(47.5, 55.0, 0.5)
-            ec_lons = np.arange(6.0, 15.5, 0.5)
-            eg, lg  = np.meshgrid(ec_lats, ec_lons)
-            ecmwf_coords = np.stack([eg.ravel(), lg.ravel()], axis=1).astype(np.float32)
-            ecmwf_nwp    = np.zeros((T, len(ecmwf_coords), E2), dtype=np.float32)
-            ecmwf_alts   = np.zeros(len(ecmwf_coords), dtype=np.float32)
+            E2 = len(ecmwf_features)
+
+            if os.path.exists(ecmwf_parquet_file):
+                station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
+                    load_ecmwf_parquet_at_stations_and_grid(
+                        parquet_path=ecmwf_parquet_file,
+                        station_lats=lats, station_lons=lons,
+                        features=ecmwf_features, timestamps=timestamps,
+                        next_n_grid_per_station=max_next_n_ecmwf,
+                    )
+            else:
+                logger.warning("ECMWF parquet not found — using zeros")
+                station_ecmwf_nwp = np.zeros((T, len(all_ids), E2), dtype=np.float32)
+                ec_lats = np.arange(47.5, 55.0, 0.5)
+                ec_lons = np.arange(6.0, 15.5, 0.5)
+                eg, lg  = np.meshgrid(ec_lats, ec_lons)
+                ecmwf_coords = np.stack([eg.ravel(), lg.ravel()], axis=1).astype(np.float32)
+                ecmwf_nwp    = np.zeros((T, len(ecmwf_coords), E2), dtype=np.float32)
+                ecmwf_alts   = np.zeros(len(ecmwf_coords), dtype=np.float32)
+
+            # Only check the training+validation window (timestamps before test_start).
+            # Timestamps from test_start onward are not used during HPO; ECMWF data
+            # may legitimately be absent for future dates.
+            ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp[:split_t]).sum())
+            ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp[:split_t]).sum())
+            if ecmwf_nan_station > 0 or ecmwf_nan_grid > 0:
+                raise ValueError(
+                    f"ECMWF data contains NaN in training window — "
+                    f"station array: {ecmwf_nan_station} NaN, "
+                    f"grid array: {ecmwf_nan_grid} NaN."
+                )
+            _beyond = int(np.isnan(station_ecmwf_nwp[split_t:]).sum())
+            if _beyond > 0:
+                logger.info(
+                    "ECMWF: %d NaN beyond test_start (timestamps not used in HPO — OK).", _beyond
+                )
 
         # Altitudes
+        weather_db_url = os.environ.get("WEATHER_DB_URL")
+        ecmwf_db_url   = os.environ.get("ECMWF_WIND_SL_URL")
         if dcrnn_cfg.get("use_altitude_diff", False):
-            weather_db_url = os.environ.get("WEATHER_DB_URL")
-            ecmwf_db_url   = os.environ.get("ECMWF_WIND_SL_URL")
-            if weather_db_url and ecmwf_db_url:
+            if weather_db_url and ecmwf_db_url and max_next_n_ecmwf > 0:
                 icond2_alts, ecmwf_alts = load_nwp_elevations(
                     weather_db_url=weather_db_url, ecmwf_db_url=ecmwf_db_url,
                     icond2_coords=icond2_coords, ecmwf_coords=ecmwf_coords,
                 )
                 icond2_alts += 10.0
                 ecmwf_alts  += 10.0
+            elif weather_db_url:
+                from geostatistics.train_stgnn2 import _load_elevations_from_table
+                icond2_alts = _load_elevations_from_table(
+                    weather_db_url, "icon_d2_grid_points", icond2_coords
+                ) + 10.0
             else:
                 logger.warning("DB URLs not set — NWP altitudes = 0")
                 icond2_alts = np.zeros(N_igrid, dtype=np.float32)
@@ -460,7 +530,7 @@ def main() -> None:
 
         M_meas = len(measurement_cols)
         I2     = len(icond2_features_all)
-        E2     = len(ecmwf_features_all)
+        E2     = station_ecmwf_nwp.shape[2]   # 0 when next_n_ecmwf == 0
 
         # Static node features: coordinates + altitude are time- and fold-independent,
         # so fitting on all nodes is not leakage — these go into the cache scaled.
@@ -475,9 +545,12 @@ def main() -> None:
         icond2_static_scaled = StandardScaler().fit_transform(
             np.concatenate([icond2_coords, icond2_alts[:, None]], axis=1)
         ).astype(np.float32)
-        ecmwf_static_scaled = StandardScaler().fit_transform(
-            np.concatenate([ecmwf_coords, ecmwf_alts[:, None]], axis=1)
-        ).astype(np.float32)
+        if len(ecmwf_coords) > 0:
+            ecmwf_static_scaled = StandardScaler().fit_transform(
+                np.concatenate([ecmwf_coords, ecmwf_alts[:, None]], axis=1)
+            ).astype(np.float32)
+        else:
+            ecmwf_static_scaled = np.empty((0, 3), dtype=np.float32)
 
         # ── All pre-test run pairs ─────────────────────────────────────────────
         all_run_pairs, _ = _build_run_pairs(
@@ -520,7 +593,65 @@ def main() -> None:
             )
             logger.info("GNNCache — cache written.")
 
+    # Exclude run pairs that involve a run with NaN in ICON-D2 grid data.
+    _grid_nan_runs = set(
+        int(i) for i in np.where(np.isnan(grid_icond2_runs).any(axis=(1, 2, 3)))[0]
+    )
+    if _grid_nan_runs:
+        n_before = len(all_run_pairs)
+        all_run_pairs = [
+            (rc, rh, t) for rc, rh, t in all_run_pairs
+            if rc not in _grid_nan_runs and rh not in _grid_nan_runs
+        ]
+        logger.warning(
+            "Excluded %d run pairs due to NaN in ICON-D2 grid data (%d run(s) affected).",
+            n_before - len(all_run_pairs), len(_grid_nan_runs),
+        )
+
     logger.info("Total pre-test run pairs available for CV: %d", len(all_run_pairs))
+
+    # ── Circular encoding of measurement features (wind_direction → sin/cos) ──────
+    meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
+    M_meas = len(measurement_cols)
+
+    # ── dir_in_deg NWP encoding (applied once when mode is fixed, not an HPO param) ──
+    _i2_mode_fixed = dcrnn_cfg.get("icond2_feature_mode", "both")
+    if _i2_mode_fixed == "dir_in_deg" and "icond2_feature_mode" not in hpo_params:
+        grid_icond2_runs, icond2_features_all = apply_dir_encoding(
+            grid_icond2_runs, icond2_features_all
+        )
+        icond2_features = icond2_features_all
+        logger.info("dir_in_deg (ICON-D2, fixed): encoded → %s", icond2_features_all)
+
+    _e2_mode_fixed = dcrnn_cfg.get("ecmwf_feature_mode", "both")
+    if _e2_mode_fixed == "dir_in_deg" and "ecmwf_feature_mode" not in hpo_params:
+        _ecmwf_pre = list(ecmwf_features_all)
+        station_ecmwf_nwp, ecmwf_features_all = apply_dir_encoding(
+            station_ecmwf_nwp, ecmwf_features_all
+        )
+        ecmwf_nwp, _ = apply_dir_encoding(ecmwf_nwp, _ecmwf_pre)
+        ecmwf_features = ecmwf_features_all
+        logger.info("dir_in_deg (ECMWF, fixed): encoded → %s", ecmwf_features_all)
+
+    # ── k-nearest grid indices for nwp_nodes=False ────────────────────────────
+    # When nwp_nodes=False, the k nearest ICON-D2 grid points are concatenated
+    # as features into station.x (shape N_sub × 96 × k*I2) instead of forming
+    # explicit NWP graph nodes. station_k_nearest_grid stores the k nearest grid
+    # point indices per station (shape N_stations × max_next_n_icond2).
+    # Per trial, only the first trial_k columns are used.
+    _cfg_nwp_nodes = dcrnn_cfg.get("nwp_nodes", True)
+    if _cfg_nwp_nodes:
+        station_k_nearest_grid = None
+    else:
+        from sklearn.neighbors import BallTree as _BallTree
+        _bt = _BallTree(np.radians(icond2_coords), metric="haversine")
+        station_k_nearest_grid = _bt.query(
+            np.radians(station_coords), k=max_next_n_icond2, return_distance=False,
+        ).astype(np.int64)  # (N_stations, max_next_n_icond2)
+        logger.info(
+            "nwp_nodes=False — station_k_nearest_grid: %s  (k_max=%d)",
+            station_k_nearest_grid.shape, max_next_n_icond2,
+        )
 
     # ── Exit early if --preprocess-only ───────────────────────────────────────
     if args.preprocess_only:
@@ -538,47 +669,50 @@ def main() -> None:
         "HPO val stations: first %d of %d val stations", len(hpo_val_station_indices), N_val
     )
 
-    # Build graph using a base config (topology never changes across trials)
-    _base_cfg = copy.deepcopy(dcrnn_cfg)
-    _base_cfg.setdefault("hidden", 64)
-    _base_cfg.setdefault("num_layers", 2)
-    _base_cfg.setdefault("diffusion_K", 4)
-    _base_cfg.setdefault("nwp_out_dim", 64)
-    _base_cfg.setdefault("nwp_heads", 4)
-    _base_cfg.setdefault("dropout", 0.3)
-    _base_cfg.setdefault("teacher_forcing_ratio", 0.3)
-    _base_cfg.setdefault("lr", 3e-4)
-    _base_cfg.setdefault("weight_decay", 1e-3)
-    _base_cfg.setdefault("batch_size", 8)
-    _base_cfg.setdefault("horizon_decay", 0.95)
-    _base_cfg.setdefault("scheduler", "cosine")
-
-    _base_model_cfg = DCRNNConfig.from_yaml(
-        _base_cfg,
-        icond2_features=icond2_features,
-        ecmwf_features=ecmwf_features,
-        measurement_features=measurement_cols,
-        target_col=target_col,
-        n_train=N_train,
-        n_val=N_val,
-        checkpoint_path="models/_hpo_dcrnn_tmp.pt",
-    )
-
-    builder    = HeterogeneousGraphBuilder(_base_model_cfg.graph)
-    base_graph = builder.build(
-        station_coords=station_coords,
-        station_altitudes=alts,
-        icond2_grid_coords=icond2_coords,
-        ecmwf_grid_coords=ecmwf_coords,
-        icond2_altitudes=icond2_alts,
-        ecmwf_altitudes=ecmwf_alts,
-    )
-    logger.info(
-        "Graph — s2s: %d  i2s: %d  e2s: %d",
-        base_graph["station", "near", "station"].edge_index.shape[1] // 2,
-        base_graph["icond2", "informs", "station"].edge_index.shape[1],
-        base_graph["ecmwf",  "informs", "station"].edge_index.shape[1],
-    )
+    # Build a static base graph when the graph topology is fixed across all trials
+    # (i.e. next_n_icond2 and next_n_ecmwf are NOT in HPO params).
+    # When either is tuned, the graph is rebuilt per trial inside objective() instead.
+    _static_builder    = None
+    _static_base_graph = None
+    if not _rebuild_graph_per_trial:
+        _base_cfg = copy.deepcopy(dcrnn_cfg)
+        _base_cfg.setdefault("hidden", 64)
+        _base_cfg.setdefault("num_layers", 2)
+        _base_cfg.setdefault("K_hop", 4)
+        _base_cfg.setdefault("nwp_out_dim", 64)
+        _base_cfg.setdefault("nwp_heads", 4)
+        _base_cfg.setdefault("dropout", 0.3)
+        _base_cfg.setdefault("teacher_forcing_ratio", 0.3)
+        _base_cfg.setdefault("lr", 3e-4)
+        _base_cfg.setdefault("weight_decay", 1e-3)
+        _base_cfg.setdefault("grad_accum", 4)
+        _base_cfg.setdefault("horizon_decay", 0.95)
+        _base_cfg.setdefault("scheduler", "cosine")
+        _base_model_cfg = DCRNNConfig.from_yaml(
+            _base_cfg,
+            icond2_features=icond2_features,
+            ecmwf_features=ecmwf_features,
+            measurement_features=measurement_cols,
+            target_col=target_col,
+            n_train=N_train,
+            n_val=N_val,
+            checkpoint_path="models/_hpo_dcrnn_tmp.pt",
+        )
+        _static_builder    = HeterogeneousGraphBuilder(_base_model_cfg.graph)
+        _static_base_graph = _static_builder.build(
+            station_coords=station_coords,
+            station_altitudes=alts,
+            icond2_grid_coords=icond2_coords,
+            ecmwf_grid_coords=ecmwf_coords,
+            icond2_altitudes=icond2_alts,
+            ecmwf_altitudes=ecmwf_alts,
+        )
+        logger.info(
+            "Graph (static) — s2s: %d  i2s: %d  e2s: %d",
+            _static_base_graph["station", "near", "station"].edge_index.shape[1] // 2,
+            _static_base_graph["icond2", "informs", "station"].edge_index.shape[1],
+            _static_base_graph["ecmwf",  "informs", "station"].edge_index.shape[1],
+        )
 
     # ── Time-based CV fold boundaries (expanding window, same as hpo_cl.py) ──
     #
@@ -648,7 +782,7 @@ def main() -> None:
     # ── Objective ─────────────────────────────────────────────────────────────
     def objective(trial: optuna.Trial) -> float:
         sampled = sample_hyperparameters(trial, hpo_params)
-        logger.info("Trial %d — params: %s", trial.number, sampled)
+        logger.info("Trial %d — hyperparameters: %s", trial.number, sampled)
 
         trial_cfg = copy.deepcopy(dcrnn_cfg)
         trial_cfg.update(sampled)
@@ -659,15 +793,47 @@ def main() -> None:
         i2_mode = sampled.pop("icond2_feature_mode", dcrnn_cfg.get("icond2_feature_mode", "both"))
         e2_mode = sampled.pop("ecmwf_feature_mode",  dcrnn_cfg.get("ecmwf_feature_mode",  "both"))
         trial_i2_features = resolve_feature_mode(icond2_features_all, i2_mode)
-        trial_e2_features = resolve_feature_mode(ecmwf_features_all,  e2_mode)
+        # direction_to_adj: u/v loaded from the pre-loaded grid_icond2_runs (full feature set).
+        # They are NOT added to trial_i2_features — model input I2 stays unchanged.
+        trial_grid_uv = None
+        if trial_cfg.get("direction_to_adj", False):
+            u_feat = trial_cfg.get("wind_u_icond2_feature", "u_10m")
+            v_feat = trial_cfg.get("wind_v_icond2_feature", "v_10m")
+            if u_feat not in icond2_features_all or v_feat not in icond2_features_all:
+                raise ValueError(
+                    f"direction_to_adj=True requires '{u_feat}' and '{v_feat}' "
+                    f"in dcrnn.icond2_features (icond2_features_all={icond2_features_all})."
+                )
+            uv_i2_idx = [icond2_features_all.index(u_feat), icond2_features_all.index(v_feat)]
+            trial_grid_uv = grid_icond2_runs[:, :, :, uv_i2_idx]  # (R, 48, N_grid, 2) raw
+        trial_n_ecmwf = int(trial_cfg.get("next_n_ecmwf", next_n_ecmwf))
+        if trial_n_ecmwf > 0:
+            trial_e2_features = resolve_feature_mode(ecmwf_features_all, e2_mode)
+            e2_idx = feature_indices(ecmwf_features_all, trial_e2_features)
+        else:
+            trial_e2_features = []
+            e2_idx = []
         i2_idx = feature_indices(icond2_features_all, trial_i2_features)
-        e2_idx = feature_indices(ecmwf_features_all,  trial_e2_features)
         trial_I2 = len(trial_i2_features)
         trial_E2 = len(trial_e2_features)
         # Slice the pre-loaded arrays to the trial feature subset
         trial_grid_icond2 = grid_icond2_runs[:, :, :, i2_idx]   # (R, 48, N_igrid, trial_I2)
-        trial_ecmwf_nwp   = ecmwf_nwp[:, :, e2_idx]              # (T, N_ecmwf, trial_E2)
-        trial_sta_ecmwf   = station_ecmwf_nwp[:, :, e2_idx]      # (T, N_all, trial_E2)
+        trial_ecmwf_nwp   = ecmwf_nwp[:, :, e2_idx] if e2_idx else np.empty((ecmwf_nwp.shape[0], 0, 0), dtype=np.float32)
+
+        # dir_in_deg per-trial encoding (only when feature mode is an HPO param;
+        # if it was fixed, encoding was already applied globally above)
+        if i2_mode == "dir_in_deg" and "icond2_feature_mode" in hpo_params:
+            trial_grid_icond2, trial_i2_features = apply_dir_encoding(
+                trial_grid_icond2, trial_i2_features
+            )
+            trial_I2 = len(trial_i2_features)
+        if e2_mode == "dir_in_deg" and "ecmwf_feature_mode" in hpo_params and e2_idx:
+            _ecmwf_pre = list(trial_e2_features)
+            trial_ecmwf_nwp,  trial_e2_features = apply_dir_encoding(trial_ecmwf_nwp, _ecmwf_pre)
+            trial_sta_ecmwf = station_ecmwf_nwp[:, :, e2_idx]
+            trial_sta_ecmwf, _                  = apply_dir_encoding(trial_sta_ecmwf, _ecmwf_pre)
+            trial_E2 = len(trial_e2_features)
+        trial_sta_ecmwf   = station_ecmwf_nwp[:, :, e2_idx] if e2_idx else np.empty((station_ecmwf_nwp.shape[0], station_ecmwf_nwp.shape[1], 0), dtype=np.float32)
 
         model_cfg = DCRNNConfig.from_yaml(
             trial_cfg,
@@ -680,8 +846,27 @@ def main() -> None:
             checkpoint_path="models/_hpo_dcrnn_tmp.pt",
         )
 
+        # Build graph: per trial when next_n_icond2/next_n_ecmwf are tuned,
+        # otherwise reuse the static graph built outside the trial loop.
+        if _rebuild_graph_per_trial:
+            trial_n_ecmwf_g = int(trial_cfg.get("next_n_ecmwf", next_n_ecmwf))
+            _ec_coords_g = ecmwf_coords if trial_n_ecmwf_g > 0 else np.empty((0, 2), dtype=np.float32)
+            _ec_alts_g   = ecmwf_alts   if trial_n_ecmwf_g > 0 else np.empty(0, dtype=np.float32)
+            _trial_builder = HeterogeneousGraphBuilder(model_cfg.graph)
+            _trial_graph   = _trial_builder.build(
+                station_coords=station_coords,
+                station_altitudes=alts,
+                icond2_grid_coords=icond2_coords,
+                ecmwf_grid_coords=_ec_coords_g,
+                icond2_altitudes=icond2_alts,
+                ecmwf_altitudes=_ec_alts_g,
+            )
+        else:
+            _trial_builder = _static_builder
+            _trial_graph   = _static_base_graph
+
         sampler_obj = TrainingSampler(
-            model_cfg, builder, base_graph,
+            model_cfg, _trial_builder, _trial_graph,
             target_feat_idx=target_feat_idx,
             station_coords=station_coords,
         )
@@ -712,17 +897,30 @@ def main() -> None:
             fold_i2_scaler.fit(trial_grid_icond2[fold_train_r].reshape(-1, trial_I2))
             grid_icond2_runs_scaled = fold_i2_scaler.transform(
                 trial_grid_icond2.reshape(-1, trial_I2)
-            ).reshape(R, 48, N_igrid, trial_I2)
+            ).reshape(R, trial_grid_icond2.shape[1], N_igrid, trial_I2)
 
-            fold_e2_scaler = StandardScaler()
-            fold_e2_scaler.fit(trial_sta_ecmwf[:fold_train_t, :N_train].reshape(-1, trial_E2))
-            station_ecmwf_scaled = fold_e2_scaler.transform(
-                trial_sta_ecmwf.reshape(-1, trial_E2)
-            ).reshape(T, len(all_ids), trial_E2)
-            ecmwf_nwp_scaled = fold_e2_scaler.transform(
-                trial_ecmwf_nwp.reshape(-1, trial_E2)
-            ).reshape(T, len(ecmwf_coords), trial_E2)
+            if trial_E2 > 0:
+                fold_e2_scaler = StandardScaler()
+                fold_e2_scaler.fit(trial_sta_ecmwf[:fold_train_t, :N_train].reshape(-1, trial_E2))
+                station_ecmwf_scaled = fold_e2_scaler.transform(
+                    trial_sta_ecmwf.reshape(-1, trial_E2)
+                ).reshape(T, len(all_ids), trial_E2)
+                ecmwf_nwp_scaled = fold_e2_scaler.transform(
+                    trial_ecmwf_nwp.reshape(-1, trial_E2)
+                ).reshape(T, len(ecmwf_coords), trial_E2)
+            else:
+                station_ecmwf_scaled = np.empty((T, len(all_ids),  0), dtype=np.float32)
+                ecmwf_nwp_scaled     = np.empty((T, 0,             0), dtype=np.float32)
 
+            # Kriging lag feature: scale rk_pred per-fold using fold training mean/std
+            if interpolate_history and rk_pred is not None:
+                tidx = measurement_cols.index(target_col)
+                rk_s = (rk_pred - fold_meas_scaler.mean_[tidx]) / (fold_meas_scaler.std_[tidx] + fold_meas_scaler.eps)
+                fold_interpol_meas = np.nan_to_num(rk_s, nan=0.0).astype(np.float32)
+            else:
+                fold_interpol_meas = None
+
+            _trial_k = model_cfg.graph.next_n_icond2_grid_points
             fold_data = dict(
                 station_meas=meas_scaled,
                 station_nearest_grid=station_nearest_grid,
@@ -734,6 +932,12 @@ def main() -> None:
                 ecmwf_static=ecmwf_static_scaled,
                 train_station_indices=train_station_indices,
                 val_station_indices=hpo_val_station_indices,
+                interpol_meas=fold_interpol_meas,
+                grid_icond2_uv_runs=trial_grid_uv,
+                station_k_nearest_grid=(
+                    station_k_nearest_grid[:, :_trial_k]
+                    if station_k_nearest_grid is not None else None
+                ),
             )
 
             ckpt = Path(f"models/_hpo_dcrnn_trial{trial.number}_fold{fold_idx}.pt")
@@ -751,6 +955,8 @@ def main() -> None:
                 teacher_forcing_start=float(trial_cfg.get("teacher_forcing_ratio", 0.5)),
                 teacher_forcing_end=0.0,
                 writer=writer,
+                target_scale=float(fold_meas_scaler.std_[target_feat_idx] + fold_meas_scaler.eps),
+                target_mean=float(fold_meas_scaler.mean_[target_feat_idx]),
             )
             # Override checkpoint path in trainer
             trainer._ckpt_path = ckpt
@@ -764,10 +970,10 @@ def main() -> None:
             if writer is not None:
                 writer.close()
 
-            fold_loss = result["best_val_loss"]
+            fold_loss = result["best_val_rmse"]
             fold_losses.append(fold_loss)
             logger.info(
-                "Trial %d fold %d — best_val_loss=%.4f  stopped=%d",
+                "Trial %d fold %d — best_val_rmse=%.4f  stopped=%d",
                 trial.number, fold_idx, fold_loss, result["stopped_epoch"],
             )
 
@@ -797,7 +1003,7 @@ def main() -> None:
         storage = optuna.storages.RDBStorage(
             url=storage_url,
             heartbeat_interval=60,
-            failed_trial_callback=optuna.storages.RetryFailedTrialCallback(max_retry=1),
+            engine_kwargs={"pool_pre_ping": True, "pool_recycle": 3600},
         )
         logger.info("Using Optuna storage: PostgreSQL (OPTUNA_STORAGE) with heartbeat")
     else:
@@ -809,7 +1015,7 @@ def main() -> None:
         study_name=study_name,
         storage=storage,
         direction="minimize",
-        sampler=TPESampler(seed=42),
+        sampler=TPESampler(),
         pruner=pruner,
         load_if_exists=True,
     )
@@ -821,20 +1027,22 @@ def main() -> None:
         completed, remaining, n_trials,
     )
 
-    if remaining == 0:
-        logger.info("All trials already completed.")
-    else:
-        study.optimize(
-            objective,
-            n_trials=remaining,
-            catch=(Exception,),
-        )
+    while remaining > 0:
+        try:
+            study.optimize(objective, n_trials=remaining, catch=(Exception,))
+            break
+        except Exception as exc:
+            logger.warning("study.optimize interrupted (%s) — reconnecting …", exc)
+            completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            remaining = max(n_trials - completed, 0)
+            if remaining == 0:
+                break
 
     # ── Results ───────────────────────────────────────────────────────────────
     logger.info("=" * 70)
     logger.info("HPO COMPLETE")
     logger.info("Best trial:     #%d", study.best_trial.number)
-    logger.info("Best val_loss:  %.6f", study.best_value)
+    logger.info("Best val RMSE:  %.6f m/s", study.best_value)
     logger.info("Best params:")
     for k, v in study.best_params.items():
         logger.info("  %-30s %s", k, v)

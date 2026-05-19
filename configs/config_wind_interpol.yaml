@@ -1,10 +1,10 @@
 data:
-  path: '/mnt/nas/synthetic/raw/wind' # '/mnt/nas/open-meteo/wind'
+  path: '/mnt/nvme1/synthetic/raw/wind'
   #exclude_stations: ['03321', '05480', '19207']  # incomplete NWP parquet data
   #test_start: '2023-07-24'
-  test_end:   '2025-11-02'
-  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet' # '/mnt/nas/open-meteo/wind'
-  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet' # '/mnt/nas/open-meteo/wind'
+  # test_end intentionally omitted so scheduled runs always include newest data.
+  nwp_path: '/mnt/nvme1/icon-d2/parquet' # '/mnt/nas/open-meteo/wind'
+  ecmwf_path: '/mnt/nvme1/ecmwf/parquet' # '/mnt/nas/open-meteo/wind'
   stations_master: 'data/stations_master.csv'
 
 
@@ -42,7 +42,7 @@ interpolation:
 
 output:
   path: 'results/geostatistics'
-  target_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'  # per-station interpolated timeseries
+  target_path: '/mnt/nvme1/synthetic/interpol/wind'  # per-station interpolated timeseries
   prefix: 'spatial_interp'   # prepended to all output filenames
 
 

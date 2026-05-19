@@ -1,7 +1,7 @@
 data:
-  path: '/mnt/nas/synthetic/raw/wind'
-  nwp_path: '/mnt/lambda1/nvme1/icond-d2/parquet'
-  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
+  path: '/mnt/nvme1/synthetic/raw/wind'
+  nwp_path: '/mnt/nvme1/icond-d2/parquet'
+  ecmwf_path: '/mnt/nvme1/ecmwf/parquet/ecmwf_wind_sl_full_prefect.parquet'
   files: [
             '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
             '03730', '05792', '05856', '15000', '05779', '05426', '04271', '02638', '02961', '05490',
@@ -20,13 +20,20 @@ data:
             '00701', '03167', '01358', '03126', '05800', '01587', '01694', '00282', '01869', '03925',
             '03376', '19171', '07374', '00656', '02115', '01078', '03811', '03244', '04642', '15207',
             '04745', '01580', '02261', '05629', '03379', '02252', '05930', '13965', '03028', '07369']
+  test_files: [
+            '00096', '00427', '00603', '05371', '00840', '00867', '00891', '00953', '01262', '01303',
+            '05906', '01612', '01803', '01832', '02290', '02429', '02564', '02601', '07410', '02878',
+            '02925', '02928', '03166', '03268', '03362', '03660', '03897', '03946', '03987', '04024',
+            '04032', '00198', '04039', '04177', '04336', '13711', '04501', '04928', '05158', '05347',
+            '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342'
+            ]
   # Optional: restrict to a time window for evaluation (comment out to use all data)
-  test_start: '2025-08-01'
-  test_end:   '2025-10-31'
+  test_start: '2024-12-01'
+  test_end:   '2025-03-31'
   wind_parameter_path: 'data/stations_master.csv'
-  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
-  power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
+  interpol_path: '/mnt/nvme1/synthetic/interpol/wind'
+  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/wind'
+  power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
   #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
@@ -147,7 +154,7 @@ dcrnn:
   # DCRNN architecture
   hidden: 128
   num_layers: 2
-  diffusion_K: 2
+  K_hop: 2
   nwp_out_dim: 64    # output dim of NWP attention layer; must be divisible by nwp_heads
   nwp_heads: 4        # GATv2 attention heads for NWP → station
   dropout: 0.3
@@ -182,6 +189,9 @@ dcrnn:
     trials: 1000
     studies_path: studies/
     tensorboard_monitoring: true
+    pruner: median
+    pruner_n_startup_trials: 20   # trials before pruner activates
+    pruner_n_warmup_steps: 1
     # Cross-validation: expanding-window, same idea as hpo_cl.py
     n_folds: 3
     min_train_date: '2024-03-31'  # end of chunk-0 (always training); folds validate on [2024-07-31 … 2025-08-01]
@@ -202,7 +212,7 @@ dcrnn:
         low: 1
         high: 3
 
-      diffusion_K:
+      K_hop:
         type: int
         low: 1
         high: 4
@@ -229,7 +239,7 @@ dcrnn:
       teacher_forcing_ratio:
         type: float
         low: 0.0
-        high: 0.3
+        high: 0.6
 
       lr:
         type: float
@@ -253,15 +263,10 @@ dcrnn:
         low: 0.80
         high: 1.00
 
-      max_target_stations:
-        type: int
-        low: 1
-        high: 30
-
       next_n_neighbors:
         type: int
         low: 10
-        high: 60
+        high: 100
 
       icond2_feature_mode:
         type: categorical

@@ -264,8 +264,9 @@ def load_data(config: dict) -> tuple:
     """Load station CSVs and metadata; return a (T, N) pivot and coordinate arrays.
 
     Reads:
-      - ``{data.path}/wind_parameter.csv``  → lat, lon, altitude per station
-      - ``{data.path}/synth_{station_id}.csv`` → per-station wind-speed time series
+      - ``{data.path}/Station_{station_id}.parquet`` (preferred) or
+        ``{data.path}/Station_{station_id}.csv`` → per-station time series
+      - ``data.stations_master``  → lat, lon, altitude per station
 
     Applies optional ``test_start`` / ``test_end`` filters from the config.
     If ``interpolation.interpolate_uv`` is true, also builds u/v component
@@ -273,6 +274,8 @@ def load_data(config: dict) -> tuple:
 
     Returns:
         pivot:       DataFrame (T×N) of wind_speed; index=timestamp, cols=station_id.
+        raw_pivot:   DataFrame (T×N) of raw wind_speed before KNN imputation;
+                     hourly-resampled and aligned to ``pivot``.
         lats:        (N,) latitude array.
         lons:        (N,) longitude array.
         alts:        (N,) altitude array in metres.
@@ -300,16 +303,31 @@ def load_data(config: dict) -> tuple:
     nwp_components_mode   = _parse_components_mode(interp_cfg.get("nwp_components",   "absolute"))
     ecmwf_components_mode = _parse_components_mode(interp_cfg.get("ecmwf_components", "absolute"))
 
-    # --- auto-discover station IDs from Station_*.csv files ---
-    station_files = sorted(
-        f for f in os.listdir(data_path) if f.startswith("Station_") and f.endswith(".csv")
-    )
-    station_ids = [os.path.splitext(f)[0].replace("Station_", "") for f in station_files]
+    # --- auto-discover station files ---
+    # Prefer parquet over csv when both are available for the same station.
+    station_file_map: dict[str, str] = {}
+    for fname in sorted(os.listdir(data_path)):
+        if not fname.startswith("Station_"):
+            continue
+        if not (fname.endswith(".parquet") or fname.endswith(".csv")):
+            continue
+        sid = os.path.splitext(fname)[0].replace("Station_", "")
+        fpath = os.path.join(data_path, fname)
+        chosen = station_file_map.get(sid)
+        if chosen is None or (fname.endswith(".parquet") and chosen.endswith(".csv")):
+            station_file_map[sid] = fpath
+
+    station_ids = sorted(station_file_map.keys())
     exclude = [str(s) for s in config["data"].get("exclude_stations", [])]
     if exclude:
         station_ids = [s for s in station_ids if s not in exclude]
         logger.info("Excluding %d stations: %s", len(exclude), exclude)
-    logger.info("Discovered %d stations in %s", len(station_ids), data_path)
+    n_parquet = sum(station_file_map[s].endswith(".parquet") for s in station_ids)
+    n_csv = len(station_ids) - n_parquet
+    logger.info(
+        "Discovered %d stations in %s (%d parquet, %d csv).",
+        len(station_ids), data_path, n_parquet, n_csv
+    )
 
     # --- metadata from stations_master.csv ---
     meta_path = config["data"].get("stations_master", "data/stations_master.csv")
@@ -352,9 +370,14 @@ def load_data(config: dict) -> tuple:
     cols_to_load.extend(dynamic_rk_cols)
 
     all_dfs = []
-    for sid in tqdm(station_ids, desc="Reading station CSVs", unit="station"):
-        fpath = os.path.join(data_path, f"Station_{sid}.csv")
-        df = pd.read_csv(fpath, parse_dates=["timestamp"])
+    for sid in tqdm(station_ids, desc="Reading station files", unit="station"):
+        fpath = station_file_map[sid]
+        if fpath.endswith(".parquet"):
+            df = pd.read_parquet(fpath)
+            if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        else:
+            df = pd.read_csv(fpath, parse_dates=["timestamp"])
         df["station_id"] = sid
         available = [c for c in cols_to_load if c in df.columns]
         all_dfs.append(df[available])
@@ -373,13 +396,22 @@ def load_data(config: dict) -> tuple:
     if test_end:
         combined = combined[combined["timestamp"] <= pd.Timestamp(test_end, tz="UTC")]
 
+    # Keep the raw observed wind speed before any KNN imputation for export.
+    raw_pivot = combined.pivot_table(
+        index="timestamp", columns="station_id", values="wind_speed", aggfunc="mean"
+    )
+    raw_pivot = raw_pivot.reindex(columns=station_ids)
+    raw_pivot.index = pd.DatetimeIndex(raw_pivot.index)
+    raw_pivot = raw_pivot.sort_index()
+    raw_pivot = raw_pivot.resample("1h", closed="left", label="left").mean()
+
     # --- KNN imputation of wind_speed on 10-min resolution (Timestamps × Stations) ---
     # Result is cached as Parquet so subsequent runs skip the expensive fit_transform.
     # Cache key encodes the station set, time bounds and k so a changed config
     # triggers a fresh computation.
     knn_k = int(interp_cfg.get("knn_impute_neighbors", 10))
     cache_dir = config["data"].get(
-        "knn_cache_path", "/mnt/lambda1/nvme1/synthetic/knnimputer/wind"
+        "knn_cache_path", "/mnt/nvme1/synthetic/knnimputer/wind"
     )
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -523,10 +555,10 @@ def load_data(config: dict) -> tuple:
         v_matrix = v_arr
         logger.info("Computed u/v wind component matrices.")
     elif do_uv:
-        logger.warning("interpolate_uv=true but 'wind_direction' column not found in CSVs.")
+        logger.warning("interpolate_uv=true but 'wind_direction' column not found in station files.")
 
     # --- RK feature matrices ---
-    # 'altitude' is static (from metadata); everything else is loaded from CSVs.
+    # 'altitude' is static (from metadata); everything else is loaded from station files.
     rk_feature_names = interp_cfg.get("rk_features")  # None if not set
     rk_static_features: dict = {}
     rk_dynamic_features: dict = {}
@@ -551,7 +583,7 @@ def load_data(config: dict) -> tuple:
                 rk_dynamic_features[fname] = piv.values.astype(np.float64)
                 logger.info("Loaded RK feature '%s' as (T, N) matrix.", fname)
             else:
-                logger.warning("RK feature '%s' not found in CSVs — skipping.", fname)
+                logger.warning("RK feature '%s' not found in station files — skipping.", fname)
 
         # Load NWP wind speed from raw ICON-D2 CSVs if requested
         if nwp_wind_requested:
@@ -652,10 +684,25 @@ def load_data(config: dict) -> tuple:
                     v_matrix = v_matrix[valid_mask]
                 rk_dynamic_features = {k: v[valid_mask] for k, v in rk_dynamic_features.items()}
 
+    # Align raw observations to the final pivot index (after all filtering).
+    raw_pivot = raw_pivot.reindex(index=pivot.index, columns=station_ids)
+
     logger.info(
         "Loaded data: %d timestamps × %d stations", len(pivot), len(station_ids)
     )
-    return pivot, lats, lons, alts, station_ids, u_matrix, v_matrix, rk_feature_names, rk_static_features, rk_dynamic_features
+    return (
+        pivot,
+        raw_pivot,
+        lats,
+        lons,
+        alts,
+        station_ids,
+        u_matrix,
+        v_matrix,
+        rk_feature_names,
+        rk_static_features,
+        rk_dynamic_features,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -922,7 +969,7 @@ def main() -> None:
 
     # 1. Load data
     logger.info("=== Loading data ===")
-    pivot, lats, lons, alts, station_ids, u_matrix, v_matrix, \
+    pivot, raw_pivot, lats, lons, alts, station_ids, u_matrix, v_matrix, \
         rk_feature_names, rk_static_features, rk_dynamic_features = load_data(config)
     values_matrix = pivot.values  # (T, N)
     timestamps = pivot.index
@@ -1021,6 +1068,12 @@ def main() -> None:
         aniso_dist_matrix=aniso_dist_matrix,
     )
 
+    # Attach raw hourly station measurements (before KNN imputation) to each row.
+    raw_obs_long = raw_pivot.reset_index().melt(
+        id_vars="timestamp", var_name="station_id", value_name="wind_speed_raw"
+    )
+    predictions = predictions.merge(raw_obs_long, on=["timestamp", "station_id"], how="left")
+
     # 5. Save raw predictions (combined)
     pred_path = os.path.join(output_dir, f"{prefix}_loo_predictions.csv")
     predictions.to_csv(pred_path, index=False)
@@ -1032,9 +1085,9 @@ def main() -> None:
     for sid in station_ids:
         sid_df = predictions[predictions["station_id"] == sid].copy()
         sid_df = sid_df.sort_values("timestamp").reset_index(drop=True)
-        sid_path = os.path.join(target_path, f"Station_{sid}.csv")
-        sid_df.to_csv(sid_path, index=False)
-    logger.info("Saved %d per-station timeseries CSVs → %s", len(station_ids), target_path)
+        sid_path = os.path.join(target_path, f"Station_{sid}.parquet")
+        sid_df.to_parquet(sid_path, index=False)
+    logger.info("Saved %d per-station timeseries Parquet files → %s", len(station_ids), target_path)
 
     # 6. Metrics
     logger.info("=== Computing metrics ===")

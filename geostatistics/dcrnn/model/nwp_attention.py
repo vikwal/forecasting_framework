@@ -76,6 +76,7 @@ class NWPAttentionLayer(nn.Module):
         out_per_head = nwp_out_dim // heads
         self.station_dim = station_dim
         self.nwp_out_dim = nwp_out_dim
+        self.ecmwf_dim   = ecmwf_dim
 
         self.gat_i2s = GATv2Conv(
             in_channels=(icond2_dim, station_dim),
@@ -86,15 +87,16 @@ class NWPAttentionLayer(nn.Module):
             add_self_loops=False,
             dropout=dropout,
         )
-        self.gat_e2s = GATv2Conv(
-            in_channels=(ecmwf_dim, station_dim),
-            out_channels=out_per_head,
-            heads=heads,
-            concat=True,
-            edge_dim=edge_dim,
-            add_self_loops=False,
-            dropout=dropout,
-        )
+        if ecmwf_dim > 0:
+            self.gat_e2s = GATv2Conv(
+                in_channels=(ecmwf_dim, station_dim),
+                out_channels=out_per_head,
+                heads=heads,
+                concat=True,
+                edge_dim=edge_dim,
+                add_self_loops=False,
+                dropout=dropout,
+            )
         self.norm = nn.LayerNorm(nwp_out_dim)
 
     # ------------------------------------------------------------------
@@ -112,6 +114,8 @@ class NWPAttentionLayer(nn.Module):
         e2s_edge_attr: Tensor,
     ) -> Tensor:                 # (N_s, nwp_out_dim)
         msg_i = self.gat_i2s((icond2_t, h_station), i2s_edge_index, i2s_edge_attr)
+        if self.ecmwf_dim == 0:
+            return self.norm(msg_i)
         msg_e = self.gat_e2s((ecmwf_t,  h_station), e2s_edge_index, e2s_edge_attr)
         return self.norm(msg_i + msg_e)
 
@@ -145,7 +149,9 @@ class NWPAttentionLayer(nn.Module):
         e2s_ea_exp = e2s_edge_attr.repeat(T, 1)
 
         msg_i = self.gat_i2s((i2_flat, h_q), i2s_ei_exp, i2s_ea_exp)  # (T*N_s, d)
-        msg_e = self.gat_e2s((e2_flat, h_q), e2s_ei_exp, e2s_ea_exp)  # (T*N_s, d)
+        if self.ecmwf_dim == 0:
+            return self.norm(msg_i).reshape(T, N_s, self.nwp_out_dim)
 
+        msg_e = self.gat_e2s((e2_flat, h_q), e2s_ei_exp, e2s_ea_exp)  # (T*N_s, d)
         nwp_flat = self.norm(msg_i + msg_e)                            # (T*N_s, d)
         return nwp_flat.reshape(T, N_s, self.nwp_out_dim)             # (T, N_s, d)

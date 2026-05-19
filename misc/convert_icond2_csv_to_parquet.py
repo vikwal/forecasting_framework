@@ -25,8 +25,8 @@ def convert_single_file(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Convert ICON-D2 ML CSVs to Parquet format.")
-    parser.add_argument("--src", type=str, default="/mnt/lambda1/nvme2/icon-d2/csv", help="Source directory containing the ML csvs")
-    parser.add_argument("--dst", type=str, default="/mnt/lambda1/nvme1/icond-d2/parquet", help="Target directory for parquet files")
+    parser.add_argument("--src", type=str, default="/mnt/nvme2/icon-d2/csv", help="Source directory containing the ML csvs")
+    parser.add_argument("--dst", type=str, default="/mnt/nvme1/icon-d2/parquet", help="Target directory for parquet files")
     parser.add_argument("--workers", type=int, default=16, help="Number of parallel workers")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing parquet files")
 
