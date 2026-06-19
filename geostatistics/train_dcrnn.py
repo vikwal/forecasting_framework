@@ -974,7 +974,7 @@ def main() -> None:
         sd = {k.replace("_orig_mod.", ""): v for k, v in ckpt.items()}
         model.load_state_dict(sd)
         ws_feat_idx_i2 = find_ws_feat_idx(icond2_features)
-        eval_df = run_evaluation(
+        eval_df, _ = run_evaluation(
             model=model,
             sampler=sampler,
             device=device,

@@ -135,6 +135,9 @@ def main() -> None:
     parser.add_argument("--hpo-study", default=None, help="Load best params from Optuna (auto or path)")
     parser.add_argument("--models-dir", default="models", help="Directory to search for models")
     parser.add_argument("--out-suffix", default="", help="Suffix for output CSV")
+    parser.add_argument("--raw-out-name", default=None,
+                        help="Override parquet filename stem (without _raw.parquet); "
+                             "e.g. dcrnn_wind_dcrnn_fold0 → data/raw_preds/dcrnn_wind_dcrnn_fold0_raw.parquet")
     parser.add_argument(
         "--test-mode", action="store_true",
         help=(
@@ -385,7 +388,7 @@ def main() -> None:
 
     # ── Evaluation ───────────────────────────────────────────────────────
     logger.info("Starting inference …")
-    results_df = evaluate(
+    results_df, raw_df = evaluate(
         model=model, sampler=sampler, device=device,
         meas_raw=meas_raw, meas_scaled=meas_scaled,
         station_nearest_grid=station_nearest_grid,
@@ -395,7 +398,8 @@ def main() -> None:
         meas_scaler=meas_scaler, target_feat_idx=target_feat_idx, ws_feat_idx_i2=ws_feat_idx_i2,
         H_hist=H_hist, H_fore=H_fore,
         train_station_indices=train_station_indices, val_station_indices=val_station_indices,
-        all_ids=all_ids, test_run_pairs=test_run_pairs
+        all_ids=all_ids, test_run_pairs=test_run_pairs,
+        timestamps=timestamps,
     )
 
     # ── Save results ─────────────────────────────────────────────────────
@@ -405,6 +409,15 @@ def main() -> None:
     out_path = out_dir / out_name
     results_df.to_csv(out_path, index=False)
     logger.info("Results saved → %s", out_path)
+
+    # ── Save raw predictions (parquet) ────────────────────────────────────
+    if not raw_df.empty:
+        raw_dir = Path("data/raw_preds")
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw_stem = args.raw_out_name if args.raw_out_name else f"{model_stem}{args.out_suffix}"
+        raw_path = raw_dir / f"{raw_stem}_raw.parquet"
+        raw_df.to_parquet(raw_path, index=False)
+        logger.info("Raw predictions saved → %s", raw_path)
 
     # Summary
     if not results_df.empty:

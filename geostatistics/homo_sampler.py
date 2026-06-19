@@ -461,7 +461,8 @@ def evaluate_homo_model(
     target_feat_idx: int,
     nwp_ws_feat_idx: int = 0,       # index of wind_speed feature in I2 dim
     max_pairs: int | None = None,   # cap number of val run pairs (None = all)
-) -> "pd.DataFrame":
+    timestamps: "pd.DatetimeIndex | None" = None,
+) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """Per-station evaluation on validation run pairs.
 
     Single-pass design (no LOO): all train stations serve as context,
@@ -469,8 +470,10 @@ def evaluate_homo_model(
     run pair.  This is the appropriate evaluation mode for the training
     script (fast, no combinatorial LOO overhead).
 
-    Returns a DataFrame with columns:
-        station_id, mae, rmse, r2, skill, skill_nwp, n_samples
+    Returns (station_df, raw_df):
+      station_df — per-station aggregate metrics: station_id, mae, rmse, r2, skill, skill_nwp, n_samples
+      raw_df     — per-prediction rows: station_id, run_time, valid_time, horizon, pred, gt, nwp_ref, pers_ref
+                   (run_time / valid_time are None when timestamps=None)
 
     skill     = 1 − RMSE_model / RMSE_persistence
     skill_nwp = 1 − RMSE_model / RMSE_{nearest ICON-D2 grid point}
@@ -489,6 +492,7 @@ def evaluate_homo_model(
     gts_acc:   list[list] = [[] for _ in range(N_val)]
     nwp_acc:   list[list] = [[] for _ in range(N_val)]
     pers_acc:  list[list] = [[] for _ in range(N_val)]
+    raw_records: list[dict] = []
 
     pairs_done = 0
     for batch, r_curr, t_run_abs in sampler.iter_val_meta():
@@ -515,11 +519,24 @@ def evaluate_homo_model(
         pers_vals = meas_raw[t_run_abs - 1, sampler.val_idx, target_feat_idx]  # (N_val,)
         pers_fc   = np.repeat(pers_vals[:, np.newaxis], F_h, axis=1).astype(np.float32)
 
+        run_ts = timestamps[t_run_abs] if timestamps is not None else None
         for i in range(N_val):
             preds_acc[i].append(pred_phys[i])
             gts_acc[i].append(gt_phys[i])
             nwp_acc[i].append(nwp_fc[i])
             pers_acc[i].append(pers_fc[i])
+            sid = val_ids[i]
+            for h in range(F_h):
+                raw_records.append({
+                    "station_id": sid,
+                    "run_time":   run_ts,
+                    "valid_time": (run_ts + pd.Timedelta(hours=h + 1)) if run_ts is not None else None,
+                    "horizon":    h + 1,
+                    "pred":       float(pred_phys[i, h]),
+                    "gt":         float(gt_phys[i, h]),
+                    "nwp_ref":    float(nwp_fc[i, h]),
+                    "pers_ref":   float(pers_fc[i, h]),
+                })
 
     rows = []
     for i, sid in enumerate(val_ids):
@@ -564,4 +581,4 @@ def evaluate_homo_model(
             "n_samples":  int(valid.sum()),
         })
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), pd.DataFrame(raw_records)

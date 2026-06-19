@@ -699,6 +699,7 @@ def main() -> None:
                 ecmwf_coords          = ecmwf_coords,
                 k_ecmwf               = next_n_ecmwf_trial,
                 aggregate_nwp         = aggregate_nwp,
+                hist_wind_available   = mcfg.get("hist_wind_available", False),
             )
 
             M_meas_only     = len(measurement_cols)

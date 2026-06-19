@@ -102,9 +102,9 @@ def load_station_measurements(
         dfs = []
         for sid in station_ids:
             fpath = os.path.join(data_path, f"Station_{sid}.parquet")
-            df = pd.read_parquet(fpath, columns=["timestamp", col])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-            dfs.append(df.set_index("timestamp")[col].rename(sid))
+            df = pd.read_parquet(fpath, columns=[col])
+            df.index = pd.to_datetime(df.index, utc=True)
+            dfs.append(df[col].rename(sid))
         # closed="left", label="left": [00:00, freq) → first bin, etc.
         pivot = (
             pd.concat(dfs, axis=1)

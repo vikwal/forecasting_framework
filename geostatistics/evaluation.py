@@ -165,18 +165,22 @@ def evaluate(
     test_run_pairs: list[tuple[int, int, int]],
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
     hist_wind_available: bool = False,
-) -> pd.DataFrame:
+    timestamps: "pd.DatetimeIndex | None" = None,
+) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
     Single-pass evaluation over all test run pairs.
 
     All train stations serve as context; all val stations are predicted simultaneously.
-    Returns a per-station metrics DataFrame with columns:
-      station_id, mae, rmse, r2, skill, skill_nwp, n_samples
+    Returns (station_df, raw_df):
+      station_df — per-station aggregate metrics: station_id, mae, rmse, r2, skill, skill_nwp, n_samples
+      raw_df     — per-prediction rows: station_id, run_time, valid_time, horizon, pred, gt, nwp_ref, pers_ref
+                   (run_time / valid_time are NaT when timestamps=None)
     """
     preds_acc: dict[int, list[np.ndarray]] = defaultdict(list)
     gt_acc:    dict[int, list[np.ndarray]] = defaultdict(list)
     nwp_acc:   dict[int, list[np.ndarray]] = defaultdict(list)
     pers_acc:  dict[int, list[np.ndarray]] = defaultdict(list)
+    raw_records: list[dict] = []
 
     mean_ws = float(meas_scaler.mean_[target_feat_idx])
     std_ws  = float(meas_scaler.std_[target_feat_idx] + meas_scaler.eps)
@@ -234,11 +238,26 @@ def evaluate(
                 t_run_abs:t_run_abs + H_fore, :, target_feat_idx
             ][:, val_station_indices].T  # (N_val, H_fore)
 
+            run_ts = timestamps[t_run_abs] if timestamps is not None else None
             for i, gidx in enumerate(val_station_indices):
+                nwp_h  = _nwp_ref(gidx, r_curr)
+                pers_h = _pers_ref(gidx, t_run_abs)
                 preds_acc[gidx].append(preds_a[i])
                 gt_acc[gidx].append(gt_a[i])
-                nwp_acc[gidx].append(_nwp_ref(gidx, r_curr))
-                pers_acc[gidx].append(_pers_ref(gidx, t_run_abs))
+                nwp_acc[gidx].append(nwp_h)
+                pers_acc[gidx].append(pers_h)
+                sid = all_ids[gidx]
+                for h in range(H_fore):
+                    raw_records.append({
+                        "station_id": sid,
+                        "run_time":   run_ts,
+                        "valid_time": (run_ts + pd.Timedelta(hours=h + 1)) if run_ts is not None else None,
+                        "horizon":    h + 1,
+                        "pred":       float(preds_a[i, h]),
+                        "gt":         float(gt_a[i, h]),
+                        "nwp_ref":    float(nwp_h[h]),
+                        "pers_ref":   float(pers_h[h]),
+                    })
 
     logger.info("Computing per-station metrics …")
     records = []
@@ -286,4 +305,4 @@ def evaluate(
             "n_samples":  int(valid.sum()),
         })
 
-    return pd.DataFrame(records)
+    return pd.DataFrame(records), pd.DataFrame(raw_records)

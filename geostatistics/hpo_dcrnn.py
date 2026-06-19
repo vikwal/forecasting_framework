@@ -869,6 +869,7 @@ def main() -> None:
             model_cfg, _trial_builder, _trial_graph,
             target_feat_idx=target_feat_idx,
             station_coords=station_coords,
+            hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
         )
 
         fold_losses: list[float] = []

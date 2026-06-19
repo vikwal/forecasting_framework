@@ -34,7 +34,14 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+import re as _re
 import yaml
+
+try:
+    import optuna
+    _OPTUNA_AVAILABLE = True
+except ImportError:
+    _OPTUNA_AVAILABLE = False
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -208,6 +215,14 @@ def main() -> None:
                         help="Final training mode: train on files+val_files, val on test_files")
     parser.add_argument("--eval", action="store_true",
                         help="Run per-station LOO evaluation on val run pairs after training")
+    parser.add_argument(
+        "--hpo-study", default=None, metavar="DB_PATH",
+        help=(
+            "Load best hyperparameters from an Optuna study and override YAML values. "
+            "Pass 'auto' to derive study name from config stem, or a path to a SQLite .db. "
+            "PostgreSQL is used automatically when OPTUNA_STORAGE env var is set."
+        ),
+    )
     args = parser.parse_args()
 
     cfg       = load_yaml(args.config)
@@ -218,6 +233,7 @@ def main() -> None:
     logger.info("Device: %s", device)
 
     config_stem = Path(args.config).stem.replace("config_", "")
+    hpo_stem    = _re.sub(r'_fold\d+$', '', config_stem)
     model_name  = f"{config_stem}_mtgnn_{args.suffix}.pt" if args.suffix else f"{config_stem}_mtgnn.pt"
     model_path  = Path("models") / model_name
 
@@ -228,6 +244,41 @@ def main() -> None:
     fh = logging.FileHandler(log_path)
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logger.addHandler(fh)
+
+    # ------------------------------------------------------------------
+    # Optional: load best hyperparameters from an Optuna HPO study
+    # ------------------------------------------------------------------
+    if args.hpo_study:
+        if not _OPTUNA_AVAILABLE:
+            raise ImportError("optuna is not installed — cannot load HPO study.")
+
+        freq_tmp   = data_cfg.get("freq", "1h")
+        F_h_tmp    = mcfg.get("forecast_horizon", 48)
+        study_name = f"cl_m-mtgnn_out-{F_h_tmp}_freq-{freq_tmp}_{hpo_stem}"
+
+        storage_url = os.environ.get("OPTUNA_STORAGE")
+        if storage_url:
+            storage = storage_url
+            logger.info("Loading HPO study from PostgreSQL (OPTUNA_STORAGE) …")
+        else:
+            db_path = (
+                args.hpo_study
+                if args.hpo_study != "auto"
+                else f"studies/hpo_mtgnn_{hpo_stem}.db"
+            )
+            storage = f"sqlite:///{db_path}"
+            logger.info("Loading HPO study from SQLite: %s", db_path)
+
+        study = optuna.load_study(study_name=study_name, storage=storage)
+        best_params = study.best_params
+        logger.info(
+            "HPO study '%s' — best val_loss=%.6f  (trial #%d)",
+            study_name, study.best_value, study.best_trial.number,
+        )
+        logger.info("Overriding mtgnn cfg with HPO best params:")
+        for k, v in best_params.items():
+            logger.info("  %-30s %s → %s", k, mcfg.get(k, "<unset>"), v)
+        mcfg.update(best_params)
 
     # ------------------------------------------------------------------
     # Station IDs
@@ -650,7 +701,7 @@ def main() -> None:
         logger.info("Running per-station evaluation on val run pairs …")
         ckpt = torch.load(model_path, map_location=device)
         model.load_state_dict(ckpt)
-        eval_df = evaluate_homo_model(
+        eval_df, _ = evaluate_homo_model(
             model           = model,
             sampler         = sampler,
             device          = device,
