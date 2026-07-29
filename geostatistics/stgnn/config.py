@@ -10,6 +10,36 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from .utils.topo_features import TOPO_FEATURE_ORDER
+
+# Core edge features that have always existed (fixed column order 0,1,2 relied
+# on by DCGRUCell.edge_weight_from_attr / direction_to_adj — never reorder).
+_CORE_EDGE_FEATURES = ("distance", "direction", "altitude_diff")
+
+
+def parse_edge_features(d: dict) -> tuple[bool, bool, bool, list[str]]:
+    """
+    Parse the ``edge_features`` config key (if present) into the three core
+    boolean flags plus an ordered list of topographic feature names.
+
+    If ``edge_features`` is absent, falls back to the legacy individual
+    ``use_distance_features`` / ``use_direction_features`` / ``use_altitude_diff``
+    flags (default True/True/False) with no topographic features — fully
+    backward compatible with configs predating this key.
+    """
+    if "edge_features" in d:
+        requested = set(d["edge_features"])
+        use_distance = "distance" in requested
+        use_direction = "direction" in requested
+        use_altitude_diff = "altitude_diff" in requested
+        topo_names = [f for f in TOPO_FEATURE_ORDER if f in requested]
+    else:
+        use_distance = d.get("use_distance_features", True)
+        use_direction = d.get("use_direction_features", True)
+        use_altitude_diff = d.get("use_altitude_diff", False)
+        topo_names = []
+    return use_distance, use_direction, use_altitude_diff, topo_names
+
 
 @dataclass
 class GraphConfig:
@@ -20,6 +50,8 @@ class GraphConfig:
     use_distance_features: bool = True
     use_direction_features: bool = True
     use_altitude_diff: bool = False
+    topo_features_path: Optional[str] = None
+    topo_feature_names: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -95,6 +127,13 @@ class ModelConfig:
         return T * self.ecmwf_features_per_step + self.ecmwf_static_features
 
     def edge_input_dim(self) -> int:
+        """
+        Dimension of NWP→station (i2s/e2s) edge_attr, consumed by GATv2Conv's
+        declared ``edge_dim``. Topographic features are only added to
+        station↔station (s2s) edges (see GraphConfig.topo_feature_names),
+        which DCGRUCell reads dynamically without a declared width — so they
+        must NOT be counted here.
+        """
         dim = 0
         if self.graph.use_distance_features:
             dim += 1
@@ -129,11 +168,16 @@ class ModelConfig:
         n_val :                 number of validation stations
         checkpoint_path :       where to save the best model checkpoint
         """
+        use_distance, use_direction, use_altitude_diff, topo_names = parse_edge_features(d)
         graph = GraphConfig(
             station_connectivity=d.get("station_connectivity", "delaunay"),
             next_n_icond2_grid_points=d["next_n_icond2"],
             next_n_ecmwf_grid_points=d["next_n_ecmwf"],
-            use_altitude_diff=d.get("use_altitude_diff", False),
+            use_distance_features=use_distance,
+            use_direction_features=use_direction,
+            use_altitude_diff=use_altitude_diff,
+            topo_features_path=d.get("topo_features_path"),
+            topo_feature_names=topo_names,
         )
         training = TrainingConfig(
             min_target_stations=d["min_target_stations"],

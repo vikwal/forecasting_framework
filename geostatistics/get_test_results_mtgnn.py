@@ -58,17 +58,11 @@ from geostatistics.stgnn.utils.normalization import StandardScaler
 # Logging
 # ---------------------------------------------------------------------------
 
-def _setup_logging(model_name: str) -> logging.Logger:
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    log_path = log_dir / f"eval_mtgnn_{model_name}.log"
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+def _setup_logging() -> logging.Logger:
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
     logger = logging.getLogger("eval_mtgnn")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
-        fh = logging.FileHandler(log_path)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         logger.addHandler(sh)
@@ -124,7 +118,7 @@ def main() -> None:
     # ── Resolve model file ──────────────────────────────────────────────────
     model_path = resolve_model_file(args.model_name, Path(args.models_dir))
     model_stem = model_path.stem
-    _setup_logging(model_stem)
+    _setup_logging()
     logger.info("=== MTGNN Evaluation ===")
     logger.info("Model: %s", model_path.name)
 
@@ -134,6 +128,9 @@ def main() -> None:
     mcfg     = cfg.get("mtgnn", {})
 
     # ── HPO overrides ───────────────────────────────────────────────────────
+    # Retrained checkpoints were trained WITH HPO best params (HPO-sampled
+    # architecture dims), so the same override must be applied here to rebuild
+    # a matching architecture before loading weights.
     if args.hpo_study:
         if not _OPTUNA_AVAILABLE:
             raise ImportError("optuna is not installed")
@@ -433,8 +430,8 @@ def main() -> None:
     # ── Save per-station CSV ──────────────────────────────────────────────────
     out_dir  = Path("data/test_results")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_name = f"test_results_{model_stem}{args.out_suffix}.csv"
-    out_path = out_dir / out_name
+    csv_stem = args.raw_out_name if args.raw_out_name else f"test_results_{model_stem}{args.out_suffix}"
+    out_path = out_dir / f"{csv_stem}.csv"
     results_df.to_csv(out_path, index=False)
     logger.info("Results saved → %s", out_path)
 

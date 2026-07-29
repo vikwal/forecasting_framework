@@ -1,0 +1,161 @@
+# Smoke-test-only variant of config_wind_tft_hist.yaml — tiny station subset,
+# few epochs. Not used for real HPO/training, only to verify the pipeline
+# mechanics (shapes, TFT construction, loss decreasing) per plan step 3.
+data:
+  path: '/mnt/nvme2/synthetic/wind/wind_hourly_age_20251103'
+  files: ['00183', '00460', '00856', '05404']
+  val_files: ['01550', '02907']
+  test_files: ['00096', '00427']
+  power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
+  stations_master: 'data/stations_master.csv'
+  freq: '1h'
+  train_frac: 1
+  val_frac: 0.25
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
+  retrain_interval: 1
+  eval_interval: 1
+  target_col: 'wind_speed'
+  scale_x: True
+  scale_y: True
+  use_pca: False
+  pca_components: 3
+  lag_in_col: False
+  n_neighbors: 5
+
+params:
+  known_features: [
+    'wind_speed_h10', 'wind_speed_h38', 'ecmwf_wind_speed_h10'
+  ]
+  observed_features: [
+    'wind_speed',
+    'wind_speed_next'
+  ]
+  static_features: [
+    'altitude',
+    'latitude',
+    'longitude',
+    'elevation',
+    'slope',
+    'aspect_sin',
+    'aspect_cos',
+    'tpi5',
+    'tpi75',
+    'tdi',
+    'elev_std',
+    'z0',
+    'dist_coast',
+  ]
+  aggregate_nwp_layers: 'weighted_mean'
+  get_density: False
+  turbines_per_park: 1
+  random_seed: 42
+  next_n_grid_points: 4
+  next_n_grid_ecmwf: 4
+  next_n_stations: 2
+  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  nwp_models: ['icon-d2', 'ecmwf']
+  ecmwf_features: ['u_wind10m', 'v_wind10m']
+  aggregate_grid_points: False
+  get_next_grid_points_method: 'geodesic_next'
+  extrapolate: null
+
+model:
+  name: 'tft'
+  fl: False
+  num_workers: 2
+  epochs: 2
+  output_dim: 48
+  lookback: 48
+  horizon: 48
+  step_size: 3
+  batch_size: 32
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  optimizer: 'adam'
+  loss: 'mse'
+  metrics: ['mae', 'rmse', 'r^2']
+  tft:
+    n_heads: 2
+    hidden_dim: 16
+    dropout: 0.1
+    rnn_type: 'lstm'
+    n_lstm_layers: 1
+    static_embedding_dim: 8
+    quantiles: [0.5]
+    clipnorm: 5
+  callbacks: False
+  shuffle: True
+  force_retrain: True
+  early_stopping:
+    enabled: True
+    patience: 3
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
+    restore_best_weights: True
+  parallelize: False
+  lookup_hpo: False
+  verbose: 1
+
+hpo:
+  studies_path: null
+  objectives:
+    - metric: 'val_rmse'
+      direction: 'minimize'
+  trials: 2
+  kfolds: 3
+  min_train_date: '2024-03-31'
+  val_split: 1
+  pruning:
+    use_median_pruner: True
+    n_startup_trials: 20
+    n_warmup_steps: 1
+    interval_steps: 1
+    disable_pruning: False
+  batch_size: [32, 256]
+  epochs: [1, 100]
+  learning_rate: [1.0e-6, 5.0e-4]
+  weight_decay: [1.0e-7, 1.0e-3]
+  n_layers: [1, 4]
+  n_cnn_layers: [1, 10]
+  n_rnn_layers: [1, 7]
+  attention_heads: [1, 64]
+  cnn:
+    filters: [16, 128]
+    kernel_size: [2, 5]
+    increase_filters: False
+  rnn:
+    units: [16, 100]
+    dropout: [0.0, 0.8]
+  fnn:
+    units: [32, 256]
+  fl:
+    strategy: 'fedavg'
+    personalize: False
+    n_rounds: [1, 20]
+    server_lr: [0.0001, 0.1]
+    beta_1: [0, 1]
+    beta_2: [0, 1]
+    tau: [0.0001, 0.1]
+  tft:
+    n_heads: [1, 8]
+    hidden_dim: [32, 128]
+    dropout: [0.0, 0.5]
+    n_lstm_layers: [1, 3]
+    static_embedding_dim: [8, 64]
+    clipnorm: [0.5, 10.0]
+  next_n_grid_points: [1, 7]
+  next_n_grid_ecmwf: [0, 4]
+  next_n_stations: [0, 8]
+
+eval:
+  results_path: 'results/tft_bc_smoke'
+  eval_on_all_test_data: True
+  retrain_interval: 0
+  t_0: 12
+
+fl:
+  strategy: 'fedavg'

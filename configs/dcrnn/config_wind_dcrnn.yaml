@@ -1,7 +1,7 @@
 data:
-  path: '/mnt/nvme1/synthetic/raw/wind'
-  nwp_path: '/mnt/nvme1/icon-d2/parquet'
-  ecmwf_path: '/mnt/nvme1/ecmwf/parquet' #ecmwf_wind_sl_full_prefect.parquet'
+  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet' #ecmwf_wind_sl_full_prefect.parquet'
   files: [
             '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
             '03730', '05792', '05856', '15000', '05779', '04271', '02638', '02961', '05490', '05426',
@@ -31,9 +31,9 @@ data:
   test_start: '2025-08-01'
   test_end:   '2025-10-31'
   wind_parameter_path: 'data/stations_master.csv'
-  interpol_path: '/mnt/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/wind'
-  power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
+  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
+  power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
   #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
@@ -69,6 +69,8 @@ dcrnn:
   use_altitude_diff: true
   use_direction_features: true
   use_distance_features: true
+  edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
+  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
   icond2_run_hours: [6,9,12,15]
 
   # Time windows

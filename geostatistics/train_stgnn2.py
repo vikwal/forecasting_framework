@@ -744,7 +744,20 @@ def load_ecmwf_parquet_at_stations_and_grid(
     ts_min = timestamps[0].normalize()
     ts_max = timestamps[-1].normalize() + pd.Timedelta(hours=13)
     parquet_source = Path(parquet_path)
-    split_dir = parquet_source / "SL" if parquet_source.is_dir() and (parquet_source / "SL").is_dir() else parquet_source
+    # Prefer *_sl.parquet files directly inside parquet_path itself; only fall back to
+    # a nested "SL" subdirectory if the parent has none. A nested SL/ used to be
+    # unconditionally preferred over the parent, which silently pinned every run to
+    # whatever copy happened to live there — that copy stopped being updated in May
+    # while the parent kept receiving fresh data, so every run past 2026-03-02 loaded
+    # 723 hours of NaN from the stale subdirectory without any error until the
+    # downstream NaN check caught it.
+    parent_has_files = parquet_source.is_dir() and any(parquet_source.glob("*_sl.parquet"))
+    if parent_has_files:
+        split_dir = parquet_source
+    elif parquet_source.is_dir() and (parquet_source / "SL").is_dir():
+        split_dir = parquet_source / "SL"
+    else:
+        split_dir = parquet_source
 
     # ------------------------------------------------------------------
     # Source A: split SL parquet files (preferred)
@@ -1270,6 +1283,7 @@ def main() -> None:
         ecmwf_grid_coords=ecmwf_coords,
         icond2_altitudes=icond2_alts,
         ecmwf_altitudes=ecmwf_alts,
+        station_ids=all_ids,
     )
     logger.info(
         "Graph — s2s: %d  i2s: %d  e2s: %d",

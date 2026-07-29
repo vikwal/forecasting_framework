@@ -1,7 +1,7 @@
 data:
-  path: '/mnt/nvme1/synthetic/raw/wind'
-  nwp_path: '/mnt/nvme1/icon-d2/parquet'
-  ecmwf_path: '/mnt/nvme1/ecmwf/parquet'
+  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
   files: [
             '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
             '03730', '05792', '05856', '15000', '05779', '04271', '02638', '02961', '05490', '05426',
@@ -28,8 +28,8 @@ data:
             '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342']
   test_start: '2025-08-01'
   test_end:   '2025-10-31'
-  interpol_path: '/mnt/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/wind'
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
+  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   val_frac: 0.25

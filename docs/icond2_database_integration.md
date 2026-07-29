@@ -105,16 +105,16 @@ data:
 
 ### Vorteile Database
 
-✅ **Schneller**: Index-basierte Abfragen (< 1s für 1 Jahr Daten, 1 Grid Point)  
-✅ **Skalierbar**: In-Memory-Datenbank (~500 GB RAM), parallele Verbindungen  
-✅ **Konsistent**: Zentrale Datenquelle, keine Duplikate, automatische Updates  
-✅ **Flexibel**: Ad-hoc Queries, beliebige Zeitbereiche, Höhenstufen on-demand  
+✅ **Schneller**: Index-basierte Abfragen (< 1s für 1 Jahr Daten, 1 Grid Point)
+✅ **Skalierbar**: In-Memory-Datenbank (~500 GB RAM), parallele Verbindungen
+✅ **Konsistent**: Zentrale Datenquelle, keine Duplikate, automatische Updates
+✅ **Flexibel**: Ad-hoc Queries, beliebige Zeitbereiche, Höhenstufen on-demand
 ✅ **Fail-Fast**: Bei Fehlern crashed das Programm sofort (kein stiller Fallback)
 
 ### Nachteile
 
-❌ **Netzwerkabhängig**: Erfordert DB-Server Erreichbarkeit (crashed bei Ausfall)  
-❌ **Setup**: Umgebungsvariable `WEATHER_DB_URL` muss gesetzt sein  
+❌ **Netzwerkabhängig**: Erfordert DB-Server Erreichbarkeit (crashed bei Ausfall)
+❌ **Setup**: Umgebungsvariable `WEATHER_DB_URL` muss gesetzt sein
 ❌ **Schema**: Nur `qs` verfügbar (kein `relhum`) — `relative_humidity` wird via `mpcalc` aus `qs` berechnet
 
 ### Performance-Regeln
@@ -125,7 +125,7 @@ data:
 4. **Parallele Abfragen OK** — PostgreSQL ist Thread-safe
 
 ## Fehlerbehandlung
-
+n
 ### Kein automatischer Fallback
 
 **Wichtig:** Wenn `data.icond2_source: 'database'` gesetzt ist und die Datenbankverbindung fehlschlägt, **crashed das Programm**. Es gibt **keinen automatischen Fallback auf CSV**.

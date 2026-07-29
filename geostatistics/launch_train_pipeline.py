@@ -153,6 +153,12 @@ def _log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def expected_model_path(group: Group, job: FoldJob) -> Path:
+    config_stem = Path(job.config).stem.replace("config_", "")
+    script_type = group.script.replace("train_", "")   # "dcrnn" or "mtgnn"
+    return WORK_DIR / "models" / f"{config_stem}_{script_type}_{MODEL_SUFFIX}.pt"
+
+
 def build_cmd(group: Group, job: FoldJob, gpu: int) -> list[str]:
     """Gibt die argv-Liste für den Trainings-Subprocess zurück."""
     script = f"geostatistics/{group.script}.py"
@@ -170,10 +176,16 @@ def build_cmd(group: Group, job: FoldJob, gpu: int) -> list[str]:
 
 def run_fold(group: Group, job: FoldJob, gpu: int, dry_run: bool) -> int:
     """Startet einen Fold-Training-Prozess und wartet auf sein Ende. Gibt Exit-Code zurück."""
-    cmd, _ = build_cmd(group, job, gpu)
+    model_path = expected_model_path(group, job)
+    if not dry_run and model_path.exists():
+        _log(f"  SKIP   {group.name}/{job.fold_label} (existiert: {model_path.name})")
+        return 0
+
+    cmd = build_cmd(group, job, gpu)
 
     if dry_run:
-        _log(f"  [DRY] {group.name}/{job.fold_label} → GPU {gpu}")
+        exists = "✓ existiert" if model_path.exists() else "fehlt"
+        _log(f"  [DRY] {group.name}/{job.fold_label} → GPU {gpu}  [{exists}]")
         return 0
 
     _log(f"  START  {group.name}/{job.fold_label} GPU={gpu}")

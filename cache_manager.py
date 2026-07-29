@@ -12,11 +12,11 @@ from pathlib import Path
 # Add the parent directory to path so we can import utils
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils.data_cache import DataCache
+from utils.data_cache import DataCache, DEFAULT_CACHE_DIR
 from utils import tools
 
 
-def list_cached_data(cache_dir: str = "data_cache"):
+def list_cached_data(cache_dir: str = DEFAULT_CACHE_DIR):
     """List all cached datasets."""
     cache = DataCache(cache_dir)
 
@@ -69,7 +69,7 @@ def list_cached_data(cache_dir: str = "data_cache"):
             print()
 
 
-def clean_cache(cache_dir: str = "data_cache", cache_id: str = None, all_cache: bool = False):
+def clean_cache(cache_dir: str = DEFAULT_CACHE_DIR, cache_id: str = None, all_cache: bool = False):
     """Clean cached data."""
     cache = DataCache(cache_dir)
 
@@ -97,7 +97,7 @@ def clean_cache(cache_dir: str = "data_cache", cache_id: str = None, all_cache: 
         print("Please specify either --cache-id or --all")
 
 
-def cache_info(cache_dir: str = "data_cache", cache_id: str = None):
+def cache_info(cache_dir: str = DEFAULT_CACHE_DIR, cache_id: str = None):
     """Show detailed information about cached data."""
     cache = DataCache(cache_dir)
 
@@ -168,7 +168,7 @@ def cache_info(cache_dir: str = "data_cache", cache_id: str = None):
 
 def main():
     parser = argparse.ArgumentParser(description="Cache management for forecasting framework")
-    parser.add_argument('--cache-dir', default='data_cache', help='Cache directory path')
+    parser.add_argument('--cache-dir', default=DEFAULT_CACHE_DIR, help='Cache directory path')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 

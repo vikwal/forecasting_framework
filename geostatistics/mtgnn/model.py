@@ -214,6 +214,10 @@ class MTGNNModel(nn.Module):
                       steps.  Passed at forward() time, not at construction.
     topk_graph      : if set, keep only top-k neighbours per row in A before
                       adding self-loop (paper Eqs. 4-6).  None = dense graph.
+    topo_dim        : number of topographic node-feature columns appended after
+                      the 6 core static columns (see homo_sampler._build_static).
+                      Each contributes one pairwise-difference edge column,
+                      widening edge_fc from Linear(4,1) to Linear(4+topo_dim,1).
     """
 
     def __init__(
@@ -236,6 +240,7 @@ class MTGNNModel(nn.Module):
         nwp_heads: int = 4,
         M: int = 0,
         topk_graph: int | None = None,
+        topo_dim: int = 0,
     ) -> None:
         super().__init__()
         self.H            = history_length
@@ -246,6 +251,7 @@ class MTGNNModel(nn.Module):
         self.k_nwp        = k_nwp
         self.nwp_feat_dim = nwp_feat_dim
         self.topk_graph   = topk_graph
+        self.topo_dim     = topo_dim
         T_total = history_length + forecast_horizon
 
         if nwp_nodes:
@@ -270,8 +276,9 @@ class MTGNNModel(nn.Module):
         self.adp_W1 = nn.Linear(emb_dim, emb_dim, bias=False)
         self.adp_W2 = nn.Linear(emb_dim, emb_dim, bias=False)
 
-        # Edge-feature bias: [dist_norm, sin_bearing, cos_bearing, alt_diff_norm] → scalar
-        self.edge_fc = nn.Linear(4, 1, bias=True)
+        # Edge-feature bias: [dist_norm, sin_bearing, cos_bearing, alt_diff_norm,
+        # <topo_dim topographic diff columns>] → scalar
+        self.edge_fc = nn.Linear(4 + topo_dim, 1, bias=True)
 
         # Input projection
         self.input_proj = nn.Linear(proj_in, hidden)
@@ -301,11 +308,13 @@ class MTGNNModel(nn.Module):
         """Compute directed pairwise edge features from static node features.
 
         Recovers lat/lon from sin/cos encoding (columns 0-3), uses normalised
-        altitude (column 4).  Returns 4-dim feature vector per directed edge:
-          [dist_norm, sin(bearing i→j), cos(bearing i→j), alt_diff_norm]
+        altitude (column 4).  Returns a (4 + topo_dim)-dim feature vector per
+        directed edge:
+          [dist_norm, sin(bearing i→j), cos(bearing i→j), alt_diff_norm,
+           <topo_dim pairwise differences from static columns 6:6+topo_dim>]
 
-        static  : (N, 6+)
-        returns : (N, N, 4)  — row=source, col=destination
+        static  : (N, 6 + topo_dim)
+        returns : (N, N, 4 + topo_dim)  — row=source, col=destination
         """
         lat = torch.atan2(static[:, 0], static[:, 1])   # (N,)  radians
         lon = torch.atan2(static[:, 2], static[:, 3])   # (N,)
@@ -333,9 +342,17 @@ class MTGNNModel(nn.Module):
         # Altitude difference (dst − src), clipped via normalised scale
         alt_diff = (alt.unsqueeze(0) - alt.unsqueeze(1)).clamp(-3.0, 3.0) / 3.0
 
-        return torch.stack(
+        core = torch.stack(
             [dist_norm, torch.sin(bearing), torch.cos(bearing), alt_diff], dim=-1
         )   # (N, N, 4)
+
+        topo_dim = static.shape[1] - 6
+        if topo_dim <= 0:
+            return core
+
+        topo = static[:, 6:]                            # (N, topo_dim)
+        topo_diff = topo.unsqueeze(0) - topo.unsqueeze(1)  # (N, N, topo_dim), dst - src
+        return torch.cat([core, topo_diff], dim=-1)     # (N, N, 4 + topo_dim)
 
     def _build_adjacency(self, static: Tensor) -> tuple[Tensor, Tensor]:
         """Build forward and backward row-normalised adjacencies.

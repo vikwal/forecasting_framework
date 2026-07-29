@@ -1,9 +1,9 @@
 data:
   use_case: solar                                 # routes to solar preprocessing in train_dcrnn.py
-  path: '/mnt/nvme1/synthetic/raw/solar'          # Station_XXXXX.parquet with ghi, dhi, temperature_2m, …
-  nwp_path: '/mnt/nvme1/icon-d2/parquet'          # SL files under {nwp_path}/SL/{run_hour:02d}/{station_id}/
-  interpol_path: '/mnt/nvme1/synthetic/interpol/solar'    # rk_pred per-station Parquets from run_solar_interpolation.py
-  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/solar' # KNN fallback Parquets ({col}_knn*.parquet)
+  path: '/mnt/lambda1/nvme1/synthetic/raw/solar'          # Station_XXXXX.parquet with ghi, dhi, temperature_2m, …
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'          # SL files under {nwp_path}/SL/{run_hour:02d}/{station_id}/
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/solar'    # rk_pred per-station Parquets from run_solar_interpolation.py
+  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/solar' # KNN fallback Parquets ({col}_knn*.parquet)
   stations_master: 'data/stations_master.csv'
   files: [
             '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',

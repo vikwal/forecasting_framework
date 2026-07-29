@@ -52,7 +52,7 @@ from geostatistics.train_stgnn2 import (
     load_knn_imputation,
     apply_knn_imputation,
 )
-from geostatistics.train_dcrnn import resolve_feature_mode
+from geostatistics.train_dcrnn import resolve_feature_mode, encode_circular_measurements, apply_dir_encoding
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.stgnn import HeterogeneousGraphBuilder
 from geostatistics.stgnn.training.sampler import TrainingSampler
@@ -64,18 +64,11 @@ from geostatistics.evaluation import evaluate, find_ws_feat_idx
 # Logging
 # ---------------------------------------------------------------------------
 
-def _setup_logging(model_name: str) -> logging.Logger:
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-    log_path = log_dir / f"eval_dcrnn_{model_name}.log"
-
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+def _setup_logging() -> logging.Logger:
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
     logger = logging.getLogger("eval_dcrnn")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
-        fh = logging.FileHandler(log_path)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         logger.addHandler(sh)
@@ -150,7 +143,7 @@ def main() -> None:
     # ── Resolve model file ──────────────────────────────────────────────
     model_path = resolve_model_file(args.model_name, Path(args.models_dir))
     model_stem = model_path.stem
-    _setup_logging(model_stem)
+    _setup_logging()
     logger.info("=== DCRNN Evaluation ===")
     logger.info("Model: %s", model_path.name)
 
@@ -168,11 +161,14 @@ def main() -> None:
     else:
         dcrnn_cfg = cfg.get("dcrnn", {})
 
-    # Optional: HPO overrides (mirroring train_dcrnn.py)
+    # Optional: HPO overrides (mirroring train_dcrnn.py). The retrained
+    # checkpoints were trained WITH these HPO best params (architecture dims
+    # like hidden_dim are HPO-sampled), so the same override MUST be applied
+    # here to reconstruct a matching architecture before loading weights.
     if args.hpo_study:
         if not _OPTUNA_AVAILABLE:
             raise ImportError("optuna not installed")
-        
+
         config_stem = Path(args.config).stem.replace("config_", "")
         hpo_stem = re.sub(r'_fold\d+$', '', config_stem)
         freq = data_cfg.get("freq", "1h")
@@ -251,6 +247,12 @@ def main() -> None:
         knn_wd = load_knn_imputation(knnimputer_path, "wind_direction", all_ids, timestamps)
         meas_raw = apply_knn_imputation(meas_raw, knn_wd, measurement_cols, "wind_direction")
 
+    # Circular encoding: wind_direction → sin/cos  (mirrors train_dcrnn.py)
+    meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
+    if "sin_wind_direction" in measurement_cols:
+        logger.info("Circular encoding: measurement_features → %s  (M=%d)", measurement_cols, len(measurement_cols))
+        target_feat_idx = measurement_cols.index(dcrnn_cfg.get("target_col", "wind_speed"))
+
     # Temporal split
     test_start = data_cfg.get("test_start")
     test_end   = data_cfg.get("test_end")
@@ -267,9 +269,6 @@ def main() -> None:
     lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=data_cfg.get("stations_master"))
     station_coords = np.stack([lats, lons], axis=1)
 
-    # NWP Skill baseline index
-    ws_feat_idx_i2 = find_ws_feat_idx(icond2_features)
-
     # ICON-D2 ML runs
     run_hours = tuple(dcrnn_cfg.get("icond2_run_hours", [6, 9, 12, 15]))
     logger.info("Loading ICON-D2 runs …")
@@ -282,8 +281,21 @@ def main() -> None:
     R = len(run_times)
     N_igrid = len(icond2_coords)
 
-    # ECMWF NWP
-    ecmwf_parquet_file = os.path.join(data_cfg.get("ecmwf_path", "/mnt/lambda1/nvme1/ecmwf/parquet"), "ecmwf_wind_sl_full.parquet")
+    # dir_in_deg ICON-D2 encoding (applied after loading, before scaling) —
+    # MUST mirror train_dcrnn.py, otherwise the model receives raw (u, v)
+    # instead of the (wind_speed, sin_dir, cos_dir) channels it was trained on.
+    if i2_mode == "dir_in_deg":
+        grid_icond2_runs_raw, icond2_features = apply_dir_encoding(grid_icond2_runs_raw, icond2_features)
+        logger.info("dir_in_deg (ICON-D2): encoded → %s  (I2=%d)", icond2_features, len(icond2_features))
+
+    # NWP Skill baseline index — computed AFTER dir_in_deg encoding, since
+    # apply_dir_encoding reorders columns (wind_speed_10m moves to index 0).
+    ws_feat_idx_i2 = find_ws_feat_idx(icond2_features)
+
+    # ECMWF NWP — pass the directory (not the stale ecmwf_wind_sl_full.parquet,
+    # which ends 2025-10-31). load_ecmwf_parquet_at_stations_and_grid prefers the
+    # SL split files (coverage to 2026-04), matching train_dcrnn.py and the MTGNN eval.
+    ecmwf_parquet_file = data_cfg.get("ecmwf_path", "/mnt/lambda1/nvme1/ecmwf/parquet")
     E2 = len(ecmwf_features)
     if os.path.exists(ecmwf_parquet_file):
         station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
@@ -298,6 +310,15 @@ def main() -> None:
         ecmwf_coords = np.zeros((1, 2), dtype=np.float32)
         ecmwf_nwp = np.zeros((T, 1, E2), dtype=np.float32)
         ecmwf_alts = np.zeros(1, dtype=np.float32)
+
+    # dir_in_deg ECMWF encoding (applied after loading, before scaling) —
+    # mirror train_dcrnn.py so ECMWF channels match the trained model.
+    if e2_mode == "dir_in_deg" and station_ecmwf_nwp.shape[2] > 0:
+        ecmwf_features_pre = list(ecmwf_features)
+        station_ecmwf_nwp, ecmwf_features = apply_dir_encoding(station_ecmwf_nwp, ecmwf_features_pre)
+        ecmwf_nwp, _                      = apply_dir_encoding(ecmwf_nwp, ecmwf_features_pre)
+        E2 = len(ecmwf_features)
+        logger.info("dir_in_deg (ECMWF): encoded → %s  (E2=%d)", ecmwf_features, E2)
 
     # NWP Altitudes
     if dcrnn_cfg.get("use_altitude_diff", False):
@@ -376,11 +397,24 @@ def main() -> None:
     base_graph = builder.build(
         station_coords=station_coords, station_altitudes=alts,
         icond2_grid_coords=icond2_coords, ecmwf_grid_coords=ecmwf_coords,
-        icond2_altitudes=icond2_alts, ecmwf_altitudes=ecmwf_alts
+        icond2_altitudes=icond2_alts, ecmwf_altitudes=ecmwf_alts,
+        station_ids=all_ids,
     )
     sampler = TrainingSampler(model_cfg, builder, base_graph, target_feat_idx=target_feat_idx, station_coords=station_coords)
+
+    # k nearest ICON-D2 grid points for nwp_nodes=False (same logic as train_dcrnn.py)
+    station_k_nearest_grid = None
+    if not dcrnn_cfg.get("nwp_nodes", True):
+        from sklearn.neighbors import BallTree as _BallTree
+        _k = model_cfg.graph.next_n_icond2_grid_points
+        _bt = _BallTree(np.radians(icond2_coords), metric="haversine")
+        station_k_nearest_grid = _bt.query(
+            np.radians(station_coords), k=_k, return_distance=False,
+        ).astype(np.int64)  # (N_stations, k)
+        logger.info("nwp_nodes=False → station_k_nearest_grid: %s  (k=%d)", station_k_nearest_grid.shape, _k)
+
     model = DCRNN(model_cfg)
-    
+
     logger.info("Loading weights …")
     ckpt = torch.load(model_path, map_location="cpu")
     model.load_state_dict(_load_state_dict(ckpt))
@@ -400,13 +434,15 @@ def main() -> None:
         train_station_indices=train_station_indices, val_station_indices=val_station_indices,
         all_ids=all_ids, test_run_pairs=test_run_pairs,
         timestamps=timestamps,
+        station_k_nearest_grid=station_k_nearest_grid,
+        hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
     )
 
     # ── Save results ─────────────────────────────────────────────────────
     out_dir = Path("data/test_results")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_name = f"test_results_{model_stem}{args.out_suffix}.csv"
-    out_path = out_dir / out_name
+    csv_stem = args.raw_out_name if args.raw_out_name else f"test_results_{model_stem}{args.out_suffix}"
+    out_path = out_dir / f"{csv_stem}.csv"
     results_df.to_csv(out_path, index=False)
     logger.info("Results saved → %s", out_path)
 
@@ -421,11 +457,9 @@ def main() -> None:
 
     # Summary
     if not results_df.empty:
-        for p in ["A", "B", "C", "D"]:
-            sub = results_df[results_df["pass"] == p]
-            if sub.empty: continue
-            logger.info("  Pass %s: R²=%.3f, RMSE=%.3f, Skill=%.3f", 
-                        p, sub["r2"].mean(), sub["rmse"].mean(), sub["skill_nwp"].mean(skipna=True))
+        logger.info("  Overall: R²=%.3f, RMSE=%.3f m/s, MAE=%.3f m/s, Skill_NWP=%.3f",
+                    results_df["r2"].mean(), results_df["rmse"].mean(),
+                    results_df["mae"].mean(), results_df["skill_nwp"].mean(skipna=True))
 
 if __name__ == "__main__":
     main()

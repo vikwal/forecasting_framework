@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from geostatistics.stgnn.config import GraphConfig, TrainingConfig
+from geostatistics.stgnn.config import GraphConfig, TrainingConfig, parse_edge_features
 
 
 @dataclass
@@ -115,10 +115,15 @@ class DCRNNConfig:
 
     def edge_input_dim(self) -> int:
         """
-        Dimension of edge_attr produced by HeterogeneousGraphBuilder.
+        Dimension of NWP→station (i2s/e2s) edge_attr, consumed by GATv2Conv's
+        declared ``edge_dim`` in NWPAttentionLayer.
 
         Matches stgnn GraphConfig.edge_input_dim() logic:
           1 (distance) + 2 (sin/cos bearing) + 1 (altitude diff, optional)
+
+        Topographic features (graph.topo_feature_names) are only added to
+        station↔station (s2s) edges, which DCGRUCell reads dynamically without
+        a declared width — so they must NOT be counted here.
         """
         dim = 0
         if self.graph.use_distance_features:
@@ -144,11 +149,16 @@ class DCRNNConfig:
         n_val: int,
         checkpoint_path: str,
     ) -> "DCRNNConfig":
+        use_distance, use_direction, use_altitude_diff, topo_names = parse_edge_features(d)
         graph = GraphConfig(
             station_connectivity=d.get("station_connectivity", "delaunay"),
             next_n_icond2_grid_points=d.get("next_n_icond2", 4),
             next_n_ecmwf_grid_points=d.get("next_n_ecmwf", 4),
-            use_altitude_diff=d.get("use_altitude_diff", False),
+            use_distance_features=use_distance,
+            use_direction_features=use_direction,
+            use_altitude_diff=use_altitude_diff,
+            topo_features_path=d.get("topo_features_path"),
+            topo_feature_names=topo_names,
         )
         training = TrainingConfig(
             min_target_stations=d.get("min_target_stations", 1),
@@ -202,9 +212,9 @@ class DCRNNConfig:
                     "direction_to_adj=True requires 'wind_direction' or "
                     "'sin_wind_direction'/'cos_wind_direction' in measurement_features."
                 )
-            if not d.get("use_direction_features", True):
+            if not use_direction:
                 raise ValueError(
-                    "direction_to_adj=True requires use_direction_features=True "
+                    "direction_to_adj=True requires direction features enabled "
                     "(bearing columns must be present in edge_attr)."
                 )
 

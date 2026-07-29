@@ -814,6 +814,13 @@ def main() -> None:
     train_run_pairs: list[tuple[int, int, int]] = []
     val_run_pairs:   list[tuple[int, int, int]] = []
     skipped = 0
+    skipped_grid_nan = 0
+
+    # Runs with NaN ICON-D2 grid data are logged as "excluded" by
+    # load_icond2_ml_runs, but that function only warns — it never actually
+    # filters them. Do it here so NaN can't leak into a training or
+    # validation batch (previously caused silent NaN val loss).
+    grid_nan_by_run = np.isnan(grid_icond2_runs).any(axis=(1, 2, 3))
 
     for r_curr in range(R):
         t_run = run_times[r_curr]
@@ -830,13 +837,15 @@ def main() -> None:
             skipped += 1; continue
         if _meas_nan_any[t_run_abs - H : t_run_abs + F_h].any():
             skipped += 1; continue
+        if grid_nan_by_run[r_curr] or grid_nan_by_run[r_hist]:
+            skipped += 1; skipped_grid_nan += 1; continue
 
         pair = (r_curr, r_hist, t_run_abs)
         (train_run_pairs if t_run < split_time else val_run_pairs).append(pair)
 
     logger.info(
-        "Run pairs — train: %d  val: %d  skipped: %d",
-        len(train_run_pairs), len(val_run_pairs), skipped,
+        "Run pairs — train: %d  val: %d  skipped: %d (grid-NaN: %d)",
+        len(train_run_pairs), len(val_run_pairs), skipped, skipped_grid_nan,
     )
 
     # ------------------------------------------------------------------
@@ -889,6 +898,7 @@ def main() -> None:
         ecmwf_grid_coords=ecmwf_coords,
         icond2_altitudes=icond2_alts,
         ecmwf_altitudes=ecmwf_alts,
+        station_ids=all_ids,
     )
     logger.info(
         "Graph — s2s: %d  i2s: %d  e2s: %d",

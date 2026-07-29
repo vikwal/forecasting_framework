@@ -74,6 +74,7 @@ def build_eval_batch(
     H_fore: int,
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
     hist_wind_available: bool = False,
+    station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
 ) -> tuple:
     """
     Build a HeteroData evaluation batch for the given station split.
@@ -93,10 +94,16 @@ def build_eval_batch(
 
     t_hist_abs = t_run_abs - H_hist
 
-    nearest = station_nearest_grid[all_global]
-    i2_hist = grid_icond2_runs_scaled[r_hist, :, nearest, :]    # (N_all, 48, I2)
-    i2_curr = grid_icond2_runs_scaled[r_curr, :, nearest, :]    # (N_all, 48, I2)
-    i2_full = np.concatenate([i2_hist, i2_curr], axis=1)        # (N_all, 96, I2)
+    if station_k_nearest_grid is not None:
+        # k nearest: (N_all, k) → features (N_all, 48, k*I2) matching training
+        k_idx   = station_k_nearest_grid[all_global]             # (N_all, k)
+        i2_hist = grid_icond2_runs_scaled[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(N_all, 48, -1)
+        i2_curr = grid_icond2_runs_scaled[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(N_all, 48, -1)
+    else:
+        nearest = station_nearest_grid[all_global]
+        i2_hist = grid_icond2_runs_scaled[r_hist, :, nearest, :]    # (N_all, 48, I2)
+        i2_curr = grid_icond2_runs_scaled[r_curr, :, nearest, :]    # (N_all, 48, I2)
+    i2_full = np.concatenate([i2_hist, i2_curr], axis=1)        # (N_all, 96, [k*]I2)
 
     i2_grid_full = np.concatenate([
         grid_icond2_runs_scaled[r_hist],
@@ -166,6 +173,7 @@ def evaluate(
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
     hist_wind_available: bool = False,
     timestamps: "pd.DatetimeIndex | None" = None,
+    station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
     Single-pass evaluation over all test run pairs.
@@ -192,6 +200,7 @@ def evaluate(
         sampler=sampler,
         station_meas_scaled=meas_scaled,
         station_nearest_grid=station_nearest_grid,
+        station_k_nearest_grid=station_k_nearest_grid,
         grid_icond2_runs_scaled=grid_icond2_runs_scaled,
         station_ecmwf_nwp_scaled=station_ecmwf_nwp_scaled,
         station_static=station_static,
@@ -216,6 +225,24 @@ def evaluate(
         val = float(meas_raw[t_run_abs - 1, gidx, target_feat_idx])
         return np.full(H_fore, val, dtype=np.float32)
 
+    # Observer (context) selection must MATCH training (sampler.sample_val):
+    # the model was trained seeing only the next_n_neighbors nearest train
+    # stations per target, not all train stations. Using all of them at eval
+    # changes the station graph topology and degrades models that rely on the
+    # neighbour context (esp. nwp_nodes=true + hist_wind_available=false).
+    if sampler.tc.next_n_neighbors is not None:
+        observer_global = sampler._nearest_neighbors(
+            val_station_indices, train_station_indices, sampler.tc.next_n_neighbors,
+        )
+    else:
+        observer_global = sampler._neighbors_within_radius(
+            val_station_indices, train_station_indices,
+        )
+    logger.info(
+        "Observer context: %d / %d train stations (next_n_neighbors=%s)",
+        len(observer_global), len(train_station_indices), sampler.tc.next_n_neighbors,
+    )
+
     model.eval()
     with torch.no_grad():
         for step, (r_curr, r_hist, t_run_abs) in enumerate(test_run_pairs):
@@ -229,7 +256,7 @@ def evaluate(
                 **common,
                 r_curr=r_curr, r_hist=r_hist, t_run_abs=t_run_abs,
                 target_global=val_station_indices,
-                observer_global=train_station_indices,
+                observer_global=observer_global,
             )
             preds_a = _to_phys(
                 model(data_a.to(device), mask_a.to(device)).cpu().numpy()

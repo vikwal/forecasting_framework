@@ -374,6 +374,8 @@ def load_data(config: dict) -> tuple:
         fpath = station_file_map[sid]
         if fpath.endswith(".parquet"):
             df = pd.read_parquet(fpath)
+            if "timestamp" not in df.columns and df.index.name == "timestamp":
+                df = df.reset_index()
             if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         else:
@@ -580,6 +582,18 @@ def load_data(config: dict) -> tuple:
                 piv = piv.resample("1h", closed="left", label="left").mean()
                 # Align to pivot index after resampling
                 piv = piv.reindex(pivot.index)
+                n_nan_before = int(piv.isna().sum().sum())
+                if n_nan_before > 0:
+                    # RK covariates are fed straight into sklearn LinearRegression,
+                    # which rejects NaN — small sensor gaps are bridged per-station
+                    # (ffill/bfill along time), remaining all-NaN columns fall back
+                    # to the cross-station mean at that timestamp.
+                    piv = piv.ffill().bfill()
+                    piv = piv.T.fillna(piv.mean(axis=1)).T
+                    logger.info(
+                        "RK feature '%s': filled %d/%d NaN (ffill/bfill + cross-station mean).",
+                        fname, n_nan_before, piv.size,
+                    )
                 rk_dynamic_features[fname] = piv.values.astype(np.float64)
                 logger.info("Loaded RK feature '%s' as (T, N) matrix.", fname)
             else:

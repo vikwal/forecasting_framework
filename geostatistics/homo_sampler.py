@@ -121,6 +121,7 @@ class HomoSampler:
         ecmwf_coords: np.ndarray | None = None,        # (N_ecmwf_grid, 2)
         k_ecmwf: int = 0,
         aggregate_nwp: bool = True,
+        topo_feats: dict[str, np.ndarray] | None = None,
     ) -> None:
         self.meas      = meas_scaled            # (T, N, M)
         self.nwp_runs  = grid_icond2_scaled     # (R, n_leads, N_grid_i2, I2)
@@ -150,7 +151,13 @@ class HomoSampler:
         else:
             self._ecmwf_knn_idx = np.empty((len(lats), 0), dtype=np.int32)
             self._ecmwf_knn_w   = np.empty((len(lats), 0), dtype=np.float32)
+        self._topo_feats = topo_feats or {}
         self._init_static(lats, lons, alts)
+
+    @property
+    def topo_dim(self) -> int:
+        """Number of topographic feature columns appended to the static tensor."""
+        return len(self._topo_feats)
 
     @property
     def in_channels(self) -> int:
@@ -233,6 +240,13 @@ class HomoSampler:
         # Station-to-station coordinates (radians) for next_n_neighbors selection
         self._station_coords_rad = np.stack([lat_r, lon_r], axis=1).astype(np.float64)
 
+        # Topographic features (already z-score normalised in load_topo_node_features),
+        # in canonical order — appended after the 6 core static columns so
+        # MTGNN._pairwise_edge_features's fixed indices 0-4 stay valid.
+        from .stgnn.utils.topo_features import TOPO_FEATURE_ORDER
+        self._topo_names = [n for n in TOPO_FEATURE_ORDER if n in self._topo_feats]
+        self._topo_arrays = [self._topo_feats[n] for n in self._topo_names]
+
     # ------------------------------------------------------------------
     # NWP aggregation
     # ------------------------------------------------------------------
@@ -305,20 +319,23 @@ class HomoSampler:
         sub_indices: list[int],
         target_mask_np: np.ndarray,
     ) -> np.ndarray:
-        """Build (N_sub, 6) static feature matrix.
+        """Build (N_sub, 6 + topo_dim) static feature matrix.
 
-        Columns: sin_lat, cos_lat, sin_lon, cos_lon, alt_norm, type_indicator
+        Columns: sin_lat, cos_lat, sin_lon, cos_lon, alt_norm, type_indicator,
+        [topo features in TOPO_FEATURE_ORDER, if configured]
         type_indicator: 0 = target (IGNNK masked), 1 = neighbour
         """
         idx = np.array(sub_indices)
-        return np.stack([
+        cols = [
             self._sin_lat[idx],
             self._cos_lat[idx],
             self._sin_lon[idx],
             self._cos_lon[idx],
             self._alt_norm[idx],
             (~target_mask_np).astype(np.float32),
-        ], axis=1).astype(np.float32)
+        ]
+        cols.extend(arr[idx] for arr in self._topo_arrays)
+        return np.stack(cols, axis=1).astype(np.float32)
 
     # ------------------------------------------------------------------
     # Batch assembly

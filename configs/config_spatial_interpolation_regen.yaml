@@ -1,0 +1,29 @@
+data:
+  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  exclude_stations: ['14138']
+  stations_master: 'data/stations_master.csv'
+  # No test_start/test_end -> use full available raw-data range (matches the
+  # "start_end" cache-key convention used by the existing knnimputer/interpol caches).
+
+interpolation:
+  k_neighbors: 8          # number of nearest neighbours used for each prediction
+  idw_power: 2.0          # IDW exponent (weight = 1 / dist^power)
+  variogram_model: 'gaussian'   # spherical | gaussian | exponential
+  n_variogram_lags: 30    # number of lag bins for empirical semivariance
+  max_variogram_dist: 1000 # km; null = half of max pairwise dist (~430 km for this network)
+  interpolate_uv: true    # also interpolate u/v wind components (requires wind_direction column)
+  variogram_segments: 0   # 1=global (one variogram), 0=per-timestamp, N=N equal time blocks
+  knn_impute_neighbors: 10
+  anisotropy:
+    enabled: true        # set to true to use anisotropic distances in the kriging system
+    angle: 0            # major axis direction (geographic degrees, clockwise from North)
+    ratio: 0.2            # range_minor / range_major  (< 1 = more correlated along major axis)
+  rk_features:            # covariates for the OLS trend in Regression Kriging
+    - altitude            # static (from wind_parameter.csv)
+    - relative_humidity   # dynamic
+  azimuths: [0, 45, 90, 135]  # directional variogram angles in degrees (geographic: 0=N, 90=E); tolerance fixed at ±22.5°
+
+output:
+  path: 'results/geostatistics'
+  prefix: 'spatial_interp_regen'
+  target_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'

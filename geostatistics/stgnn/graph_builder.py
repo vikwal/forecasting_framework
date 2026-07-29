@@ -31,6 +31,7 @@ from .utils.spatial import (
     geodesic_knn,
     pairwise_geodesic_km,
 )
+from .utils.topo_features import load_topo_node_features
 
 
 class HeterogeneousGraphBuilder:
@@ -61,6 +62,7 @@ class HeterogeneousGraphBuilder:
         ecmwf_grid_coords: np.ndarray,
         icond2_altitudes: np.ndarray | None = None,
         ecmwf_altitudes: np.ndarray | None = None,
+        station_ids: list[str] | None = None,
     ) -> HeteroData:
         """
         Build and return the static HeteroData graph.
@@ -73,6 +75,10 @@ class HeterogeneousGraphBuilder:
         ecmwf_grid_coords :  (N_ecmwf, 2)    [lat, lon] degrees
         icond2_altitudes :   (N_icond2,)      optional, metres a.s.l.
         ecmwf_altitudes :    (N_ecmwf,)       optional, metres a.s.l.
+        station_ids :        (N_stations,) DWD station IDs, same order as
+                              station_coords — required when
+                              ``self.cfg.topo_feature_names`` is non-empty, to
+                              join topographic node features onto s2s edges.
 
         Returns
         -------
@@ -81,6 +87,17 @@ class HeterogeneousGraphBuilder:
             Node feature tensors are **not** set here (done by the sampler).
         """
         data = HeteroData()
+
+        topo_node_feats: dict[str, np.ndarray] | None = None
+        if self.cfg.topo_feature_names:
+            if station_ids is None:
+                raise ValueError(
+                    "GraphConfig.topo_feature_names is set but station_ids was not "
+                    "passed to HeterogeneousGraphBuilder.build()."
+                )
+            topo_node_feats = load_topo_node_features(
+                self.cfg.topo_features_path, station_ids, self.cfg.topo_feature_names,
+            )
 
         # Store coordinates as node metadata (not used by the model but handy)
         data["station"].coords = torch.from_numpy(station_coords.astype(np.float32))
@@ -94,7 +111,9 @@ class HeterogeneousGraphBuilder:
             data["ecmwf"].altitude = torch.from_numpy(ecmwf_altitudes.astype(np.float32))
 
         # --- station ↔ station edges ---
-        s2s_ei, s2s_ea = self._build_station_edges(station_coords, station_altitudes)
+        s2s_ei, s2s_ea = self._build_station_edges(
+            station_coords, station_altitudes, topo_node_feats,
+        )
         data["station", "near", "station"].edge_index = s2s_ei
         data["station", "near", "station"].edge_attr = s2s_ea
 
@@ -134,6 +153,7 @@ class HeterogeneousGraphBuilder:
         self,
         coords: np.ndarray,
         altitudes: np.ndarray,
+        topo_node_feats: dict[str, np.ndarray] | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
         Build bidirectional station ↔ station edges.
@@ -181,6 +201,10 @@ class HeterogeneousGraphBuilder:
             use_distance=self.cfg.use_distance_features,
             use_direction=self.cfg.use_direction_features,
             use_altitude_diff=self.cfg.use_altitude_diff,
+            topo_node_feats=topo_node_feats,
+            topo_feature_names=self.cfg.topo_feature_names,
+            src_idx=src,
+            dst_idx=dst,
         )
 
         edge_index = torch.tensor(np.stack([src, dst], axis=0), dtype=torch.long)

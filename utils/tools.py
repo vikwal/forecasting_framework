@@ -547,7 +547,8 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
 
     # Setup optimizer and loss
     lr = hyperparameters.get('learning_rate', hyperparameters.get('lr', 0.001))
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    weight_decay = hyperparameters.get('weight_decay', 0.0)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     quantiles = config['model'].get('tft', {}).get('quantiles', None)
     if quantiles:
         criterion = lambda pred, tgt: _pinball_loss(pred, tgt, quantiles)

@@ -90,77 +90,71 @@ JOBS: list[Job] = [
     #   Bis dahin: beste verfügbare Checkpoints je Fold eintragen.
     # ==========================================================================
 
-    # ── DCRNN GRID (nwp_nodes=true, next_n_icond2=4) ──────────────────────
-    # Best trial in study: #243 — Checkpoint fehlt, daher nächstbester nehmen.
-    # Verfügbare fold0-Trials: 202, 200, 157, 10, 6  (höchste Nummer zuerst)
-    # Verfügbare fold1-Trials: 594, 400, 217, 150, 6
-    # Verfügbare fold2-Trials: 399, 224, 223, 169, 153, 145
+    # ── DCRNN GRID / NWP (nwp_nodes=true) ────────────────────────────────────
     Job(
         group       = "DCRNN_GRID",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial202_fold0",
+        model_name  = "wind_dcrnn_fold1_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_fold1.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_fold0",
     ),
     Job(
         group       = "DCRNN_GRID",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial594_fold1",
+        model_name  = "wind_dcrnn_fold2_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_fold2.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_fold1",
     ),
     Job(
         group       = "DCRNN_GRID",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial399_fold2",
+        model_name  = "wind_dcrnn_fold3_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_fold3.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_fold2",
     ),
 
-    # ── DCRNN BASE (nwp_nodes=false, next_n_icond2=1, best trial=#111) ────
-    # Checkpoint für trial#111 fehlt — nach Retrain hier ersetzen.
+    # ── DCRNN BASE ──────────────────────────────────────────────────────────
     Job(
         group       = "DCRNN_BASE",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial157_fold0",   # ← nach Retrain: wind_dcrnn_base_fold0
+        model_name  = "wind_dcrnn_base_fold1_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_base_fold1.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_base_fold0",
     ),
     Job(
         group       = "DCRNN_BASE",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial150_fold1",   # ← nach Retrain: wind_dcrnn_base_fold1
+        model_name  = "wind_dcrnn_base_fold2_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_base_fold2.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_base_fold1",
     ),
     Job(
         group       = "DCRNN_BASE",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial145_fold2",   # ← nach Retrain: wind_dcrnn_base_fold2
+        model_name  = "wind_dcrnn_base_fold3_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_base_fold3.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_base_fold2",
     ),
 
-    # ── DCRNN NWP+HIST (hist_wind_available=true, best trial=#90) ──────────
-    # Checkpoint für trial#90 fehlt — nach Retrain hier ersetzen.
+    # ── DCRNN NWP+HIST ──────────────────────────────────────────────────────
     Job(
         group       = "DCRNN_NWP_HIST",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial200_fold0",   # ← nach Retrain: wind_dcrnn_nwp_hist_fold0
+        model_name  = "wind_dcrnn_nwp_hist_fold1_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_nwp_hist_fold1.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_nwp_hist_fold0",
     ),
     Job(
         group       = "DCRNN_NWP_HIST",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial217_fold1",   # ← nach Retrain: wind_dcrnn_nwp_hist_fold1
+        model_name  = "wind_dcrnn_nwp_hist_fold2_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_nwp_hist_fold2.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_nwp_hist_fold1",
     ),
     Job(
         group       = "DCRNN_NWP_HIST",
         script      = "get_test_results_dcrnn",
-        model_name  = "_hpo_dcrnn_trial169_fold2",   # ← nach Retrain: wind_dcrnn_nwp_hist_fold2
+        model_name  = "wind_dcrnn_nwp_hist_fold3_dcrnn_val",
         config      = "configs/dcrnn/config_wind_dcrnn_nwp_hist_fold3.yaml",
         raw_out_name= "dcrnn_wind_dcrnn_nwp_hist_fold2",
     ),
@@ -172,74 +166,72 @@ JOBS: list[Job] = [
     # die einzigen verfügbaren — nach Retrain mit best-trial-Files ersetzen.
     # ==========================================================================
 
-    # ── MTGNN BASE (nwp_nodes=false, hist_wind_available=false) ───────────
+    # ── MTGNN BASE ──────────────────────────────────────────────────────────
     Job(
         group       = "MTGNN_BASE",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial71_fold0",    # ← nach Retrain: wind_mtgnn_fold0
+        model_name  = "wind_mtgnn_fold1_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_fold1.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_fold0",
     ),
     Job(
         group       = "MTGNN_BASE",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial73_fold1",    # ← nach Retrain: wind_mtgnn_fold1
+        model_name  = "wind_mtgnn_fold2_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_fold2.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_fold1",
     ),
     Job(
         group       = "MTGNN_BASE",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial88_fold2",    # ← nach Retrain: wind_mtgnn_fold2
+        model_name  = "wind_mtgnn_fold3_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_fold3.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_fold2",
     ),
 
-    # ── MTGNN NWP (nwp_nodes=true, hist_wind_available=false, best=#61) ───
-    # Kein fold-spezifischer Checkpoint vorhanden → nach Retrain eintragen.
+    # ── MTGNN NWP / GRID (nwp_nodes=true, hist_wind_available=false) ──────────
     Job(
         group       = "MTGNN_NWP",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial89_fold0",    # ← nach Retrain: wind_mtgnn_nwp_fold0
+        model_name  = "wind_mtgnn_nwp_fold1_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_nwp_fold1.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_nwp_fold0",
     ),
     Job(
         group       = "MTGNN_NWP",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial73_fold1",    # ← nach Retrain: wind_mtgnn_nwp_fold1
+        model_name  = "wind_mtgnn_nwp_fold2_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_nwp_fold2.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_nwp_fold1",
     ),
     Job(
         group       = "MTGNN_NWP",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial88_fold2",    # ← nach Retrain: wind_mtgnn_nwp_fold2
+        model_name  = "wind_mtgnn_nwp_fold3_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_nwp_fold3.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_nwp_fold2",
     ),
 
     # ── MTGNN NWP+HIST (nwp_nodes=true, hist_wind_available=true, best=#51)
-    # Config neu erstellt: config_wind_mtgnn_nwp_hist_fold1/2/3.yaml
-    # Kein spezifischer Checkpoint vorhanden → nach Retrain eintragen.
+    # Config: config_wind_mtgnn_nwp_hist_fold1/2/3.yaml
     Job(
         group       = "MTGNN_NWP_HIST",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial71_fold0",    # ← nach Retrain: wind_mtgnn_nwp_hist_fold0
+        model_name  = "wind_mtgnn_nwp_hist_fold1_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_nwp_hist_fold1.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_nwp_hist_fold0",
     ),
     Job(
         group       = "MTGNN_NWP_HIST",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial73_fold1",    # ← nach Retrain: wind_mtgnn_nwp_hist_fold1
+        model_name  = "wind_mtgnn_nwp_hist_fold2_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_nwp_hist_fold2.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_nwp_hist_fold1",
     ),
     Job(
         group       = "MTGNN_NWP_HIST",
         script      = "get_test_results_mtgnn",
-        model_name  = "_hpo_mtgnn_trial88_fold2",    # ← nach Retrain: wind_mtgnn_nwp_hist_fold2
+        model_name  = "wind_mtgnn_nwp_hist_fold3_mtgnn_val",
         config      = "configs/mtgnn/config_wind_mtgnn_nwp_hist_fold3.yaml",
         raw_out_name= "mtgnn_wind_mtgnn_nwp_hist_fold2",
     ),
@@ -279,7 +271,8 @@ def build_command(job: Job, gpu: int) -> str:
 
     cmd = " ".join(parts)
     log = f"logs/eval_{job.raw_out_name}.log"
-    return f"bash -c 'source {VENV_ACTIVATE} && cd {WORK_DIR} && {cmd} 2>&1 | tee {log}; echo EXIT $?; exec bash'"
+    # Session schliesst sich bei Erfolg; bei Fehler bleibt sie offen zum Debuggen
+    return f"bash -c 'source {VENV_ACTIVATE} && cd {WORK_DIR} && {cmd} >> {log} 2>&1 || exec bash'"
 
 
 def launch_session(job: Job, cmd: str, dry_run: bool) -> None:
@@ -302,6 +295,34 @@ def check_screen_available() -> bool:
         return True
     except (FileNotFoundError, subprocess.CalledProcessError):
         return False
+
+
+def active_screen_sessions() -> set[str]:
+    """Gibt die Namen aller aktuell laufenden screen-Sessions zurück."""
+    try:
+        result = subprocess.run(["screen", "-ls"], capture_output=True, text=True)
+        sessions = set()
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line.startswith("There") or line.startswith("No Sockets"):
+                continue
+            # Format: "12345.session_name	(Detached)" oder "(Attached)"
+            parts = line.split(".")
+            if len(parts) >= 2:
+                sessions.add(parts[1].split()[0])
+        return sessions
+    except Exception:
+        return set()
+
+
+def job_status(job: Job, active_sessions: set[str]) -> str:
+    """Gibt 'done', 'running' oder 'pending' zurück."""
+    raw_path = WORK_DIR / "data" / "raw_preds" / f"{job.raw_out_name}_raw.parquet"
+    if raw_path.exists():
+        return "done"
+    if job.session_name in active_sessions:
+        return "running"
+    return "pending"
 
 
 def main() -> None:
@@ -346,8 +367,10 @@ def main() -> None:
         sys.exit(1)
 
     gpu_map = assign_gpus(jobs, gpus)
+    active = active_screen_sessions()
 
     # Übersicht
+    status_icon = {"done": "✓", "running": "⏳", "pending": "○"}
     print(f"\n{'═'*60}")
     print(f"  GPUs:          {gpus}")
     print(f"  GPU-Zuweisung: {gpu_map}")
@@ -360,26 +383,41 @@ def main() -> None:
         if job.group not in groups_seen:
             print(f"\n  ── {job.group} → GPU {gpu} ──────────────────────────")
             groups_seen.add(job.group)
-        print(f"  {job.session_name}")
+        s = job_status(job, active)
+        print(f"  {status_icon[s]} {job.session_name}  [{s}]")
 
     print(f"\n{'═'*60}\n")
 
+    pending = [j for j in jobs if job_status(j, active) == "pending"]
+    if not pending:
+        print("Alle Jobs bereits fertig oder laufend — nichts zu starten.")
+        return
+
     if not args.dry_run:
-        yn = input("Alle Sessions starten? [j/N] ").strip().lower()
+        yn = input(f"{len(pending)} ausstehende Jobs starten? [j/N] ").strip().lower()
         if yn not in ("j", "y", "ja", "yes"):
             print("Abgebrochen.")
             return
 
-    # Sessions starten
+    # Sessions starten (nur pending)
+    started = 0
     for job in jobs:
+        s = job_status(job, active)
         gpu = gpu_map[job.group]
         cmd = build_command(job, gpu)
+        if s == "done":
+            print(f"  SKIP (fertig)   {job.session_name}")
+            continue
+        if s == "running":
+            print(f"  SKIP (läuft)    {job.session_name}")
+            continue
         launch_session(job, cmd, dry_run=args.dry_run)
+        started += 1
         if not args.dry_run:
             time.sleep(args.delay)
 
     if not args.dry_run:
-        print(f"\nAlle {len(jobs)} Sessions gestartet.")
+        print(f"\n{started} Sessions gestartet.")
         print("Übersicht:  screen -ls")
         print("Anhängen:   screen -r <session_name>")
         print("Detachen:   Ctrl+A, D")

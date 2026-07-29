@@ -64,6 +64,8 @@ from geostatistics.train_stgnn2 import (
 from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.mtgnn import MTGNNModel
 from geostatistics.stgnn.utils.normalization import StandardScaler
+from geostatistics.stgnn.config import parse_edge_features
+from geostatistics.stgnn.utils.topo_features import load_topo_node_features
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding
 
 logging.basicConfig(
@@ -385,6 +387,21 @@ def main() -> None:
     station_coords   = np.stack([lats, lons], axis=1)
 
     # ------------------------------------------------------------------
+    # Topographic node features (station-station edge bias, see edge_features)
+    # ------------------------------------------------------------------
+    _, _, _, topo_feature_names = parse_edge_features(mcfg)
+    topo_feats: dict[str, np.ndarray] = {}
+    if topo_feature_names:
+        topo_features_path = mcfg.get("topo_features_path")
+        if not topo_features_path:
+            raise ValueError(
+                "edge_features includes topographic names but 'topo_features_path' "
+                "is not set in the mtgnn config section."
+            )
+        topo_feats = load_topo_node_features(topo_features_path, all_ids, topo_feature_names)
+        logger.info("Loaded topo features for MTGNN edges: %s", list(topo_feats.keys()))
+
+    # ------------------------------------------------------------------
     # ICON-D2 runs
     # ------------------------------------------------------------------
     if use_case == "solar":
@@ -488,6 +505,13 @@ def main() -> None:
     train_run_pairs: list[tuple[int, int, int]] = []
     val_run_pairs:   list[tuple[int, int, int]] = []
     skipped = 0
+    skipped_grid_nan = 0
+
+    # Runs with NaN ICON-D2 grid data are logged as "excluded" by
+    # load_icond2_ml_runs / load_solar_sl_runs, but that function only warns —
+    # it never actually filters them. Do it here so NaN can't leak into a
+    # training or validation batch (previously caused silent NaN val loss).
+    grid_nan_by_run = np.isnan(grid_icond2_runs).any(axis=(1, 2, 3))
 
     for r_curr in range(R):
         t_run = run_times[r_curr]
@@ -504,12 +528,14 @@ def main() -> None:
             skipped += 1; continue
         if _meas_nan_any[t_run_abs - H:t_run_abs + F_h].any():
             skipped += 1; continue
+        if grid_nan_by_run[r_curr] or grid_nan_by_run[r_hist]:
+            skipped += 1; skipped_grid_nan += 1; continue
 
         pair = (r_curr, r_hist, t_run_abs)
         (train_run_pairs if t_run < split_time else val_run_pairs).append(pair)
 
-    logger.info("Run pairs — train: %d  val: %d  skipped: %d",
-                len(train_run_pairs), len(val_run_pairs), skipped)
+    logger.info("Run pairs — train: %d  val: %d  skipped: %d (grid-NaN: %d)",
+                len(train_run_pairs), len(val_run_pairs), skipped, skipped_grid_nan)
 
     # ------------------------------------------------------------------
     # HomoSampler
@@ -539,6 +565,7 @@ def main() -> None:
         ecmwf_coords          = ecmwf_coords,
         k_ecmwf               = next_n_ecmwf,
         aggregate_nwp         = aggregate_nwp,
+        topo_feats            = topo_feats,
     )
     logger.info("in_channels: %d  (aggregate_nwp=%s)", sampler.in_channels, aggregate_nwp)
 
@@ -559,7 +586,8 @@ def main() -> None:
 
     model = MTGNNModel(
         in_channels      = in_channels_model,
-        static_dim       = 6,
+        static_dim       = 6 + sampler.topo_dim,
+        topo_dim         = sampler.topo_dim,
         hidden           = mcfg.get("hidden", 64),
         n_layers         = mcfg.get("n_layers", 4),
         K_hop            = mcfg.get("K_hop", 2),

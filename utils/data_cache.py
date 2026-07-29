@@ -7,8 +7,17 @@ import pickle
 import hashlib
 import logging
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Any, Tuple, Optional
 from . import preprocessing, tools, hpo
+
+# Single source of truth for the cache location. Anything that needs to know
+# where cache entries live (size accounting, eviction, cache_manager.py) must
+# import this instead of repeating the literal — a second hardcoded copy in
+# hpo_cl_tft_bc.py once silently pointed the eviction logic at an empty relative
+# directory, so nothing was ever evicted and the root partition filled up.
+DEFAULT_CACHE_DIR = "/mnt/nvme2/data_cache"
+DEFAULT_GNN_CACHE_DIR = f"{DEFAULT_CACHE_DIR}/gnns"
 
 
 class DataCache:
@@ -16,7 +25,7 @@ class DataCache:
     Manages disk-based caching of preprocessed data with memory-mapped loading.
     """
 
-    def __init__(self, cache_dir: str = "data_cache"):
+    def __init__(self, cache_dir: str = DEFAULT_CACHE_DIR):
         """
         Initialize data cache.
 
@@ -41,6 +50,18 @@ class DataCache:
         """
         # Create a hashable representation of config, features and model
         hash_data = {
+            # Bump whenever the *semantics* of preprocessing change without any
+            # config key changing, so previously cached (differently-built) entries
+            # can never be silently reused. v2: known-window past run offset fixed
+            # to future_len, val folds chunked temporally instead of station-major.
+            # v3: single global scaler_x fitted across all training stations instead of
+            # one StandardScaler per station (see _fit_global_scaler_x) — this also
+            # activates the static-feature scaling in prepare_data_for_tft.
+            # v4: next_n_stations neighbours are drawn from a split-dependent pool
+            # (training stations see `files` only, validation stations see
+            # `files + val_files`) instead of the whole stations_master.csv. The pool is a
+            # deterministic function of `files`/`val_files`, both already hashed below.
+            'preprocessing_version': 4,
             'data_path': config['data']['path'],
             'files': sorted(config['data'].get('files', [])),
             'val_files': sorted(config['data'].get('val_files', [])),
@@ -50,6 +71,10 @@ class DataCache:
             'features': features,
             'next_n_grid_points': config['params']['next_n_grid_points'],
             'get_next_grid_points_method': config['params'].get('get_next_grid_points_method', None),
+            'next_n_grid_ecmwf': config['params'].get('next_n_grid_ecmwf', None),
+            'next_n_stations': config['params'].get('next_n_stations', None),
+            'nwp_models': config['params'].get('nwp_models', None),
+            'ecmwf_features': config['params'].get('ecmwf_features', None),
             'model': {
                 'name': model_name,
                 'lookback': config['model']['lookback'],
@@ -376,17 +401,157 @@ class LazyFoldLoader:
             return info
 
 
+def _fit_global_scaler_x(dfs, config, logger):
+    """
+    Fit ONE StandardScaler over the training rows of ALL training stations.
+
+    Mirrors train_cl.py:326-370 and the GNN pipelines' `meas_scaler`
+    (geostatistics/train_dcrnn.py:750), which likewise fit a single scaler across all
+    training stations rather than one per station.
+
+    Why this matters (and not just for tidiness):
+      * Per-station scaling z-scores every station's observed history against its own
+        mean/std, while the target stays in raw m/s (scale_target=False for
+        target_col='wind_speed', preprocessing.py:377). The station's absolute wind
+        level is thereby erased from the features but still demanded of the output —
+        so the near-persistence relation y ≈ own_history, which is the whole point of
+        the 'hist' variant's `wind_speed` observed feature, becomes unlearnable for
+        unseen stations. Measured on held-out stations, the own-history advantage went
+        from +1.4 % (per-station) to +9.7 % (global), and at leads 1-6 h from -1.8 %
+        to +29 %.
+      * Static features are per-station CONSTANTS. A per-station scaler would collapse
+        them all to exactly 0, which is why the static-scaling block in
+        prepare_data_for_tft (preprocessing.py:3682) is guarded by `if scaler_x` — with
+        a per-station scaler it is skipped entirely and statics reach the model raw
+        (altitude up to 2956 next to z0 at 0.0005). A global scaler makes that block
+        both applicable and correct.
+
+    The scaler is deliberately fitted on the *training* stations only (`files`), never
+    on `val_files`: _replace_val_with_val_files reuses the same config and therefore the
+    same pre-fitted scaler, so validation stations are transformed but never fitted on.
+
+    The target column is excluded, matching prepare_data_for_tft's
+    `feature_cols = [c for c in train_df.columns if c != target_col]`.
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    target_col = config['data']['target_col']
+    t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+    history_length = config['model']['lookback']
+
+    scaler = StandardScaler()
+    # The target column is excluded from `scaler` (see below), but for target_col
+    # 'wind_speed' the very same column is ALSO an observed input feature in the 'hist'
+    # variant. It therefore needs its own global scaler, or it would reach the model raw
+    # while every other observed column is standardised — an asymmetry that would hit
+    # 'hist' only. y itself is taken from the UNSCALED frame in prepare_data_for_tft, so
+    # this never touches the target.
+    target_feature_scaler = StandardScaler()
+    ref_cols, n_stations, n_rows = None, 0, 0
+
+    for key in list(dfs.keys()):
+        # Impute here rather than inside pipeline(): the scaler must see exactly the
+        # values prepare_data_for_tft will later transform, and NaNs would poison
+        # partial_fit. knn_imputer preserves the column set and returns early when
+        # there is nothing to impute, so pipeline()'s own call becomes a no-op.
+        dfs[key] = preprocessing.knn_imputer(data=dfs[key],
+                                             n_neighbors=config['data']['n_neighbors'])
+        df = dfs[key]
+
+        # Mirror prepare_data_for_tft's split exactly, including the backwards
+        # extension of test_start for NWP data (preprocessing.py:3657-3666) — otherwise
+        # the scaler would be fitted on rows that end up in the test split.
+        test_start = config['data'].get('test_start', None)
+        test_start = pd.Timestamp(test_start) if test_start is not None else None
+        is_nwp = isinstance(df.index, pd.MultiIndex) and 'starttime' in df.index.names
+        if is_nwp and test_start is not None:
+            test_start = test_start - pd.Timedelta(hours=history_length)
+
+        df_train, _ = preprocessing.split_data(
+            data=df,
+            train_frac=config['data']['train_frac'],
+            train_start=pd.Timestamp(config['data'].get('train_start', None)),
+            test_start=test_start,
+            test_end=pd.Timestamp(config['data'].get('test_end', None)),
+            t_0=t_0,
+        )
+        if len(df_train) == 0:
+            logger.warning(f"global scaler_x: station {key} contributed no training rows — skipped.")
+            continue
+
+        df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+
+        # A silently differing column set (e.g. a neighbour station missing a feature,
+        # which preprocess_synth_wind_icond2 only logs a warning for) would make
+        # partial_fit either raise or — worse — align the wrong columns across stations.
+        if ref_cols is None:
+            ref_cols = df_train_x.columns.tolist()
+        elif df_train_x.columns.tolist() != ref_cols:
+            missing = sorted(set(ref_cols) - set(df_train_x.columns))
+            extra = sorted(set(df_train_x.columns) - set(ref_cols))
+            raise ValueError(
+                f"global scaler_x: station {key} has a different feature column set than the "
+                f"first station. Missing: {missing}. Unexpected: {extra}. Column order/content "
+                "must be identical across stations or the shared scaler misaligns features."
+            )
+
+        scaler.partial_fit(df_train_x.values)
+        if target_col in df_train.columns:
+            target_feature_scaler.partial_fit(df_train[[target_col]].values)
+        n_stations += 1
+        n_rows += len(df_train_x)
+        del df_train, df_train_x
+
+    if ref_cols is None:
+        raise ValueError("global scaler_x: no training station produced any training rows.")
+
+    logger.info(
+        f"Fitted global scaler_x on {n_stations} training stations / {n_rows} rows / "
+        f"{len(ref_cols)} feature columns (target '{target_col}' excluded, val_files not seen)."
+    )
+    # Consumed by prepare_data_for_tft to verify that every station it later transforms
+    # presents the same columns in the same order. sklearn only checks the column COUNT
+    # when handed a bare ndarray, so a reordered frame would otherwise be scaled with
+    # the wrong column's mean/std without any error.
+    scaler._ff_feature_cols = ref_cols
+    if hasattr(target_feature_scaler, 'mean_'):
+        scaler._ff_target_feature_scaler = target_feature_scaler
+        logger.info(
+            f"Fitted global scaler for '{target_col}' used as an input feature: "
+            f"mean={target_feature_scaler.mean_[0]:.4f} scale={target_feature_scaler.scale_[0]:.4f} "
+            "(applies to the 'hist' variant's own-history column; y stays raw)."
+        )
+    return scaler
+
+
 def _replace_val_with_val_files(combined_kfolds, config, features, logger):
     """
     Replace the val portion of each k-fold with data from val_files stations.
 
     Val stations are processed for the full training period (X_train, before test_start).
-    The sequences are split into n_splits+1 equal temporal chunks; fold k gets chunk k+1,
-    mirroring the TimeSeriesSplit structure used for training stations.
+    If ``config['hpo']['min_train_date']`` is set, samples before it are dropped first —
+    mirroring ``apply_min_train_len_per_file``'s treatment of the training stations, so
+    the val chunk boundaries below line up with the *same* [min_train_date, test_start]
+    window the training folds are carved from (otherwise val chunk 0 could start years
+    before any training fold's val window, since val stations get no "fixed block").
+    The (possibly truncated) sequences are split into n_splits+1 equal temporal chunks;
+    fold k gets chunk k+1, mirroring the TimeSeriesSplit structure used for training
+    stations.
     """
     freq = config['data']['freq']
     data_dir = config['data']['path']
     n_splits = config['hpo']['kfolds']
+    min_train_date = config['hpo'].get('min_train_date')
+
+    # Neighbour pool for the VALIDATION stations: training + validation stations. At
+    # validation time the val stations' own measurements are legitimately available (they
+    # are inputs, not the thing being scored), so they may serve as each other's
+    # neighbours — but test_files must stay invisible. Set before get_data, since the
+    # neighbour merge happens while loading.
+    config['data']['neighbor_pool'] = (list(config['data'].get('files', []))
+                                       + list(config['data'].get('val_files', [])))
+    logger.info(f"Neighbour pool for validation stations: "
+                f"{len(config['data']['neighbor_pool'])} stations (files + val_files)")
 
     val_dfs = preprocessing.get_data(
         data_dir=data_dir,
@@ -396,7 +561,7 @@ def _replace_val_with_val_files(combined_kfolds, config, features, logger):
         files_key='val_files'
     )
 
-    X_vals, y_vals = [], []
+    prepared_list = []
     for key, df in val_dfs.items():
         prepared_data, _ = preprocessing.pipeline(
             data=df,
@@ -412,8 +577,32 @@ def _replace_val_with_val_files(combined_kfolds, config, features, logger):
         y_tr = prepared_data.get('y_train')
         if X_tr is None or y_tr is None or len(y_tr) == 0:
             continue
+        prepared_list.append(prepared_data)
+
+    if min_train_date and prepared_list:
+        split_result = hpo.apply_min_train_len_per_file(prepared_list, min_train_date)
+        prepared_list = split_result['remaining_datasets']
+        logger.info(
+            f"val_files: dropped samples before min_train_date={min_train_date} "
+            f"({len(prepared_list)} stations remaining)."
+        )
+
+    X_vals, y_vals, idx_vals = [], [], []
+    for prepared_data in prepared_list:
+        X_tr = prepared_data.get('X_train')
+        y_tr = prepared_data.get('y_train')
+        idx_tr = prepared_data.get('index_train')
+        if X_tr is None or y_tr is None or len(y_tr) == 0:
+            continue
+        if idx_tr is None or len(idx_tr) != len(y_tr):
+            raise ValueError(
+                "val_files: 'index_train' missing or misaligned with y_train "
+                f"(index={None if idx_tr is None else len(idx_tr)}, y={len(y_tr)}). "
+                "Cannot build temporal validation chunks without per-sample timestamps."
+            )
         X_vals.append(X_tr)
         y_vals.append(y_tr)
+        idx_vals.append(pd.Index(idx_tr))
 
     if not X_vals:
         logger.warning("val_files produced no training-period samples — k-fold val unchanged.")
@@ -424,6 +613,22 @@ def _replace_val_with_val_files(combined_kfolds, config, features, logger):
     else:
         X_val_full = np.concatenate(X_vals, axis=0)
     y_val_full = np.concatenate(y_vals, axis=0)
+    idx_val_full = idx_vals[0].append(idx_vals[1:]) if len(idx_vals) > 1 else idx_vals[0]
+
+    # Sort every val sample chronologically before chunking. The concatenation
+    # above is station-major (station 1's full history, then station 2's, …), so
+    # slicing index ranges out of it would carve out *stations*, not time windows —
+    # every fold would then span the full period and differ only in which val
+    # stations it saw. Sorting first makes the chunks below genuine temporal
+    # slices, each containing all val stations, so folds differ only in their
+    # validation *period*, mirroring the TimeSeriesSplit over the training stations.
+    order = np.argsort(idx_val_full.values, kind='stable')
+    y_val_full = y_val_full[order]
+    if isinstance(X_val_full, dict):
+        X_val_full = {k: v[order] for k, v in X_val_full.items()}
+    else:
+        X_val_full = X_val_full[order]
+    idx_val_full = idx_val_full[order]
 
     n_val = len(y_val_full)
     n_chunks = n_splits + 1
@@ -439,8 +644,15 @@ def _replace_val_with_val_files(combined_kfolds, config, features, logger):
             X_chunk = X_val_full[start:end]
         modified_kfolds.append((train, (X_chunk, y_val_full[start:end])))
 
+    for k, (_, (_, y_chunk)) in enumerate(modified_kfolds):
+        start = (k + 1) * chunk_size
+        end = (k + 2) * chunk_size if k < n_splits - 1 else n_val
+        logger.info(
+            f"  val fold {k}: {len(y_chunk)} samples, "
+            f"{idx_val_full[start]} → {idx_val_full[end - 1]}"
+        )
     logger.info(
-        f"Val portions replaced with val_files data: {n_splits} chunks "
+        f"Val portions replaced with val_files data: {n_splits} temporal chunks "
         f"(~{chunk_size} samples each) from {len(val_dfs)} val stations."
     )
     return modified_kfolds
@@ -503,13 +715,30 @@ def create_or_load_preprocessed_data(config: Dict,
         freq = config['data']['freq']
         data_dir = config['data']['path']
 
+        # Neighbour pool for the TRAINING stations: training stations only. A neighbour
+        # contributes its measured `wind_speed` history as an input feature, and that
+        # series is precisely that station's target — so drawing neighbours from
+        # val_files/test_files would feed held-out data into training. Must be set BEFORE
+        # get_data: the neighbour merge happens during loading, inside
+        # preprocess_synth_wind_icond2, not later in the pipeline.
+        config['data']['neighbor_pool'] = list(config['data'].get('files', []))
+        logger.info(f"Neighbour pool for training stations: "
+                    f"{len(config['data']['neighbor_pool'])} stations (files only)")
+
         # Load raw data
         dfs = preprocessing.get_data(data_dir=data_dir,
                                    config=config,
                                    freq=freq,
                                    features=features)
 
-        # Preprocess each dataset
+        # Pass 1: fit ONE scaler across all training stations before preparing any of
+        # them, then hand it to pipeline() via config['scaler_x'] — prepare_data_for_tft
+        # switches to its GLOBAL SCALING branch (preprocessing.py:3749) when it is set,
+        # and _replace_val_with_val_files below reuses the same config, so the val
+        # stations are transformed with this scaler instead of fitting their own.
+        config['scaler_x'] = _fit_global_scaler_x(dfs, config, logger)
+
+        # Pass 2: preprocess each dataset with the shared scaler
         prepared_datasets = []
         for key, df in dfs.items():
             logger.debug(f'Preprocessing {key}')
@@ -586,7 +815,7 @@ class GNNCache:
         "ecmwf_nwp",
     ]
 
-    def __init__(self, cache_dir: str = "data_cache/gnns"):
+    def __init__(self, cache_dir: str = DEFAULT_GNN_CACHE_DIR):
         from pathlib import Path
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)

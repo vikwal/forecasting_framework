@@ -107,13 +107,19 @@ def geodesic_knn(
         indices:      (M, k) integer indices into ref_coords
     """
     dist_matrix = pairwise_geodesic_km(query_coords, ref_coords)  # (M, N)
-    idx = np.argpartition(dist_matrix, k, axis=1)[:, :k]          # (M, k) unsorted
-    # Sort by distance within each row
-    row_idx = np.arange(len(query_coords))[:, None]
-    dists = dist_matrix[row_idx, idx]
-    order = np.argsort(dists, axis=1)
-    idx = idx[row_idx, order]
-    dists = dists[row_idx, order]
+    k = min(k, dist_matrix.shape[1])                               # cap if fewer ref points than k
+    if k == dist_matrix.shape[1]:
+        # All ref points fit — just sort directly
+        idx = np.argsort(dist_matrix, axis=1)[:, :k]
+        row_idx = np.arange(len(query_coords))[:, None]
+        dists = dist_matrix[row_idx, idx]
+    else:
+        idx = np.argpartition(dist_matrix, k, axis=1)[:, :k]      # (M, k) unsorted
+        row_idx = np.arange(len(query_coords))[:, None]
+        dists = dist_matrix[row_idx, idx]
+        order = np.argsort(dists, axis=1)
+        idx   = idx[row_idx, order]
+        dists = dists[row_idx, order]
     return dists, idx
 
 
@@ -149,6 +155,10 @@ def edge_features(
     use_distance: bool = True,
     use_direction: bool = True,
     use_altitude_diff: bool = False,
+    topo_node_feats: dict[str, np.ndarray] | None = None,
+    topo_feature_names: list[str] | None = None,
+    src_idx: np.ndarray | None = None,
+    dst_idx: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Compute edge feature vectors for directed edges src → dst.
@@ -162,6 +172,14 @@ def edge_features(
         use_distance:    include normalised distance feature
         use_direction:   include sin/cos of bearing feature
         use_altitude_diff: include normalised altitude difference feature
+        topo_node_feats:    dict of per-station topographic feature arrays (see
+                            ``topo_features.load_topo_node_features``), indexed by
+                            global station index (not by edge)
+        topo_feature_names: names to append, in canonical order (subset of
+                            ``topo_node_feats.keys()``); each contributes one
+                            column = topo_node_feats[name][dst_idx] - [...][src_idx]
+        src_idx, dst_idx:   (E,) integer station indices for each edge — required
+                            when topo_feature_names is non-empty
 
     Returns:
         (E, F) float32 feature matrix
@@ -185,6 +203,12 @@ def edge_features(
         diff = (dst_alt - src_alt).reshape(-1, 1)
         # rough normalisation: ±3000 m range → ±1
         parts.append(np.clip(diff / 3000.0, -1.0, 1.0))
+
+    if topo_feature_names:
+        for name in topo_feature_names:
+            vals = topo_node_feats[name]
+            diff = (vals[dst_idx] - vals[src_idx]).reshape(-1, 1)
+            parts.append(diff.astype(np.float32))
 
     if not parts:
         # Fallback: constant 1.0 so edge_dim >= 1

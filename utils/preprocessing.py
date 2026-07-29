@@ -87,14 +87,22 @@ def _get_data_from_config_files(config: dict,
     use_parallel_db = icond2_source == 'database' and len(files) > 1
     n_db_workers = min(10, len(files))
 
+    _raw_station_mode = data_config.get('raw_station_source', False)
+
     def _process_file(file_idx_file):
         file_idx, file = file_idx_file
-        file_path = os.path.join(base_path, f"synth_{file}.parquet")
-        if not os.path.exists(file_path):
-            file_path = os.path.join(base_path, f"synth_{file}.csv")
-        if not os.path.exists(file_path):
-            logging.warning(f"File not found: {os.path.join(base_path, f'synth_{file}.[csv|parquet]')}")
-            return file, None
+        if _raw_station_mode:
+            file_path = os.path.join(base_path, f"Station_{file}.parquet")
+            if not os.path.exists(file_path):
+                logging.warning(f"File not found: {file_path}")
+                return file, None
+        else:
+            file_path = os.path.join(base_path, f"synth_{file}.parquet")
+            if not os.path.exists(file_path):
+                file_path = os.path.join(base_path, f"synth_{file}.csv")
+            if not os.path.exists(file_path):
+                logging.warning(f"File not found: {os.path.join(base_path, f'synth_{file}.[csv|parquet]')}")
+                return file, None
 
         try:
             file_config = copy.deepcopy(config)
@@ -359,7 +367,14 @@ def pipeline(data: pd.DataFrame,
 
     if config['model']['name'] in ('tft', 'tcn-tft'):
         #logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
-        scale_target = config['data']['scale_y'] if target_col == 'power' else True
+        # wind_speed is deliberately NOT standardised (it used to be forced to True).
+        # The target scaler is fitted PER STATION, so once folds concatenate stations a
+        # scaled target can no longer be inverted back to physical units — val_rmse
+        # would be a variance-normalised error rather than m/s, and stations would enter
+        # the loss weighted by 1/std instead of equally. Keeping wind_speed in m/s makes
+        # y, val_rmse and the HPO objective directly interpretable and comparable to the
+        # DCRNN/MTGNN benchmark. Feature scaling (scaler_x) is unaffected.
+        scale_target = config['data']['scale_y'] if target_col == 'power' else False
         prepared_data = prepare_data_for_tft(data=df,
                                              history_length=config['model']['lookback'], # e.g., 72 (for 3 days history)
                                              future_horizon=config['model']['horizon'], # e.g., 24 (for 24 hours forecast)
@@ -1851,6 +1866,86 @@ def _fetch_ecmwf_data_from_split_parquets(
     return pd.concat(frames, ignore_index=True)
 
 
+@lru_cache(maxsize=4)
+def _load_topo_features_table(topo_features_path: str) -> pd.DataFrame:
+    """Load + merge topo_features.csv (elevation/slope/aspect/tpi5/tdi/elev_std/
+    tpi75/z0) and dist_coast.csv from `topo_features_path` (same files DCRNN/
+    MTGNN use, see configs/dcrnn/*.yaml `topo_features_path`), keyed by
+    station_id. aspect is additionally split into aspect_sin/aspect_cos
+    (circular-safe) since raw degrees are a poor model input at the 0/360
+    wrap-around. Cached per path — this file is small and read once per
+    process, not once per station.
+    """
+    topo = pd.read_csv(os.path.join(topo_features_path, 'topo_features.csv'), dtype={'location_id': str})
+    topo = topo.rename(columns={'location_id': 'station_id'})
+    topo['aspect_sin'] = np.sin(np.radians(topo['aspect']))
+    topo['aspect_cos'] = np.cos(np.radians(topo['aspect']))
+
+    dist_coast_path = os.path.join(topo_features_path, 'dist_coast.csv')
+    if os.path.exists(dist_coast_path):
+        dist_coast = pd.read_csv(dist_coast_path, dtype={'station_id': str})
+        topo = topo.merge(dist_coast, on='station_id', how='left')
+        # Expose it under the name configs use ('dist_coast'); the CSV ships the
+        # unit-suffixed column name, and without this rename every station would be
+        # missing the feature.
+        topo = topo.rename(columns={'dist_coast_km': 'dist_coast'})
+
+    topo = topo.set_index('station_id')
+
+    # The terrain dissection index is a ratio over the local elevation range, so on
+    # perfectly flat ground it is 0/0 → NaN. That is not missing data: the physically
+    # correct value is 0 (no dissection at all). Only offshore/water locations hit
+    # this — e.g. station 02961 sits in Kiel Bay (clc_class 44, z0 5e-4, elevation 0).
+    # Filling it with the land median instead would hand a genuinely flat sea location
+    # a typical inland terrain value.
+    if 'tdi' in topo.columns and 'elev_std' in topo.columns:
+        flat = topo['tdi'].isna() & (topo['elev_std'] == 0)
+        if flat.any():
+            logging.info(
+                f"topo feature 'tdi': set to 0.0 for {int(flat.sum())} perfectly flat "
+                f"location(s) ({topo.index[flat].tolist()[:5]}) — undefined ratio on "
+                f"zero relief, not missing data."
+            )
+            topo.loc[flat, 'tdi'] = 0.0
+
+    # Any remaining isolated NaNs get the column median. A missing value here used to
+    # just drop the key from the station's static dict, surfacing much later as a bare
+    # KeyError in get_static_features and killing the whole run over one bad cell.
+    topo_cols = [c for c in topo.columns if pd.api.types.is_numeric_dtype(topo[c])]
+    n_missing = topo[topo_cols].isna().sum()
+    for col in topo_cols:
+        if n_missing[col]:
+            median = topo[col].median()
+            rows = topo.index[topo[col].isna()].tolist()
+            logging.warning(
+                f"topo feature '{col}': {n_missing[col]} row(s) without a value "
+                f"({rows[:5]}) — imputed with median {median:.4g}."
+            )
+            topo[col] = topo[col].fillna(median)
+
+    return topo
+
+
+def _get_topo_features(station_id: str, topo_features_path: str) -> dict:
+    """Return a dict of topo features for one station, or {} if unavailable
+    (missing path/file/station — callers already handle missing static_data
+    keys gracefully, so this fails soft rather than raising)."""
+    if not topo_features_path:
+        return {}
+    try:
+        table = _load_topo_features_table(topo_features_path)
+        if station_id not in table.index:
+            logging.warning(f"Station {station_id} not found in topo_features table — static topo features skipped.")
+            return {}
+        row = table.loc[station_id]
+        keys = ['elevation', 'slope', 'aspect_sin', 'aspect_cos', 'tpi5', 'tdi',
+                'elev_std', 'tpi75', 'z0', 'dist_coast']
+        return {k: float(row[k]) for k in keys if k in row.index and pd.notna(row[k])}
+    except Exception as e:
+        logging.warning(f"Could not load topo features for station {station_id}: {e}")
+        return {}
+
+
 def preprocess_synth_wind_icond2(path: str,
                           config: dict,
                           freq: str = '1H',
@@ -1875,15 +1970,10 @@ def preprocess_synth_wind_icond2(path: str,
     # Remove extension
     filename_no_ext = os.path.splitext(filename)[0]
     # If it starts with 'synth_', remove it
-    if filename_no_ext.startswith('synth_'):
+    if filename_no_ext.startswith('synth_') or filename_no_ext.startswith('Station_'):
         station_id = filename_no_ext.split('_')[-1]
     else:
         station_id = filename_no_ext
-
-    # Load synthetic wind data and turbine parameters (analog zu openmeteo)
-    wind_parameter_path = os.path.join(config['data']['path'], 'wind_parameter.csv')
-    turbine_parameter_path = os.path.join(config['data']['path'], 'turbine_parameter.csv')
-    power_curves_path = os.path.join(config['data']['power_curves_path'], 'turbine_power.csv')
 
     # Build date-range filters to avoid loading the full history.
     # Add a 7-day safety margin before train_start so the first sequences
@@ -1897,114 +1987,156 @@ def preprocess_synth_wind_icond2(path: str,
     if _upper_str:
         _pq_filters.append(('timestamp', '<=', pd.Timestamp(_upper_str, tz='UTC')))
 
-    # Load synthetic wind data — prefer parquet, fall back to CSV
-    _synth_parquet = os.path.join(config['data']['path'], f'synth_{station_id}.parquet')
-    _synth_csv     = os.path.join(config['data']['path'], f'synth_{station_id}.csv')
-    if os.path.exists(_synth_parquet):
-        df_synth = pd.read_parquet(_synth_parquet, engine='pyarrow')
-        if 'timestamp' in df_synth.columns:
-            df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
-            df_synth.set_index('timestamp', inplace=True)
-        else:
-            df_synth.index = pd.to_datetime(df_synth.index, utc=True)
-    else:
-        df_synth = pd.read_csv(_synth_csv, sep=';')
-        df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
-        df_synth.set_index('timestamp', inplace=True)
+    # data.raw_station_source: True → pure weather-station wind-speed studies (no turbine/
+    # power-curve relevance at all, e.g. the TFT non-GNN benchmark). Reads raw
+    # Station_<id>.parquet the same way DCRNN/MTGNN/WaveNet do (geostatistics/train_stgnn2.py::
+    # load_station_measurements) and station metadata from stations_master.csv, instead of the
+    # turbine-power-curve-enriched synth_<id>.csv/parquet + wind_parameter.csv/turbine_parameter.csv.
+    raw_station_mode = config['data'].get('raw_station_source', False)
 
-    # Date-range filter applied after index conversion (timestamp stored as string in parquet)
-    if _lower_str:
-        df_synth = df_synth[df_synth.index >= _lower_ts]
-    if _upper_str:
-        df_synth = df_synth[df_synth.index <= pd.Timestamp(_upper_str, tz='UTC')]
-
-    wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
-    turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
-    power_curves = pd.read_csv(power_curves_path, sep=';', decimal=',')
-    altitude = wind_parameter.loc[wind_parameter.park_id == station_id]['altitude'].values[0]
-    # Handle commissioning date and park age
-    commissioning_date = wind_parameter.loc[wind_parameter.park_id == station_id]['commissioning_date'].values[0]
-    if 'station_turbine_type' not in config['params']:
-        # Fallback: use random seed if no CSV-based assignment
-        if 'random_seeds' not in config['params']:
-            random.seed(config['params']['random_seed'])
-        else:
-            iterator = config['params'].get('iterator', 0)
-            config['params']['iterator'] = iterator
-            random_seed = config['params']['random_seeds'][iterator]
-            config['params']['random_seed'] = random_seed
-            random.seed(random_seed)
-            config['params']['iterator'] = iterator + 1
-
-    if commissioning_date != '-':
-        park_age_years = (pd.Timestamp.now() - pd.to_datetime(commissioning_date)).days // 365
-    else:
-        park_age_years = 0
-
-    # Turbine handling (analog zu openmeteo)
     static_features = features.get('static', [])
     static_data = {}
-    heights = []
 
-    if 'turbines' in config['params']:
-        turbines_list = config['params']['turbines']
-        if 'station_turbine_type' in config['params']:
-            # Deterministic assignment from station_turbine_assignments.csv
-            assigned_turbine = config['params']['station_turbine_type']
-            if assigned_turbine in turbines_list:
-                turbines_list = [assigned_turbine]
-                logging.debug(f"Using assigned turbine '{assigned_turbine}' for station {station_id}")
+    if raw_station_mode:
+        _station_parquet = os.path.join(config['data']['path'], f'Station_{station_id}.parquet')
+        df_synth = pd.read_parquet(_station_parquet, engine='pyarrow')
+        df_synth.index = pd.to_datetime(df_synth.index, utc=True)
+        df_synth = df_synth.drop(columns=['station_id'], errors='ignore')
+        df_synth = df_synth.select_dtypes(include='number')
+
+        if _lower_str:
+            df_synth = df_synth[df_synth.index >= _lower_ts]
+        if _upper_str:
+            df_synth = df_synth[df_synth.index <= pd.Timestamp(_upper_str, tz='UTC')]
+
+        df_synth = df_synth.resample('1H', closed='left', label='left', origin='start').mean()
+
+        stations_path = config['data']['stations_master']
+        stations_df = pd.read_csv(stations_path, sep=',', dtype={'station_id': str})
+        station_info = stations_df[stations_df['station_id'] == station_id]
+        if station_info.empty:
+            raise ValueError(f"Station {station_id} not found in {stations_path}")
+        altitude = station_info['station_height'].iloc[0]
+
+        if static_features:
+            static_data['park_id'] = station_id
+            static_data['altitude'] = altitude
+
+        # No turbine relevance for this benchmark (10m weather-station wind speed, not power).
+        # Kept as an empty frame purely so downstream ICON-D2 code (which threads a `turbines`
+        # value through for optional hub-height layer weighting) has something to check len() on.
+        turbines = pd.DataFrame(columns=['hub_height'])
+    else:
+        # Load synthetic wind data and turbine parameters (analog zu openmeteo)
+        wind_parameter_path = os.path.join(config['data']['path'], 'wind_parameter.csv')
+        turbine_parameter_path = os.path.join(config['data']['path'], 'turbine_parameter.csv')
+        power_curves_path = os.path.join(config['data']['power_curves_path'], 'turbine_power.csv')
+
+        # Load synthetic wind data — prefer parquet, fall back to CSV
+        _synth_parquet = os.path.join(config['data']['path'], f'synth_{station_id}.parquet')
+        _synth_csv     = os.path.join(config['data']['path'], f'synth_{station_id}.csv')
+        if os.path.exists(_synth_parquet):
+            df_synth = pd.read_parquet(_synth_parquet, engine='pyarrow')
+            if 'timestamp' in df_synth.columns:
+                df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
+                df_synth.set_index('timestamp', inplace=True)
             else:
-                logging.warning(f"Assigned turbine '{assigned_turbine}' not in turbines list. "
-                                f"Falling back to random selection.")
+                df_synth.index = pd.to_datetime(df_synth.index, utc=True)
+        else:
+            df_synth = pd.read_csv(_synth_csv, sep=';')
+            df_synth['timestamp'] = pd.to_datetime(df_synth['timestamp'], utc=True)
+            df_synth.set_index('timestamp', inplace=True)
+
+        # Date-range filter applied after index conversion (timestamp stored as string in parquet)
+        if _lower_str:
+            df_synth = df_synth[df_synth.index >= _lower_ts]
+        if _upper_str:
+            df_synth = df_synth[df_synth.index <= pd.Timestamp(_upper_str, tz='UTC')]
+
+        wind_parameter = pd.read_csv(wind_parameter_path, sep=';', dtype={'park_id': str})
+        turbine_parameter = pd.read_csv(turbine_parameter_path, sep=';', dtype={'park_id': str})
+        power_curves = pd.read_csv(power_curves_path, sep=';', decimal=',')
+        altitude = wind_parameter.loc[wind_parameter.park_id == station_id]['altitude'].values[0]
+        # Handle commissioning date and park age
+        commissioning_date = wind_parameter.loc[wind_parameter.park_id == station_id]['commissioning_date'].values[0]
+        if 'station_turbine_type' not in config['params']:
+            # Fallback: use random seed if no CSV-based assignment
+            if 'random_seeds' not in config['params']:
+                random.seed(config['params']['random_seed'])
+            else:
+                iterator = config['params'].get('iterator', 0)
+                config['params']['iterator'] = iterator
+                random_seed = config['params']['random_seeds'][iterator]
+                config['params']['random_seed'] = random_seed
+                random.seed(random_seed)
+                config['params']['iterator'] = iterator + 1
+
+        if commissioning_date != '-':
+            park_age_years = (pd.Timestamp.now() - pd.to_datetime(commissioning_date)).days // 365
+        else:
+            park_age_years = 0
+
+        # Turbine handling (analog zu openmeteo)
+        heights = []
+
+        if 'turbines' in config['params']:
+            turbines_list = config['params']['turbines']
+            if 'station_turbine_type' in config['params']:
+                # Deterministic assignment from station_turbine_assignments.csv
+                assigned_turbine = config['params']['station_turbine_type']
+                if assigned_turbine in turbines_list:
+                    turbines_list = [assigned_turbine]
+                    logging.debug(f"Using assigned turbine '{assigned_turbine}' for station {station_id}")
+                else:
+                    logging.warning(f"Assigned turbine '{assigned_turbine}' not in turbines list. "
+                                    f"Falling back to random selection.")
+                    turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
+                    config['params']['random_seed'] += 1
+            elif 'turbines_per_park' in config['params']:
                 turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
                 config['params']['random_seed'] += 1
-        elif 'turbines_per_park' in config['params']:
-            turbines_list = random.sample(turbines_list, config['params']['turbines_per_park'])
-            config['params']['random_seed'] += 1
-        power_curves = power_curves[turbines_list]
-        installed_capacity = power_curves.sum(axis=1).max() * 1000 # in Watts
-        turbines = turbine_parameter.loc[turbine_parameter.turbine_name.isin(turbines_list)]
-        turbine_indices = turbines['turbine']
-        heights = turbines['hub_height'].values
-        power_cols = [f'power_{i}' for i in turbine_indices]
-        wind_cols = [f'wind_speed_{i}' for i in turbine_indices]
-        df_synth['power'] = df_synth[power_cols].sum(axis=1)
+            power_curves = power_curves[turbines_list]
+            installed_capacity = power_curves.sum(axis=1).max() * 1000 # in Watts
+            turbines = turbine_parameter.loc[turbine_parameter.turbine_name.isin(turbines_list)]
+            turbine_indices = turbines['turbine']
+            heights = turbines['hub_height'].values
+            power_cols = [f'power_{i}' for i in turbine_indices]
+            wind_cols = [f'wind_speed_{i}' for i in turbine_indices]
+            df_synth['power'] = df_synth[power_cols].sum(axis=1)
 
-        # Keep only selected turbine columns + power + generic wind_speed
-        keep_cols = power_cols + wind_cols + ['power']
-        if 'wind_speed' in df_synth.columns:
-            keep_cols.append('wind_speed')
-        df_synth = df_synth[keep_cols]
-    else:
-        df_synth['power'] = 0
-        for col in df_synth.columns:
-            if 'power' in col:
-                df_synth['power'] += df_synth[col]
-        installed_capacity = df_synth['power'].max()
-        heights = turbine_parameter['hub_height'].values
-        turbines = turbine_parameter
+            # Keep only selected turbine columns + power + generic wind_speed
+            keep_cols = power_cols + wind_cols + ['power']
+            if 'wind_speed' in df_synth.columns:
+                keep_cols.append('wind_speed')
+            df_synth = df_synth[keep_cols]
+        else:
+            df_synth['power'] = 0
+            for col in df_synth.columns:
+                if 'power' in col:
+                    df_synth['power'] += df_synth[col]
+            installed_capacity = df_synth['power'].max()
+            heights = turbine_parameter['hub_height'].values
+            turbines = turbine_parameter
 
-    # Static features handling
-    if static_features:
-        static_data['park_id'] = station_id
-        static_data['park_age'] = park_age_years
-        static_data['installed_capacity'] = installed_capacity
-        static_data['altitude'] = altitude
-        for index, turbine in turbines.iterrows():
-            turbine_name = turbine['turbine_name']
-            turbine_id = turbine['turbine']
-            static_data[f'hub_height'] = turbine['hub_height']
-            static_data[f'rotor_diameter'] = turbine['diameter']
-            static_data[f'rated_power'] = power_curves[turbine_name].max() * 1000
-            static_data[f'cut_in'] = turbine['cut_in']
-            static_data[f'cut_out'] = turbine['cut_out']
-            static_data[f'rated_wind_speed'] = turbine['rated']
+        # Static features handling
+        if static_features:
+            static_data['park_id'] = station_id
+            static_data['park_age'] = park_age_years
+            static_data['installed_capacity'] = installed_capacity
+            static_data['altitude'] = altitude
+            for index, turbine in turbines.iterrows():
+                turbine_name = turbine['turbine_name']
+                turbine_id = turbine['turbine']
+                static_data[f'hub_height'] = turbine['hub_height']
+                static_data[f'rotor_diameter'] = turbine['diameter']
+                static_data[f'rated_power'] = power_curves[turbine_name].max() * 1000
+                static_data[f'cut_in'] = turbine['cut_in']
+                static_data[f'cut_out'] = turbine['cut_out']
+                static_data[f'rated_wind_speed'] = turbine['rated']
 
-
-    # Normalize power
-    df_synth['power'] = df_synth['power'] / installed_capacity
-    df_synth = df_synth.resample('1H', closed='left', label='left', origin='start').mean()
+        # Normalize power
+        df_synth['power'] = df_synth['power'] / installed_capacity
+        df_synth = df_synth.resample('1H', closed='left', label='left', origin='start').mean()
 
     # Load station coordinates
     stations_path = config['data']['stations_master']
@@ -2020,6 +2152,8 @@ def preprocess_synth_wind_icond2(path: str,
     if static_features:
         static_data['latitude'] = station_lat
         static_data['longitude'] = station_lon
+        topo_features_path = config['params'].get('topo_features_path')
+        static_data.update(_get_topo_features(station_id, topo_features_path))
 
     # Parameters from config
     next_n_grid_points = config['params'].get('next_n_grid_points', 12)
@@ -2144,7 +2278,39 @@ def preprocess_synth_wind_icond2(path: str,
     if _next_n_stations > 0 and _next_features_requested:
         _base_next_features = [f[:-5] for f in _next_features_requested]  # strip '_next'
         _station_coords = (station_lat, station_lon)
-        _other_stations = wind_parameter[wind_parameter['park_id'] != station_id].copy()
+        if raw_station_mode:
+            _other_stations = stations_df[stations_df['station_id'] != station_id].rename(
+                columns={'station_id': 'park_id'}
+            ).copy()
+        else:
+            _other_stations = wind_parameter[wind_parameter['park_id'] != station_id].copy()
+
+        # Restrict the neighbour candidates to the stations the CURRENT split may see.
+        # Without this the pool is the whole stations_master.csv (all 203 experiment
+        # stations), so a training station draws ~57 % of its neighbours from val/test
+        # stations — and a neighbour's `wind_speed` history is exactly that station's
+        # target variable, i.e. held-out data leaking into the training inputs.
+        # data_cache.py sets this to `files` while preparing the training stations and to
+        # `files + val_files` for the validation stations; the test path adds test_files.
+        # Left unset (other pipelines, e.g. trianel) the behaviour is unchanged.
+        _pool = config['data'].get('neighbor_pool')
+        if _pool:
+            _pool = {str(s) for s in _pool}
+            _n_before = len(_other_stations)
+            _other_stations = _other_stations[
+                _other_stations['park_id'].astype(str).isin(_pool)
+            ].copy()
+            logging.debug(
+                f"next_n_stations: station {station_id} neighbour pool restricted "
+                f"{_n_before} -> {len(_other_stations)} candidates"
+            )
+            if len(_other_stations) < _next_n_stations:
+                logging.warning(
+                    f"next_n_stations: station {station_id} has only {len(_other_stations)} "
+                    f"candidates in the allowed pool but {_next_n_stations} were requested — "
+                    "fewer neighbour columns will be produced for this station."
+                )
+
         _other_stations['_distance_km'] = _other_stations.apply(
             lambda row: geodesic(_station_coords, (row['latitude'], row['longitude'])).km, axis=1
         )
@@ -2152,8 +2318,12 @@ def preprocess_synth_wind_icond2(path: str,
 
         for _rank, (_, _neighbor_row) in enumerate(_nearest.iterrows(), start=1):
             _neighbor_id = str(_neighbor_row['park_id'])
-            _neighbor_parquet = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.parquet')
-            _neighbor_csv     = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.csv')
+            if raw_station_mode:
+                _neighbor_parquet = os.path.join(config['data']['path'], f'Station_{_neighbor_id}.parquet')
+                _neighbor_csv = ''
+            else:
+                _neighbor_parquet = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.parquet')
+                _neighbor_csv     = os.path.join(config['data']['path'], f'synth_{_neighbor_id}.csv')
             if os.path.exists(_neighbor_parquet):
                 _df_neighbor = pd.read_parquet(_neighbor_parquet, engine='pyarrow')
                 if 'timestamp' in _df_neighbor.columns:
@@ -2161,13 +2331,17 @@ def preprocess_synth_wind_icond2(path: str,
                     _df_neighbor.set_index('timestamp', inplace=True)
                 else:
                     _df_neighbor.index = pd.to_datetime(_df_neighbor.index, utc=True)
-            elif os.path.exists(_neighbor_csv):
+            elif _neighbor_csv and os.path.exists(_neighbor_csv):
                 _df_neighbor = pd.read_csv(_neighbor_csv, sep=';')
                 _df_neighbor['timestamp'] = pd.to_datetime(_df_neighbor['timestamp'], utc=True)
                 _df_neighbor.set_index('timestamp', inplace=True)
             else:
-                logging.warning(f"next_n_stations: synth file for neighbor {_neighbor_id} not found, skipping.")
+                logging.warning(f"next_n_stations: station file for neighbor {_neighbor_id} not found, skipping.")
                 continue
+
+            if raw_station_mode:
+                _df_neighbor = _df_neighbor.drop(columns=['station_id'], errors='ignore').select_dtypes(include='number')
+                _df_neighbor = _df_neighbor.resample('1H', closed='left', label='left', origin='start').mean()
 
             for _base_feat in _base_next_features:
                 _col_name = f'{_base_feat}_next_{_rank}'
@@ -3508,13 +3682,14 @@ def prepare_data_for_tft(data: pd.DataFrame,
     is_nwp_data = isinstance(df.index, pd.MultiIndex) and 'starttime' in df.index.names
 
     if is_nwp_data and test_start is not None:
-        # Extend test_start by step_size to include required historical forecasts
-        # Example: If test_start='2025-08-01' and step_size=48h,
-        # we need forecasts from '2025-07-30' to build windows for predictions starting '2025-08-01'
+        # Extend test_start backwards by history_length so the past forecast run(s)
+        # feeding the known window are inside the split (create_tft_sequences offsets
+        # the past run by future_len per run, covering history_length hours in total).
+        # Example: test_start='2025-08-01', history_length=48 → forecasts from '2025-07-30'.
         original_test_start = test_start
-        test_start_adjusted = pd.Timestamp(test_start) - pd.Timedelta(hours=step_size)
+        test_start_adjusted = pd.Timestamp(test_start) - pd.Timedelta(hours=history_length)
         logging.debug(f"NWP data detected: Extending test data start from {original_test_start} "
-                    f"to {test_start_adjusted} (step_size={step_size}h) to include required historical forecasts")
+                    f"to {test_start_adjusted} (history_length={history_length}h) to include required historical forecasts")
         test_start = test_start_adjusted
 
     # Use helper function for splitting which handles MultiIndex correctly
@@ -3607,6 +3782,24 @@ def prepare_data_for_tft(data: pd.DataFrame,
         # Note: train_df/test_df might contain target_col
         feature_cols = [c for c in train_df.columns if c != target_col]
 
+        # scaler_x is fitted once across all training stations (data_cache.py::
+        # _fit_global_scaler_x) and reused for every station including the val_files
+        # ones. transform() below is handed a bare ndarray, so sklearn validates only
+        # the column COUNT — a station presenting the same number of columns in a
+        # different order would be scaled with the wrong mean/std per column and fail
+        # silently. Compare against the column list the scaler was actually fitted on.
+        _fitted_cols = getattr(scaler_x, '_ff_feature_cols', None)
+        if _fitted_cols is not None and feature_cols != _fitted_cols:
+            missing = sorted(set(_fitted_cols) - set(feature_cols))
+            extra = sorted(set(feature_cols) - set(_fitted_cols))
+            detail = (f"Missing: {missing}. Unexpected: {extra}."
+                      if (missing or extra) else
+                      "Same columns, but in a different order.")
+            raise ValueError(
+                "scaler_x was fitted on a different feature column layout than this "
+                f"station provides. {detail}"
+            )
+
         # Create copies to avoid side effects
         train_df_scaled = train_df.copy()
         test_df_scaled = test_df.copy()
@@ -3615,6 +3808,19 @@ def prepare_data_for_tft(data: pd.DataFrame,
         # We use the DataFrame directly so sklearn can match feature names
         train_df_scaled[feature_cols] = scaler_x.transform(train_df[feature_cols].values)
         test_df_scaled[feature_cols] = scaler_x.transform(test_df[feature_cols].values)
+
+        # feature_cols deliberately excludes target_col — but for target_col='wind_speed'
+        # that same column is ALSO an observed input in the 'hist' variant (the station's
+        # own history). Without this it would be the only observed column left on a raw
+        # m/s scale while its five neighbour columns are standardised — an asymmetry that
+        # would affect 'hist' but not 'base'. Scale it here with the target column's own
+        # global statistics (data_cache.py::_fit_global_scaler_x).
+        # Safe with respect to the target itself: y is read from the UNSCALED train_df /
+        # test_df further down, not from these scaled copies.
+        _tgt_feat_scaler = getattr(scaler_x, '_ff_target_feature_scaler', None)
+        if _tgt_feat_scaler is not None and target_col in train_df.columns:
+            train_df_scaled[target_col] = _tgt_feat_scaler.transform(train_df[[target_col]].values)
+            test_df_scaled[target_col] = _tgt_feat_scaler.transform(test_df[[target_col]].values)
 
         # Now extract the specific columns from the scaled dataframes
         if known_future_cols:
@@ -3742,6 +3948,21 @@ def prepare_data_for_tft(data: pd.DataFrame,
         del X_test['static']
     return results
 
+def _match_feature_cols(cols: list, feat: str) -> list:
+    """
+    Matches a feature name against actual dataframe columns, allowing for the
+    numbered-suffix convention used for ranked grid points / neighbor stations
+    (e.g. 'wind_speed_h10' -> 'wind_speed_h10_1', 'wind_speed_h10_2', ...;
+    'wind_speed_next' -> 'wind_speed_next_1', ...), WITHOUT falling back to a
+    bare substring search. A bare substring search would let a short feature
+    name like 'wind_speed' incorrectly match unrelated longer columns such as
+    'wind_speed_h10_1' or 'wind_speed_next_1' (both legitimately contain
+    'wind_speed' as a substring, but are different features).
+    """
+    pattern = re.compile(rf'^{re.escape(feat)}(_\d+)?$')
+    return [col for col in cols if pattern.match(col)]
+
+
 def prepare_features_for_tft(cols: list,
                              known_future_cols: list,
                              observed_past_cols: list):
@@ -3760,12 +3981,11 @@ def prepare_features_for_tft(cols: list,
             matching_cols = [col for col in cols if 'wind_speed_h' in col]
             new_known_cols.extend(matching_cols)
         else:
-            # Standard substring matching
-            matching_cols = [col for col in cols if known_feat in col]
+            matching_cols = _match_feature_cols(cols, known_feat)
             new_known_cols.extend(matching_cols)
 
     for observed_feat in observed_past_cols:
-        matching_cols = [col for col in cols if observed_feat in col]
+        matching_cols = _match_feature_cols(cols, observed_feat)
         new_observed_cols.extend(matching_cols)
 
     # Add special NWP aggregated features if present
@@ -3786,6 +4006,17 @@ def get_static_features(data: pd.DataFrame,
     if not static_cols:
         logging.debug('No static data provided.')
         return np.array([])
+    missing = [c for c in static_cols if c not in data.columns]
+    if missing:
+        # Fail with the actual cause instead of a bare pandas KeyError: a static
+        # feature silently absent from the frame (typo in the config, or a topo
+        # lookup that returned nothing for this station) otherwise only shows up
+        # as e.g. "KeyError: 'tdi'" from deep inside __getitem__.
+        raise KeyError(
+            f"Static feature(s) {missing} requested in params.static_features but not "
+            f"present in the prepared data. Available static-like columns: "
+            f"{sorted(c for c in data.columns if data[c].nunique(dropna=False) <= 1)}"
+        )
     static_features = []
     for col in static_cols:
         static_features.append(data[col].values[0])
@@ -3804,8 +4035,13 @@ def create_tft_sequences(known_data: np.ndarray,
         For NWP data with MultiIndex ['starttime', 'forecasttime', 'timestamp']:
         - Each unique starttime represents one forecast run with future_len timesteps
         - For each current forecast, we combine:
-          * Past data from a forecast that occurred step_size hours earlier
+          * Past data from the forecast run(s) whose lead times cover the
+            observed history window, i.e. the run from `future_len` hours ago
+            (for history_len == future_len == 48 that is the run of 2 days ago)
           * Future data from the current forecast
+        The resulting known window therefore spans exactly
+        [t0 - history_len, t0 + future_len), aligned with the observed window
+        [t0 - history_len, t0) and the target window [t0, t0 + future_len).
 
         For regular time series data:
         - Uses standard linear windowing
@@ -3857,7 +4093,13 @@ def create_tft_sequences(known_data: np.ndarray,
                     past_chunks = []
                     valid = True
                     for k in range(n_past_runs, 0, -1):  # oldest run first
-                        past_start = current_start - pd.Timedelta(hours=k * step_size)
+                        # Offset by future_len (the lead-time span of one run), NOT by
+                        # step_size: the past run has to be the one whose forecasts cover
+                        # the observed history window. Using step_size (the run interval,
+                        # e.g. 3h) picked the run from 3 hours ago, whose lead times overlap
+                        # the *future* instead of the history, and additionally dropped every
+                        # day's first run (no predecessor 3h earlier) — ~25% of all windows.
+                        past_start = current_start - pd.Timedelta(hours=k * future_len)
                         past_indices = starttime_to_indices.get(past_start)
                         if past_indices is None or len(past_indices) != future_len:
                             valid = False

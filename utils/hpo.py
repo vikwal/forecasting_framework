@@ -84,6 +84,7 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
             min_blocks.append({
                 'X_train': X_min_block,
                 'y_train': y_min_block,
+                'index_train': index_train[:0],
                 'X_test': prepared_data.get('X_test', None),
                 'y_test': prepared_data.get('y_test', None)
             })
@@ -105,6 +106,7 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
             remaining_datasets.append({
                 'X_train': X_remaining,
                 'y_train': y_remaining,
+                'index_train': index_train[:0],
                 'X_test': prepared_data.get('X_test', None),
                 'y_test': prepared_data.get('y_test', None)
             })
@@ -124,6 +126,7 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
             min_blocks.append({
                 'X_train': X_min_block,
                 'y_train': y_min_block,
+                'index_train': index_train[:min_block_end],
                 'X_test': prepared_data.get('X_test', None),
                 'y_test': prepared_data.get('y_test', None)
             })
@@ -131,6 +134,7 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
             remaining_datasets.append({
                 'X_train': X_remaining,
                 'y_train': y_remaining,
+                'index_train': index_train[min_block_end:],
                 'X_test': prepared_data.get('X_test', None),
                 'y_test': prepared_data.get('y_test', None)
             })
@@ -461,7 +465,7 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
                 storage=storage,
                 study_name=study_name,
                 directions=directions,  # List of directions
-                load_if_exists=False,
+                load_if_exists=True,
                 sampler=sampler,
                 pruner=pruner
             )
@@ -471,7 +475,7 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
                 storage=storage,
                 study_name=study_name,
                 direction=directions,  # Single direction
-                load_if_exists=False,
+                load_if_exists=True,
                 sampler=sampler,
                 pruner=pruner
             )
@@ -665,6 +669,11 @@ def get_hyperparameters(config: dict,
         hyperparameters['batch_size'] = trial.suggest_int('batch_size', batch_size[0], batch_size[1])
         #hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
+        weight_decay_range = config['hpo'].get('weight_decay')
+        if weight_decay_range is not None:
+            hyperparameters['weight_decay'] = trial.suggest_float(
+                'weight_decay', weight_decay_range[0], weight_decay_range[1], log=True
+            )
         if config['model']['fl']:
             hyperparameters['n_rounds'] = config['fl']['n_rounds']
             hyperparameters['strategy'] = strategy
@@ -733,6 +742,7 @@ def get_hyperparameters(config: dict,
             hyperparameters['batch_size'] = config['model']['batch_size']
             #hyperparameters['epochs'] = config['model']['epochs']
             hyperparameters['lr'] = config['model']['lr']
+            hyperparameters['weight_decay'] = config['model'].get('weight_decay', 0.0)
             if 'attn' in model_name:
                 hyperparameters['attention_heads'] = config['model']['attention_heads']
             if config['model'].get('fl', False):
