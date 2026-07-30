@@ -314,6 +314,15 @@ def main() -> None:
             "both arms of an A/B run without being edited."
         ),
     )
+    parser.add_argument(
+        "--shuffle-node-features", action="store_true",
+        help=(
+            "Permutation control: shuffle the topographic node features across "
+            "stations, keeping parameter count and marginal distributions but "
+            "destroying the station↔terrain assignment. Separates 'terrain "
+            "information helps' from 'extra input capacity helps'."
+        ),
+    )
     args = parser.parse_args()
 
     cfg      = load_yaml(args.config)
@@ -820,6 +829,18 @@ def main() -> None:
         _topo_cols, _ = load_topo_station_features(
             _topo_path, all_ids, _node_feat_names, n_train=N_train,
         )
+        if args.shuffle_node_features:
+            # Permutation control: station i receives station j's terrain. Parameter
+            # count, marginal distributions and scaling are identical to the real
+            # run — only the station↔terrain assignment is destroyed. If the gain
+            # over the no-topo arm survives this, it came from extra capacity, not
+            # from topographic information.
+            _perm = np.random.default_rng(0).permutation(len(all_ids))
+            _topo_cols = _topo_cols[_perm]
+            logger.warning(
+                "CONTROL RUN: topographic node features shuffled across stations "
+                "(seed 0) — this run carries no real terrain information."
+            )
         station_static_scaled = np.concatenate(
             [station_static_scaled, _topo_cols], axis=1,
         ).astype(np.float32)
