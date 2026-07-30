@@ -559,6 +559,9 @@ def main() -> None:
         nwp_out_dim      = nwp_out_dim,
         nwp_heads        = nwp_heads,
         M                = M_meas_only,
+        predefined_adj   = mcfg.get("predefined_adj", False),
+        adj_sigma        = float(mcfg.get("adj_sigma", 0.2)),
+        adj_threshold    = float(mcfg.get("adj_threshold", 0.1)),
     ).to(device)
     logger.info("GraphWaveNet parameters: %s", f"{model.count_parameters():,}")
     logger.info("Hyperparameters:\n%s", yaml.dump(mcfg, default_flow_style=False))

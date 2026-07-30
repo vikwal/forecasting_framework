@@ -1,9 +1,8 @@
 """
 geostatistics/wavenet/model.py — Inductive Graph WaveNet for spatial forecasting.
 
-Based on "Adaptive Graph Convolutional Recurrent Network for Traffic
-Forecasting" (Wu et al., 2019, "Graph WaveNet"), adapted for the inductive
-setting.
+Based on "Graph WaveNet for Deep Spatial-Temporal Graph Modeling" (Wu et al.,
+2019, arXiv:1906.00121), adapted for the inductive setting.
 
 Key differences from the original paper
 -----------------------------------------
@@ -12,9 +11,19 @@ Key differences from the original paper
       A_adp = softmax(ReLU(E1 · E2ᵀ))
     where E1 = tanh(α · W1 · E),  E2 = tanh(α · W2 · E).
     This allows the model to generalise to unseen stations at inference time.
-  • **Fixed adjacency**: not used here (no pre-built graph required) — the
-    self-adaptive adjacency fully replaces it, consistent with the ablation
-    "noAdp" → "adp-only" in the paper.
+    The original E1, E2 are randomly initialised per-node parameters (paper
+    Sec. 3.2), which cannot serve stations unseen during training.  The same
+    authors sanction the substitution one year later for the equivalent module
+    in MTGNN (Wu et al., 2020, Sec. 4.2: "we can also set E1 = E2 = Z, where Z
+    is a static node feature matrix").
+  • **Predefined adjacency** (``predefined_adj``): off by default for backward
+    compatibility with existing checkpoints.  When on, a thresholded Gaussian
+    distance kernel is added as a second diffusion branch, giving the paper's
+    full Eq. 6 instead of the Eq. 7 adaptive-only fallback — see
+    ``_predefined_adjacency``.
+  • **Edge-feature bias**: ``edge_fc`` adds a geometry-derived scalar bias
+    inside the adaptive adjacency.  Not part of the original paper; it is one
+    way of injecting the physical graph when only Eq. 7 is available.
   • **Input / output**: same convention as MTGNNModel — (B, N, T_total, M+I2)
     in, (N_target, F_h) out.
 
@@ -24,12 +33,15 @@ Architecture
 
   GWNBlock:
     Residual TCN branch: gated causal dilated Conv1d (tanh ⊙ sigmoid)
-    Graph branch:        K-hop power-series diffusion over A_adp (paper Eq. 7)
+    Graph branch:        K-hop power-series diffusion, see below
     Output: relu(gated_tcn + gcn)  +  skip connection
 
-  Diffusion convolution (MultiHopDiffusion):
-    Z = Σ_{k=0}^K  A_adp^k · X · W_k   (K=2 paper default)
-    (No forward/backward split — adaptive adj is already asymmetric)
+  Diffusion convolution (MultiHopDiffusion), per branch:
+    Z = Σ_{k=0}^K  A^k · X · W_k   (K=2 paper default)
+    predefined_adj=False → A = A_adp only                    (paper Eq. 7)
+    predefined_adj=True  → sum over A_adp and P              (paper Eq. 6)
+    (No forward/backward split: A_adp is already asymmetric, and the geodesic
+     station graph is symmetric, so P_f and P_b would coincide.)
 
   Output:
     Sum of skip connections from all blocks
@@ -86,6 +98,7 @@ class GWNBlock(nn.Module):
         dilation: int = 1,
         dropout: float = 0.1,
         K: int = 2,
+        predefined_adj: bool = False,
     ) -> None:
         super().__init__()
         # Gated temporal convolution: outputs 2 * c_hidden for gate split
@@ -98,8 +111,12 @@ class GWNBlock(nn.Module):
         )
         self._causal_pad = pad
 
-        # Graph convolution (K-hop power-series, adaptive adj only)
+        # Graph convolution over the self-adaptive adjacency (paper Eq. 7 term)
         self.gcn = MultiHopDiffusion(c_hidden, c_hidden, K=K)
+        # Second branch over the predefined distance adjacency, giving the full
+        # paper Eq. 6 sum. Only created when enabled, so a state_dict from a
+        # predefined_adj=False model stays byte-compatible.
+        self.gcn_pre = MultiHopDiffusion(c_hidden, c_hidden, K=K) if predefined_adj else None
 
         self.ln      = nn.LayerNorm(c_hidden)
         self.dropout = nn.Dropout(dropout)
@@ -112,6 +129,7 @@ class GWNBlock(nn.Module):
         x: Tensor,
         a_adp: Tensor,
         skip_acc: Tensor | None,
+        a_pre: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         # x : (B, N, T, C_in)
         B, N, T, C_in = x.shape
@@ -130,8 +148,10 @@ class GWNBlock(nn.Module):
 
         # Spatial GCN: reshape to (N, B*T, C_h)
         h_s = h.permute(1, 0, 2, 3).reshape(N, B * T, C_h)
-        h_s = self.gcn(h_s, a_adp)
-        h   = h_s.reshape(N, B, T, C_h).permute(1, 0, 2, 3)      # (B, N, T, C_h)
+        h_g = self.gcn(h_s, a_adp)
+        if self.gcn_pre is not None and a_pre is not None:
+            h_g = h_g + self.gcn_pre(h_s, a_pre)                 # paper Eq. 6 sum
+        h   = h_g.reshape(N, B, T, C_h).permute(1, 0, 2, 3)      # (B, N, T, C_h)
 
         # Residual + LN
         h = self.ln(h + res)
@@ -165,6 +185,14 @@ class GraphWaveNetModel(nn.Module):
     dropout         : dropout probability
     history_length  : H
     forecast_horizon: F_h
+    predefined_adj  : add the predefined distance adjacency as a second
+                      diffusion branch (paper Eq. 6). Default False keeps the
+                      Eq. 7 adaptive-only behaviour and the existing state_dict
+                      layout, so old checkpoints stay loadable.
+    adj_sigma       : sigma of the Gaussian distance kernel, on normalised
+                      distances in [0, 1] (matches DCRNN's edge_weight_sigma)
+    adj_threshold   : kernel weights below this are set to zero before row
+                      normalisation — the "thresholded" part of the kernel
     """
 
     def __init__(
@@ -186,6 +214,9 @@ class GraphWaveNetModel(nn.Module):
         nwp_out_dim: int = 32,
         nwp_heads: int = 4,
         M: int = 0,
+        predefined_adj: bool = False,
+        adj_sigma: float = 0.2,
+        adj_threshold: float = 0.1,
     ) -> None:
         super().__init__()
         self.H         = history_length
@@ -195,6 +226,9 @@ class GraphWaveNetModel(nn.Module):
         self.M         = M
         self.k_nwp     = k_nwp
         self.nwp_feat_dim = nwp_feat_dim
+        self.predefined_adj = predefined_adj
+        self.adj_sigma      = adj_sigma
+        self.adj_threshold  = adj_threshold
 
         if nwp_nodes:
             self.nwp_attn = HomoNWPAttentionLayer(
@@ -233,6 +267,7 @@ class GraphWaveNetModel(nn.Module):
                 dilation=dilations[i],
                 dropout=dropout,
                 K=K_hop,
+                predefined_adj=predefined_adj,
             )
             for i in range(n_blocks)
         ])
@@ -247,19 +282,17 @@ class GraphWaveNetModel(nn.Module):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _pairwise_edge_features(static: Tensor) -> Tensor:
-        """Directed pairwise edge features from static node features.
+    def _pairwise_geo(static: Tensor) -> tuple[Tensor, Tensor]:
+        """Pairwise normalised geodesic distance and bearing from static features.
 
-        Recovers lat/lon from sin/cos encoding (columns 0-3), uses normalised
-        altitude (column 4).  Returns 4-dim feature vector per directed edge:
-          [dist_norm, sin(bearing i→j), cos(bearing i→j), alt_diff_norm]
-
-        static  : (N, 6+)
-        returns : (N, N, 4)  — row=source, col=destination
+        Recovers lat/lon from the sin/cos encoding in columns 0-3 (see
+        homo_sampler._build_static).  Both returns are (N, N) with row=source,
+        col=destination.  Shared by the adaptive-adjacency edge bias and the
+        predefined distance adjacency so the geometry is computed once and the
+        two stay consistent.
         """
         lat = torch.atan2(static[:, 0], static[:, 1])
         lon = torch.atan2(static[:, 2], static[:, 3])
-        alt = static[:, 4]
 
         lat_i = lat.unsqueeze(1)
         lat_j = lat.unsqueeze(0)
@@ -278,11 +311,55 @@ class GraphWaveNetModel(nn.Module):
                    - torch.sin(lat_i) * torch.cos(lat_j) * torch.cos(dlon))
         bearing = torch.atan2(y, x)
 
+        return dist_norm, bearing
+
+    @classmethod
+    def _pairwise_edge_features(cls, static: Tensor) -> Tensor:
+        """Directed pairwise edge features from static node features.
+
+        Adds normalised altitude difference (column 4) to the shared geometry.
+        Returns 4-dim feature vector per directed edge:
+          [dist_norm, sin(bearing i→j), cos(bearing i→j), alt_diff_norm]
+
+        static  : (N, 6+)
+        returns : (N, N, 4)  — row=source, col=destination
+        """
+        dist_norm, bearing = cls._pairwise_geo(static)
+        alt = static[:, 4]
         alt_diff = (alt.unsqueeze(0) - alt.unsqueeze(1)).clamp(-3.0, 3.0) / 3.0
 
         return torch.stack(
             [dist_norm, torch.sin(bearing), torch.cos(bearing), alt_diff], dim=-1
         )
+
+    @classmethod
+    def _predefined_adjacency(
+        cls,
+        static: Tensor,
+        sigma: float,
+        threshold: float,
+    ) -> Tensor:
+        """Row-normalised predefined adjacency from a thresholded Gaussian kernel.
+
+        Paper Eq. 6 combines predefined spatial dependencies with the
+        self-adaptive matrix; Eq. 7 (adaptive only) is explicitly the fallback
+        "when the graph structure is unavailable".  Station coordinates *are*
+        available here, so the predefined term is built as in the paper's
+        experimental setup (Sec. 4): W_ij = exp(-(d_ij/sigma)^2), zeroed below
+        ``threshold``, then row-normalised into a transition matrix.
+
+        The forward/backward split of Eq. 6 is omitted on purpose: it exists for
+        directed road networks, whereas a geodesic station graph is symmetric,
+        so P_f = A/rowsum(A) and P_b = A^T/rowsum(A^T) are identical.
+
+        No self-loops are added — MultiHopDiffusion's k=0 term already carries
+        the ego features (P^0 = I), and d_ii = 0 puts weight 1 on the kernel
+        diagonal anyway, so no row can end up all-zero.
+        """
+        dist_norm, _ = cls._pairwise_geo(static)
+        w = torch.exp(-((dist_norm / sigma) ** 2))
+        w = w * (w >= threshold).to(w.dtype)
+        return w / w.sum(dim=1, keepdim=True).clamp(min=1e-8)
 
     def _build_adjacency(self, static: Tensor) -> Tensor:
         """Inductive adaptive adjacency with pairwise edge features.
@@ -333,6 +410,10 @@ class GraphWaveNetModel(nn.Module):
 
         # Adaptive adjacency (built once per forward)
         a_adp = self._build_adjacency(static_single)   # (N, N)
+        a_pre = (
+            self._predefined_adjacency(static_single, self.adj_sigma, self.adj_threshold)
+            if self.predefined_adj else None
+        )                                              # (N, N) or None
 
         # NWP aggregation via GATv2 when nwp_nodes=True (B=1 guaranteed by HomoSampler)
         if self.nwp_nodes:
@@ -354,7 +435,7 @@ class GraphWaveNetModel(nn.Module):
         # Stacked blocks, accumulate skip
         skip_acc = None
         for block in self.blocks:
-            h, skip_acc = block(h, a_adp, skip_acc)
+            h, skip_acc = block(h, a_adp, skip_acc, a_pre)
 
         # Output from skip sum: use last time step
         out = skip_acc[:, :, -1, :]                    # (B, N, hidden)
