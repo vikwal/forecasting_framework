@@ -25,14 +25,25 @@ def newest(stem: str):
     return hits[-1] if hits else None
 
 
-# Arme: A = ohne Topo, B = Topo nur in der Adjazenz (emb_mlp / edge_fc),
-# C = Topo zusaetzlich als zeitkonstante Input-Kanaele (--broadcast-topo).
-# DCRNN hat kein C: dort laeuft station.static ohnehin durch jeden Zeitschritt,
-# B ist dort also bereits der Feature-Strom-Arm.
+# Die Suffixe A/B/C bedeuten NICHT pro Architektur dasselbe, deshalb wird hier
+# nach Wirkungskanal aufgeschluesselt statt nach Buchstabe:
+#
+#   Kanal                     DCRNN   MTGNN   WaveNet
+#   kein Topo                 topoA   topoA   topoA
+#   Adjazenz/Graphstruktur    --      topoB   topoB
+#   Feature-Strom             topoB   topoC   topoC
+#
+# DCRNN hat keinen Adjazenz-Arm: sein Stationsgraph reduziert edge_attr auf
+# exp(-d^2/sigma^2) aus Spalte 0, es gibt dort also keinen Mechanismus fuer
+# Kanten-Features. Das ist Li et al. 2018 wie publiziert und bleibt so; ein
+# gelernter Kanten-Bias waere eine eigene Ablation.
+# DCRNNs Feature-Strom-Arm heisst topoB, weil station.static ohnehin an jedem
+# Zeitschritt in den DCGRU-Input konkateniert wird.
 MODELS = [
-    ("DCRNN   GRID fold1", "wind_dcrnn_fold1_dcrnn",       False),
-    ("MTGNN   GRID fold1", "wind_mtgnn_nwp_fold1_mtgnn",   True),
-    ("WaveNet GRID fold1", "wind_wavenet_nwp_fold1_wavenet", True),
+    #  Label                 Stem                             kein Topo  Adjazenz  Feature-Strom
+    ("DCRNN   GRID fold1", "wind_dcrnn_fold1_dcrnn",         "topoA",   None,     "topoB"),
+    ("MTGNN   GRID fold1", "wind_mtgnn_nwp_fold1_mtgnn",     "topoA",   "topoB",  "topoC"),
+    ("WaveNet GRID fold1", "wind_wavenet_nwp_fold1_wavenet", "topoA",   "topoB",  "topoC"),
 ]
 
 
@@ -49,46 +60,56 @@ def check(ref: dict, other: dict) -> str:
     return " | ".join(notes)
 
 
+def load(stem: str, arm: str | None):
+    """Neuestes Pickle fuer einen Arm; (None, 'n/a') wenn der Arm nicht existiert."""
+    if arm is None:
+        return None, "n/a"
+    f = newest(f"{stem}_{arm}")
+    if f is None:
+        return None, f"laeuft ({arm})"
+    return pickle.load(open(f, "rb")), None
+
+
 def main() -> None:
-    print(f"{'Modell':20s} {'RMSE A':>8s} {'RMSE B':>8s} {'RMSE C':>8s} "
-          f"{'B vs A':>8s} {'C vs A':>8s}  Kontrolle")
-    print("-" * 92)
-    for label, stem, has_c in MODELS:
-        arms = {}
-        for arm in ("topoA", "topoB", "topoC"):
-            if arm == "topoC" and not has_c:
-                continue
-            f = newest(f"{stem}_{arm}")
-            arms[arm] = pickle.load(open(f, "rb")) if f else None
+    hdr = (f"{'Modell':20s} {'ohne Topo':>10s} | {'Adjazenz':>10s} {'vs A':>8s} "
+           f"| {'Feat.-Strom':>11s} {'vs A':>8s}  Kontrolle")
+    print(hdr)
+    print("-" * len(hdr))
 
-        missing = [a for a, d in arms.items() if d is None]
-        a = arms.get("topoA")
-        cells, deltas = [], []
-        for arm in ("topoA", "topoB", "topoC"):
-            d = arms.get(arm)
+    for label, stem, arm_none, arm_adj, arm_feat in MODELS:
+        base, base_note = load(stem, arm_none)
+        r_base = base.get("best_val_rmse") if base else None
+        notes = []
+
+        cells = [f"{r_base:10.4f}" if r_base else f"{'—':>10s}"]
+        for arm, width in ((arm_adj, 10), (arm_feat, 11)):
+            d, note = load(stem, arm)
+            if note:
+                notes.append(note)
             r = d.get("best_val_rmse") if d else None
-            cells.append(f"{r:8.4f}" if r else f"{'—':>8s}")
-            if arm != "topoA":
-                if r and a and a.get("best_val_rmse"):
-                    ra = a["best_val_rmse"]
-                    deltas.append(f"{(r - ra) / ra * 100:+7.2f}%")
-                else:
-                    deltas.append(f"{'—':>8s}")
+            cells.append(f"{r:{width}.4f}" if r else f"{'—':>{width}}")
+            if r and r_base:
+                cells.append(f"{(r - r_base) / r_base * 100:+7.2f}%")
+            else:
+                cells.append(f"{'—':>8s}")
+            # Kontrolle: nur die Topo-Features duerfen sich unterscheiden
+            if d and base:
+                w = check(base, d)
+                if w:
+                    notes.append(f"{arm}: {w}")
 
-        notes = [check(a, d) for arm, d in arms.items()
-                 if arm != "topoA" and a and d] if a else []
-        notes = [n for n in notes if n]
-        status = " | ".join(notes) if notes else ("ok" if not missing else "")
-        if missing:
-            status = (status + " | " if status else "") + f"laeuft noch: {','.join(missing)}"
+        if base_note:
+            notes.insert(0, base_note)
+        status = " | ".join(n for n in notes if n and n != "n/a") or "ok"
+        print(f"{label:20s} {cells[0]} | {cells[1]} {cells[2]} | {cells[3]} {cells[4]}  {status}")
 
-        print(f"{label:20s} {cells[0]} {cells[1]} {cells[2]} "
-              f"{deltas[0]:>8s} {deltas[1]:>8s}  {status}")
-
-    print("\nArme:  A = ohne Topo | B = Topo nur in der Adjazenz | "
-          "C = Topo zusaetzlich im Feature-Strom")
-    print("Negatives Delta = besser als Arm A.")
-    print("DCRNN hat kein C — dort ist station.static schon Teil des Feature-Stroms.")
+    print("\nSpalten sind Wirkungskanaele, nicht Suffixe — die Suffixe A/B/C bedeuten")
+    print("pro Architektur Verschiedenes (siehe MODELS im Quelltext):")
+    print("  Adjazenz     = Topo formt die gelernte Graphstruktur (MTGNN/WaveNet topoB)")
+    print("  Feat.-Strom  = Topo als Praediktor im Zeitreihen-Input (DCRNN topoB, sonst topoC)")
+    print("DCRNN hat keinen Adjazenz-Arm: sein Stationsgraph reduziert edge_attr auf")
+    print("die Distanzspalte, ein Kanten-Feature-Mechanismus existiert dort nicht.")
+    print("Negatives Delta = besser als ohne Topo.")
     print("Bei 'SPLIT WEICHT AB' oder 'CONFIG-DIFF' ist der Vergleich nicht verwertbar.")
 
 
