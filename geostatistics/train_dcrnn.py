@@ -1064,6 +1064,9 @@ def main() -> None:
         "architecture":       "dcrnn",
         "mode":               "test" if args.test_mode else "dev",
         "config":             dcrnn_cfg,
+        # Resolved node-feature set, so a run's arm is recorded in the result
+        # itself rather than only in the file name.
+        "station_node_features": _node_feat_names,
         "train_ids":          train_ids,
         "val_ids":            val_ids,
         "n_train":            N_train,

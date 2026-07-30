@@ -733,6 +733,9 @@ def main() -> None:
                 "architecture":  "wavenet",
                 "mode":          "test" if args.test_mode else "dev",
                 "config":        mcfg,
+                # Resolved node-feature set, so a run's arm is recorded in the
+                # result itself rather than only in the file name.
+                "station_node_features": topo_feature_names,
                 "train_ids":     train_ids,
                 "val_ids":       val_ids,
                 "n_train":       N_train,
