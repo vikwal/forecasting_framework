@@ -51,7 +51,9 @@ from geostatistics.train_stgnn2 import (
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding
 from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.mtgnn import MTGNNModel
+from geostatistics.stgnn.config import parse_edge_features
 from geostatistics.stgnn.utils.normalization import StandardScaler
+from geostatistics.stgnn.utils.topo_features import load_topo_node_features
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +242,21 @@ def main() -> None:
     lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=meta_path)
     station_coords   = np.stack([lats, lons], axis=1)
 
+    # ── Topographic node features ────────────────────────────────────────────
+    # Must mirror train_mtgnn.py exactly: they widen the static tensor, so a
+    # checkpoint trained with them cannot be loaded into a static_dim=6 model.
+    _, _, _, topo_feature_names = parse_edge_features(mcfg)
+    topo_feats: dict[str, np.ndarray] = {}
+    if topo_feature_names:
+        topo_features_path = mcfg.get("topo_features_path")
+        if not topo_features_path:
+            raise ValueError(
+                "edge_features includes topographic names but 'topo_features_path' "
+                "is not set in the mtgnn config section."
+            )
+        topo_feats = load_topo_node_features(topo_features_path, all_ids, topo_feature_names)
+        logger.info("Loaded topo features for MTGNN edges: %s", list(topo_feats.keys()))
+
     # ── ICON-D2 runs ─────────────────────────────────────────────────────────
     if use_case == "solar":
         from geostatistics.solar_preprocessing import load_solar_sl_runs
@@ -366,6 +383,7 @@ def main() -> None:
         ecmwf_coords          = ecmwf_coords,
         k_ecmwf               = next_n_ecmwf,
         aggregate_nwp         = aggregate_nwp,
+        topo_feats            = topo_feats,
     )
 
     # ── Model ────────────────────────────────────────────────────────────────
@@ -380,7 +398,8 @@ def main() -> None:
 
     model = MTGNNModel(
         in_channels      = in_channels_model,
-        static_dim       = 6,
+        static_dim       = 6 + sampler.topo_dim,
+        topo_dim         = sampler.topo_dim,
         hidden           = mcfg.get("hidden", 64),
         n_layers         = mcfg.get("n_layers", 4),
         K_hop            = mcfg.get("K_hop", 2),
