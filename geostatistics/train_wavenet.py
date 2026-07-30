@@ -229,6 +229,15 @@ def main() -> None:
             "as a direct predictor of local NWP bias."
         ),
     )
+    parser.add_argument(
+        "--shuffle-node-features", action="store_true",
+        help=(
+            "Permutation control: shuffle the topographic node features across "
+            "stations, keeping parameter count and marginal distributions but "
+            "destroying the station↔terrain assignment. Separates 'terrain "
+            "information helps' from 'extra input capacity helps'."
+        ),
+    )
     args = parser.parse_args()
 
     cfg      = load_yaml(args.config)
@@ -408,6 +417,18 @@ def main() -> None:
             )
         topo_feats = load_topo_node_features(topo_features_path, all_ids, topo_feature_names)
         logger.info("Loaded topo node features for WaveNet: %s", list(topo_feats.keys()))
+        if args.shuffle_node_features:
+            # Permutation control: station i receives station j's terrain. Parameter
+            # count, marginal distributions and scaling stay identical — only the
+            # station<->terrain assignment is destroyed. If the gain over the
+            # no-topo arm survives this, it came from capacity, not information.
+            _perm = np.random.default_rng(0).permutation(len(all_ids))
+            topo_feats = {k: v[_perm] for k, v in topo_feats.items()}
+            logger.warning(
+                "CONTROL RUN: topographic node features shuffled across stations "
+                "(seed 0) — this run carries no real terrain information."
+            )
+
 
     # ------------------------------------------------------------------
     # ICON-D2 runs
