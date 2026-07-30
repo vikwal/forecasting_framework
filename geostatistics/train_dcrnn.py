@@ -107,6 +107,8 @@ from geostatistics.train_stgnn2 import (
 # ── DCRNN-specific imports ───────────────────────────────────────────────────
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.dcrnn.training import DCRNNTrainer
+from geostatistics.stgnn.config import parse_station_node_features
+from geostatistics.stgnn.utils.topo_features import load_topo_station_features
 
 # ── Shared graph and sampling infrastructure ─────────────────────────────────
 from geostatistics.stgnn import HeterogeneousGraphBuilder
@@ -301,6 +303,15 @@ def main() -> None:
             "Final-training mode: train on files + val_files (all 'known' stations), "
             "use test_files for early stopping. "
             "Default (no flag): train on files, validate on val_files."
+        ),
+    )
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Absolute topographic node features on the station nodes, overriding the "
+            "config's station_node_features key. 'all' for every feature in "
+            "TOPO_FEATURE_ORDER, or a comma-separated subset. Lets one config serve "
+            "both arms of an A/B run without being edited."
         ),
     )
     args = parser.parse_args()
@@ -796,6 +807,27 @@ def main() -> None:
     stat_scaler.fit(raw_static[:N_train])
     station_static_scaled = stat_scaler.transform(raw_static)
 
+    # Absolute topographic node features, appended after lat/lon/alt. The sampler
+    # adds the type indicator last, so columns 0-2 keep their meaning.
+    _node_feat_names = parse_station_node_features(dcrnn_cfg, args.station_node_features)
+    if _node_feat_names:
+        _topo_path = dcrnn_cfg.get("topo_features_path")
+        if not _topo_path:
+            raise ValueError(
+                "station_node_features is set but 'topo_features_path' is missing "
+                "from the dcrnn config section."
+            )
+        _topo_cols, _ = load_topo_station_features(
+            _topo_path, all_ids, _node_feat_names, n_train=N_train,
+        )
+        station_static_scaled = np.concatenate(
+            [station_static_scaled, _topo_cols], axis=1,
+        ).astype(np.float32)
+        logger.info(
+            "Station static features: 3 geo + %d topo (+1 type indicator from sampler) → %d",
+            _topo_cols.shape[1], station_static_scaled.shape[1] + 1,
+        )
+
     icond2_static_scaled = StandardScaler().fit_transform(
         np.concatenate([icond2_coords, icond2_alts[:, None]], axis=1)
     ).astype(np.float32)
@@ -867,6 +899,7 @@ def main() -> None:
         n_train=N_train,
         n_val=N_val,
         checkpoint_path=str(model_path),
+        station_node_features=args.station_node_features,
     )
 
     # ------------------------------------------------------------------

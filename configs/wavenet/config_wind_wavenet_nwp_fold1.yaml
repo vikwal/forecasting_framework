@@ -218,6 +218,9 @@ data:
   use_case: wind
 wavenet:
   K_hop: 2
+  # Only read when station_node_features / --station-node-features requests
+  # topographic features; no effect otherwise.
+  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
   aggregate_nwp: false
   dropout: 0.2
   ecmwf_feature_mode: dir_in_deg

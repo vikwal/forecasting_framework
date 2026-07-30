@@ -41,6 +41,46 @@ def parse_edge_features(d: dict) -> tuple[bool, bool, bool, list[str]]:
     return use_distance, use_direction, use_altitude_diff, topo_names
 
 
+def parse_station_node_features(d: dict, cli_override=None) -> list[str]:
+    """
+    Resolve the ``station_node_features`` key into an ordered list of topographic
+    feature names, to be used as **absolute** node features on the station nodes.
+
+    Deliberately separate from ``edge_features``: a difference between two nodes
+    and a point property of one node are not interchangeable. ``aspect_sin/cos``
+    for instance is meaningless as an edge difference (sin(a)-sin(b) is not an
+    angular distance) but informative per node, where it can interact with the
+    time-varying wind direction.
+
+    Accepts a list of names, or the string ``"all"`` for every feature in
+    TOPO_FEATURE_ORDER. Absent or empty means no node features, which keeps the
+    declared static width — and therefore existing checkpoints — unchanged.
+
+    ``cli_override`` (same accepted forms) takes precedence, so one config file
+    can serve both arms of an A/B run without being edited.
+    """
+    raw = cli_override if cli_override is not None else d.get("station_node_features")
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in ("none", "off", "false"):
+            # Explicit empty — needed so the CLI can force the "no topo" arm even
+            # when the config file requests features.
+            return []
+        raw = TOPO_FEATURE_ORDER if token == "all" else [
+            s.strip() for s in raw.split(",") if s.strip()
+        ]
+    requested = set(raw)
+    unknown = requested - set(TOPO_FEATURE_ORDER)
+    if unknown:
+        raise ValueError(
+            f"station_node_features contains unknown name(s): {sorted(unknown)}. "
+            f"Valid names: {TOPO_FEATURE_ORDER}"
+        )
+    return [f for f in TOPO_FEATURE_ORDER if f in requested]
+
+
 @dataclass
 class GraphConfig:
     station_connectivity: str

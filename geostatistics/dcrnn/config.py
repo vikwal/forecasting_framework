@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from geostatistics.stgnn.config import GraphConfig, TrainingConfig, parse_edge_features
+from dataclasses import field
+
+from geostatistics.stgnn.config import (
+    GraphConfig,
+    TrainingConfig,
+    parse_edge_features,
+    parse_station_node_features,
+)
 
 
 @dataclass
@@ -64,6 +71,11 @@ class DCRNNConfig:
     station_static_features: int = 4
     icond2_static_features: int = 3
     ecmwf_static_features: int = 3
+
+    # Absolute topographic node features appended to station.static (after
+    # lat/lon/alt, before the type indicator the sampler adds last). Empty by
+    # default, so station_static_features stays 4 and old checkpoints load.
+    station_node_feature_names: list[str] = field(default_factory=list)
 
     # Architecture
     hidden_dim: int = 128
@@ -148,8 +160,10 @@ class DCRNNConfig:
         n_train: int,
         n_val: int,
         checkpoint_path: str,
+        station_node_features=None,
     ) -> "DCRNNConfig":
         use_distance, use_direction, use_altitude_diff, topo_names = parse_edge_features(d)
+        node_feat_names = parse_station_node_features(d, station_node_features)
         graph = GraphConfig(
             station_connectivity=d.get("station_connectivity", "delaunay"),
             next_n_icond2_grid_points=d.get("next_n_icond2", 4),
@@ -231,7 +245,8 @@ class DCRNNConfig:
             interpolate_history=interpolate_history,
             icond2_features_per_step=len(icond2_features),
             ecmwf_features_per_step=len(ecmwf_features) if d.get("next_n_ecmwf", 4) > 0 else 0,
-            station_static_features=4,
+            station_static_features=4 + len(node_feat_names),
+            station_node_feature_names=node_feat_names,
             icond2_static_features=3,
             ecmwf_static_features=3,
             hidden_dim=hidden_dim,

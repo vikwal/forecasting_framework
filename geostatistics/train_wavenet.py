@@ -55,7 +55,9 @@ from geostatistics.train_stgnn2 import (
 )
 from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.wavenet import GraphWaveNetModel
+from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features
 from geostatistics.stgnn.utils.normalization import StandardScaler
+from geostatistics.stgnn.utils.topo_features import load_topo_node_features
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding
 
 logging.basicConfig(
@@ -207,6 +209,15 @@ def main() -> None:
             "Load best hyperparameters from an Optuna study and override YAML values. "
             "Pass 'auto' to derive study name from config stem, or a path to a SQLite .db. "
             "PostgreSQL is used automatically when OPTUNA_STORAGE env var is set."
+        ),
+    )
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Absolute topographic node features on the station nodes, overriding the "
+            "config's edge_features topo names for the static tensor. 'all', a "
+            "comma-separated subset, or 'none' to force the no-topo arm. Lets one "
+            "config serve both arms of an A/B run without being edited."
         ),
     )
     args = parser.parse_args()
@@ -369,6 +380,27 @@ def main() -> None:
     station_coords   = np.stack([lats, lons], axis=1)
 
     # ------------------------------------------------------------------
+    # Topographic node features (absolute, into the static tensor → emb_mlp)
+    # ------------------------------------------------------------------
+    # --station-node-features is authoritative when given (including 'none'), so a
+    # single config can serve both arms of an A/B run; otherwise fall back to the
+    # topo names in edge_features.
+    if args.station_node_features is not None:
+        topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
+    else:
+        _, _, _, topo_feature_names = parse_edge_features(mcfg)
+    topo_feats: dict[str, np.ndarray] = {}
+    if topo_feature_names:
+        topo_features_path = mcfg.get("topo_features_path")
+        if not topo_features_path:
+            raise ValueError(
+                "station_node_features/edge_features requests topographic names but "
+                "'topo_features_path' is not set in the wavenet config section."
+            )
+        topo_feats = load_topo_node_features(topo_features_path, all_ids, topo_feature_names)
+        logger.info("Loaded topo node features for WaveNet: %s", list(topo_feats.keys()))
+
+    # ------------------------------------------------------------------
     # ICON-D2 runs
     # ------------------------------------------------------------------
     if use_case == "solar":
@@ -523,6 +555,7 @@ def main() -> None:
         ecmwf_coords          = ecmwf_coords,
         k_ecmwf               = next_n_ecmwf,
         aggregate_nwp         = aggregate_nwp,
+        topo_feats            = topo_feats,
     )
     logger.info("in_channels: %d  (aggregate_nwp=%s)", sampler.in_channels, aggregate_nwp)
 
@@ -543,7 +576,7 @@ def main() -> None:
 
     model = GraphWaveNetModel(
         in_channels      = in_channels_model,
-        static_dim       = 6,
+        static_dim       = 6 + sampler.topo_dim,
         hidden           = mcfg.get("hidden", 64),
         n_blocks         = mcfg.get("n_blocks", 8),
         K_hop      = mcfg.get("K_hop", 2),

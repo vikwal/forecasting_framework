@@ -40,6 +40,121 @@ _TOPO_CSV_COLUMNS = {
 }
 
 
+# Variance-stabilising transform per feature, applied before the z-score in
+# load_topo_station_features(). The raw columns are heavily right-skewed — tdi
+# has median 0.90 but max 361 (sigma 29.7), so a plain z-score leaves 202 of 203
+# stations inside +-0.15 sigma and one at +12 sigma. As an absolute node feature
+# that constant offset goes straight into every GRU gate / input channel, so the
+# skew matters much more here than in a pairwise difference.
+#   z0        : enters the log wind profile logarithmically
+#   tpi5/75   : signed, roughly symmetric around 0 -> signed log
+#   others    : non-negative and long-tailed -> log1p
+#   aspect_*  : already bounded in [-1, 1] -> untouched
+_TOPO_TRANSFORMS = {
+    "z0":         lambda a: np.log(np.maximum(a, 1e-6)),
+    "tdi":        lambda a: np.log1p(np.maximum(a, 0.0)),
+    "slope":      lambda a: np.log1p(np.maximum(a, 0.0)),
+    "elev_std":   lambda a: np.log1p(np.maximum(a, 0.0)),
+    "dist_coast": lambda a: np.log1p(np.maximum(a, 0.0)),
+    "tpi5":       lambda a: np.sign(a) * np.log1p(np.abs(a)),
+    "tpi75":      lambda a: np.sign(a) * np.log1p(np.abs(a)),
+}
+
+
+def load_topo_station_features(
+    topo_dir: str,
+    station_ids: list[str],
+    feature_names: list[str],
+    n_train: int,
+) -> tuple[np.ndarray, list[str]]:
+    """
+    Load absolute per-station topographic features for use as **node** features.
+
+    Differs from ``load_topo_node_features`` (which feeds edge differences) in
+    three ways that only matter for absolute values:
+
+    1. Variance-stabilising transforms (see ``_TOPO_TRANSFORMS``) before scaling.
+    2. The z-score is fitted on the **first n_train stations only**, matching
+       every other scaler in the pipeline (meas/i2/e2/static) instead of leaking
+       val/test station statistics into the normalisation.
+    3. ``tdi`` is set to 0 where the terrain is perfectly flat (elev_std == 0)
+       rather than median-filled. The ratio is 0/0 on zero relief, so 0 is the
+       physically correct value — median-filling hands an offshore location a
+       typical inland terrain value. Mirrors utils/preprocessing.py, which the
+       TFT baseline already does this way.
+
+    Parameters
+    ----------
+    topo_dir :      directory containing topo_features.csv and dist_coast.csv
+    station_ids :   station IDs, same order as station_coords/alts
+    feature_names : subset of TOPO_FEATURE_ORDER (order-independent)
+    n_train :       number of leading train stations to fit the z-score on
+
+    Returns
+    -------
+    (N, F) float32 array and the resolved column names in canonical order
+    """
+    requested = [f for f in TOPO_FEATURE_ORDER if f in feature_names]
+    if not requested:
+        return np.zeros((len(station_ids), 0), dtype=np.float32), []
+
+    topo_df = pd.read_csv(Path(topo_dir) / "topo_features.csv", dtype={"location_id": str})
+    topo_df = topo_df[topo_df["kind"] == "station"].set_index("location_id")
+    coast_df = pd.read_csv(Path(topo_dir) / "dist_coast.csv", dtype={"station_id": str})
+    coast_df = coast_df.set_index("station_id")
+
+    topo_df["aspect_sin"] = np.sin(np.deg2rad(topo_df["aspect"]))
+    topo_df["aspect_cos"] = np.cos(np.deg2rad(topo_df["aspect"]))
+
+    # Undefined dissection ratio on zero relief is 0, not missing.
+    flat = topo_df["tdi"].isna() & (topo_df["elev_std"] == 0)
+    if flat.any():
+        logger.info(
+            "Topo feature 'tdi': set to 0.0 for %d perfectly flat location(s) (%s) — "
+            "undefined ratio on zero relief, not missing data.",
+            int(flat.sum()), topo_df.index[flat].tolist()[:5],
+        )
+        topo_df.loc[flat, "tdi"] = 0.0
+
+    cols: list[np.ndarray] = []
+    for name in requested:
+        if name == "dist_coast":
+            series = coast_df["dist_coast_km"]
+        elif name in ("aspect_sin", "aspect_cos"):
+            series = topo_df[name]
+        else:
+            series = topo_df[_TOPO_CSV_COLUMNS[name]]
+
+        values = series.reindex(station_ids)
+        n_missing = int(values.isna().sum())
+        if n_missing > 0:
+            median = values.median()
+            logger.warning(
+                "Topo station feature '%s': %d/%d missing, filling with median (%.4g). "
+                "Missing IDs: %s",
+                name, n_missing, len(station_ids), median,
+                [sid for sid, v in zip(station_ids, values.isna()) if v][:10],
+            )
+            values = values.fillna(median)
+
+        arr = values.to_numpy(dtype=np.float64)
+        transform = _TOPO_TRANSFORMS.get(name)
+        if transform is not None:
+            arr = transform(arr)
+
+        train_slice = arr[:n_train]
+        mean = float(train_slice.mean())
+        std = max(float(train_slice.std()), 1e-6)
+        cols.append(((arr - mean) / std).astype(np.float32))
+
+    out = np.stack(cols, axis=1).astype(np.float32)
+    logger.info(
+        "Loaded %d topographic station features (z-score on first %d stations): %s",
+        out.shape[1], n_train, requested,
+    )
+    return out, requested
+
+
 def load_topo_node_features(
     topo_dir: str,
     station_ids: list[str],

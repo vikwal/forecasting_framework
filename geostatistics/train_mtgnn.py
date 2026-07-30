@@ -64,7 +64,7 @@ from geostatistics.train_stgnn2 import (
 from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.mtgnn import MTGNNModel
 from geostatistics.stgnn.utils.normalization import StandardScaler
-from geostatistics.stgnn.config import parse_edge_features
+from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features
 from geostatistics.stgnn.utils.topo_features import load_topo_node_features
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding
 
@@ -223,6 +223,15 @@ def main() -> None:
             "Load best hyperparameters from an Optuna study and override YAML values. "
             "Pass 'auto' to derive study name from config stem, or a path to a SQLite .db. "
             "PostgreSQL is used automatically when OPTUNA_STORAGE env var is set."
+        ),
+    )
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Absolute topographic node features on the station nodes, overriding the "
+            "config's edge_features topo names for the static tensor. 'all', a "
+            "comma-separated subset, or 'none' to force the no-topo arm. Lets one "
+            "config serve both arms of an A/B run without being edited."
         ),
     )
     args = parser.parse_args()
@@ -389,7 +398,13 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Topographic node features (station-station edge bias, see edge_features)
     # ------------------------------------------------------------------
-    _, _, _, topo_feature_names = parse_edge_features(mcfg)
+    # --station-node-features is authoritative when given (including 'none'), so a
+    # single config can serve both arms of an A/B run; otherwise fall back to the
+    # topo names in edge_features, which is the pre-existing behaviour.
+    if args.station_node_features is not None:
+        topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
+    else:
+        _, _, _, topo_feature_names = parse_edge_features(mcfg)
     topo_feats: dict[str, np.ndarray] = {}
     if topo_feature_names:
         topo_features_path = mcfg.get("topo_features_path")
