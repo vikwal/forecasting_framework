@@ -57,7 +57,7 @@ from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.wavenet import GraphWaveNetModel
 from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features
 from geostatistics.stgnn.utils.normalization import StandardScaler
-from geostatistics.stgnn.utils.topo_features import load_topo_node_features
+from geostatistics.stgnn.utils.topo_features import load_topo_station_features_dict
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding
 
 logging.basicConfig(
@@ -415,7 +415,9 @@ def main() -> None:
                 "station_node_features/edge_features requests topographic names but "
                 "'topo_features_path' is not set in the wavenet config section."
             )
-        topo_feats = load_topo_node_features(topo_features_path, all_ids, topo_feature_names)
+        topo_feats = load_topo_station_features_dict(
+            topo_features_path, all_ids, topo_feature_names, n_train=N_train,
+        )
         logger.info("Loaded topo node features for WaveNet: %s", list(topo_feats.keys()))
         if args.shuffle_node_features:
             # Permutation control: station i receives station j's terrain. Parameter

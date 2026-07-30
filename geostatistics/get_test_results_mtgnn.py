@@ -53,7 +53,7 @@ from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.mtgnn import MTGNNModel
 from geostatistics.stgnn.config import parse_edge_features
 from geostatistics.stgnn.utils.normalization import StandardScaler
-from geostatistics.stgnn.utils.topo_features import load_topo_node_features
+from geostatistics.stgnn.utils.topo_features import load_topo_station_features_dict
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +254,10 @@ def main() -> None:
                 "edge_features includes topographic names but 'topo_features_path' "
                 "is not set in the mtgnn config section."
             )
-        topo_feats = load_topo_node_features(topo_features_path, all_ids, topo_feature_names)
-        logger.info("Loaded topo features for MTGNN edges: %s", list(topo_feats.keys()))
+        topo_feats = load_topo_station_features_dict(
+            topo_features_path, all_ids, topo_feature_names, n_train=N_train,
+        )
+        logger.info("Loaded topo station node features for MTGNN: %s", list(topo_feats.keys()))
 
     # ── ICON-D2 runs ─────────────────────────────────────────────────────────
     if use_case == "solar":

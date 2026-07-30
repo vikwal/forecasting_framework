@@ -106,8 +106,21 @@ def load_topo_station_features(
     topo_df["aspect_sin"] = np.sin(np.deg2rad(topo_df["aspect"]))
     topo_df["aspect_cos"] = np.cos(np.deg2rad(topo_df["aspect"]))
 
+    # Aspect is undefined on zero relief: the DEM gradient has no direction there,
+    # so whatever angle the source reports is an artefact. The zero vector encodes
+    # "no preferred direction" and is distinguishable from every real bearing,
+    # which a median-filled or artefact angle is not. Same reasoning as tdi below.
+    flat_relief = topo_df["elev_std"] == 0
+    if flat_relief.any():
+        logger.info(
+            "Topo features 'aspect_sin'/'aspect_cos': set to 0 for %d perfectly flat "
+            "location(s) (%s) — aspect is undefined on zero relief.",
+            int(flat_relief.sum()), topo_df.index[flat_relief].tolist()[:5],
+        )
+        topo_df.loc[flat_relief, ["aspect_sin", "aspect_cos"]] = 0.0
+
     # Undefined dissection ratio on zero relief is 0, not missing.
-    flat = topo_df["tdi"].isna() & (topo_df["elev_std"] == 0)
+    flat = topo_df["tdi"].isna() & flat_relief
     if flat.any():
         logger.info(
             "Topo feature 'tdi': set to 0.0 for %d perfectly flat location(s) (%s) — "
@@ -128,11 +141,14 @@ def load_topo_station_features(
         values = series.reindex(station_ids)
         n_missing = int(values.isna().sum())
         if n_missing > 0:
-            median = values.median()
+            # Train-only median for the same reason the z-score is train-only:
+            # a median over all stations leaks val/test statistics into the
+            # imputation, contradicting point 2 of this docstring.
+            median = values.iloc[:n_train].median()
             logger.warning(
-                "Topo station feature '%s': %d/%d missing, filling with median (%.4g). "
-                "Missing IDs: %s",
-                name, n_missing, len(station_ids), median,
+                "Topo station feature '%s': %d/%d missing, filling with median (%.4g) "
+                "over the %d train stations. Missing IDs: %s",
+                name, n_missing, len(station_ids), median, n_train,
                 [sid for sid, v in zip(station_ids, values.isna()) if v][:10],
             )
             values = values.fillna(median)
@@ -155,6 +171,28 @@ def load_topo_station_features(
     return out, requested
 
 
+def load_topo_station_features_dict(
+    topo_dir: str,
+    station_ids: list[str],
+    feature_names: list[str],
+    n_train: int,
+) -> dict[str, np.ndarray]:
+    """
+    ``load_topo_station_features`` in the dict form ``HomoSampler`` expects.
+
+    HomoSampler takes ``topo_feats`` as ``{name: (N,) array}`` and both appends
+    those columns to the static tensor (which feeds emb_mlp and, with
+    ``broadcast_topo``, the input channels) and derives edge features from them.
+    Use this rather than ``load_topo_node_features`` wherever the values end up
+    as absolute node features — see that function's docstring for why the
+    normalisation differs.
+    """
+    arr, names = load_topo_station_features(
+        topo_dir, station_ids, feature_names, n_train=n_train,
+    )
+    return {name: arr[:, i] for i, name in enumerate(names)}
+
+
 def load_topo_node_features(
     topo_dir: str,
     station_ids: list[str],
@@ -162,6 +200,14 @@ def load_topo_node_features(
 ) -> dict[str, np.ndarray]:
     """
     Load and z-score-normalise topographic node features for a list of stations.
+
+    .. warning::
+       Normalises without variance-stabilising transforms and fits the z-score
+       over **all** stations. That is tolerable for the pairwise edge
+       differences in ``HeterogeneousGraphBuilder`` but wrong for absolute node
+       features: heavily right-skewed features (tpi5, tdi, tpi75) collapse the
+       bulk of the stations onto a near-constant value plus a single outlier.
+       For node/broadcast use call ``load_topo_station_features_dict`` instead.
 
     Parameters
     ----------

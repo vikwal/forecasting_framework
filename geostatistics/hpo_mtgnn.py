@@ -97,9 +97,9 @@ from geostatistics.train_mtgnn import (
 )
 from geostatistics.homo_sampler import HomoSampler
 from geostatistics.mtgnn import MTGNNModel
-from geostatistics.stgnn.config import parse_edge_features
+from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features
 from geostatistics.stgnn.utils.normalization import StandardScaler
-from geostatistics.stgnn.utils.topo_features import load_topo_node_features
+from geostatistics.stgnn.utils.topo_features import load_topo_station_features_dict
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding
 from utils.data_cache import GNNCache
 
@@ -273,6 +273,33 @@ def main() -> None:
     parser.add_argument("--gpu",     type=int, default=None, help="GPU index")
     parser.add_argument("--preprocess-only", action="store_true",
                         help="Load data then exit (no trials)")
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Absolute topographic node features on the station nodes, overriding the "
+            "config's edge_features topo names for the static tensor. 'all', a "
+            "comma-separated subset, or 'none' to force the no-topo arm. Lets one "
+            "config serve both arms of an A/B run without being edited."
+        ),
+    )
+    parser.add_argument(
+        "--broadcast-topo", action="store_true",
+        help=(
+            "Additionally feed the topographic node features into the temporal "
+            "input channels (constant over time), not just into the graph-learning "
+            "embedding. Without this they only shape the adjacency and can never act "
+            "as a direct predictor of local NWP bias."
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-node-features", action="store_true",
+        help=(
+            "Permutation control: shuffle the topographic node features across "
+            "stations, keeping parameter count and marginal distributions but "
+            "destroying the station↔terrain assignment. Separates 'terrain "
+            "information helps' from 'extra input capacity helps'."
+        ),
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -546,7 +573,13 @@ def main() -> None:
     # both the hit and the miss path must end up with the same static width.
     # Must mirror train_mtgnn.py — otherwise HPO tunes a narrower model than
     # the one the retrain step builds from the resulting best params.
-    _, _, _, topo_feature_names = parse_edge_features(mcfg)
+    # --station-node-features is authoritative when given (including 'none'), so a
+    # single config can serve both arms of an A/B run; otherwise fall back to the
+    # topo names in edge_features, which is the pre-existing behaviour.
+    if args.station_node_features is not None:
+        topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
+    else:
+        _, _, _, topo_feature_names = parse_edge_features(mcfg)
     topo_feats: dict[str, np.ndarray] = {}
     if topo_feature_names:
         topo_features_path = mcfg.get("topo_features_path")
@@ -555,8 +588,21 @@ def main() -> None:
                 "edge_features includes topographic names but 'topo_features_path' "
                 "is not set in the mtgnn config section."
             )
-        topo_feats = load_topo_node_features(topo_features_path, all_ids, topo_feature_names)
-        logger.info("Loaded topo features for MTGNN edges: %s", list(topo_feats.keys()))
+        topo_feats = load_topo_station_features_dict(
+            topo_features_path, all_ids, topo_feature_names, n_train=N_train,
+        )
+        logger.info("Loaded topo station node features for MTGNN: %s", list(topo_feats.keys()))
+        if args.shuffle_node_features:
+            # Permutation control: station i receives station j's terrain. Parameter
+            # count, marginal distributions and scaling stay identical — only the
+            # station<->terrain assignment is destroyed. If the gain over the
+            # no-topo arm survives this, it came from capacity, not information.
+            _perm = np.random.default_rng(0).permutation(len(all_ids))
+            topo_feats = {k: v[_perm] for k, v in topo_feats.items()}
+            logger.warning(
+                "CONTROL RUN: topographic node features shuffled across stations "
+                "(seed 0) — this run carries no real terrain information."
+            )
 
     # ── Circular / dir_in_deg encoding (applied once, after cache) ───────────
     meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
@@ -732,6 +778,7 @@ def main() -> None:
                 in_channels      = in_ch_model,
                 static_dim       = 6 + sampler.topo_dim,
                 topo_dim         = sampler.topo_dim,
+                broadcast_topo   = args.broadcast_topo,
                 hidden           = hidden,
                 n_layers         = n_layers,
                 K_hop            = K_hop,

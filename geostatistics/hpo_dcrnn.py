@@ -79,6 +79,8 @@ from geostatistics.dcrnn.training import DCRNNTrainer
 from geostatistics.stgnn import HeterogeneousGraphBuilder
 from geostatistics.stgnn.training.sampler import TrainingSampler
 from geostatistics.stgnn.utils.normalization import StandardScaler
+from geostatistics.stgnn.config import parse_station_node_features
+from geostatistics.stgnn.utils.topo_features import load_topo_station_features
 
 import pandas as pd
 import pyproj
@@ -205,6 +207,24 @@ def main() -> None:
     parser.add_argument("--gpu", type=int, default=None, help="GPU index (default: auto)")
     parser.add_argument("--preprocess-only", action="store_true",
                         help="Build cache then exit (used by run_hpo_dcrnn.sh before launching workers)")
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Absolute topographic node features on the station nodes, overriding the "
+            "config's station_node_features key. 'all' for every feature in "
+            "TOPO_FEATURE_ORDER, or a comma-separated subset. Lets one config serve "
+            "both arms of an A/B run without being edited."
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-node-features", action="store_true",
+        help=(
+            "Permutation control: shuffle the topographic node features across "
+            "stations, keeping parameter count and marginal distributions but "
+            "destroying the station↔terrain assignment. Separates 'terrain "
+            "information helps' from 'extra input capacity helps'."
+        ),
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -593,6 +613,42 @@ def main() -> None:
             )
             logger.info("GNNCache — cache written.")
 
+    # ── Topographic node features ───────────────────────────────────────────
+    # Outside the cache branches on purpose: both the hit and the miss path
+    # must end up with the same station_static_scaled width. Must mirror
+    # train_dcrnn.py — otherwise HPO tunes a narrower model than the one the
+    # retrain step builds from the resulting best params.
+    _node_feat_names = parse_station_node_features(dcrnn_cfg, args.station_node_features)
+    if _node_feat_names:
+        _topo_path = dcrnn_cfg.get("topo_features_path")
+        if not _topo_path:
+            raise ValueError(
+                "station_node_features is set but 'topo_features_path' is missing "
+                "from the dcrnn config section."
+            )
+        _topo_cols, _ = load_topo_station_features(
+            _topo_path, all_ids, _node_feat_names, n_train=N_train,
+        )
+        if args.shuffle_node_features:
+            # Permutation control: station i receives station j's terrain. Parameter
+            # count, marginal distributions and scaling are identical to the real
+            # run — only the station↔terrain assignment is destroyed. If the gain
+            # over the no-topo arm survives this, it came from extra capacity, not
+            # from topographic information.
+            _perm = np.random.default_rng(0).permutation(len(all_ids))
+            _topo_cols = _topo_cols[_perm]
+            logger.warning(
+                "CONTROL RUN: topographic node features shuffled across stations "
+                "(seed 0) — this run carries no real terrain information."
+            )
+        station_static_scaled = np.concatenate(
+            [station_static_scaled, _topo_cols], axis=1,
+        ).astype(np.float32)
+        logger.info(
+            "Station static features: 3 geo + %d topo (+1 type indicator from sampler) → %d",
+            _topo_cols.shape[1], station_static_scaled.shape[1] + 1,
+        )
+
     # Exclude run pairs that involve a run with NaN in ICON-D2 grid data.
     _grid_nan_runs = set(
         int(i) for i in np.where(np.isnan(grid_icond2_runs).any(axis=(1, 2, 3)))[0]
@@ -697,6 +753,7 @@ def main() -> None:
             n_train=N_train,
             n_val=N_val,
             checkpoint_path="models/_hpo_dcrnn_tmp.pt",
+            station_node_features=args.station_node_features,
         )
         _static_builder    = HeterogeneousGraphBuilder(_base_model_cfg.graph)
         _static_base_graph = _static_builder.build(
@@ -844,6 +901,7 @@ def main() -> None:
             n_train=N_train,
             n_val=len(hpo_val_station_indices),
             checkpoint_path="models/_hpo_dcrnn_tmp.pt",
+            station_node_features=args.station_node_features,
         )
 
         # Build graph: per trial when next_n_icond2/next_n_ecmwf are tuned,

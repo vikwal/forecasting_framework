@@ -51,6 +51,8 @@ from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_en
 from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.wavenet import GraphWaveNetModel
 from geostatistics.stgnn.utils.normalization import StandardScaler
+from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features
+from geostatistics.stgnn.utils.topo_features import load_topo_station_features_dict
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +112,20 @@ def main() -> None:
         help=(
             "Final-evaluation mode: train_ids = files + val_files, "
             "val_ids = test_files. Must match --test-mode used in train_wavenet.py."
+        ),
+    )
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Topographic node features on the station nodes. Must match what "
+            "train_wavenet.py was given, otherwise the checkpoint will not load."
+        ),
+    )
+    parser.add_argument(
+        "--broadcast-topo", action="store_true",
+        help=(
+            "Must match the flag train_wavenet.py was given, otherwise input_proj "
+            "has the wrong width and the checkpoint will not load."
         ),
     )
     args = parser.parse_args()
@@ -239,6 +255,27 @@ def main() -> None:
     lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=meta_path)
     station_coords   = np.stack([lats, lons], axis=1)
 
+    # ── Topographic node features ────────────────────────────────────────────
+    # Must mirror train_wavenet.py exactly: these widen the static tensor and,
+    # with --broadcast-topo, input_proj — a mismatch means the checkpoint fails
+    # to load (or worse, loads a differently scaled feature into the same slot).
+    if args.station_node_features is not None:
+        topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
+    else:
+        _, _, _, topo_feature_names = parse_edge_features(mcfg)
+    topo_feats: dict[str, np.ndarray] = {}
+    if topo_feature_names:
+        topo_features_path = mcfg.get("topo_features_path")
+        if not topo_features_path:
+            raise ValueError(
+                "station_node_features/edge_features requests topographic names but "
+                "'topo_features_path' is not set in the wavenet config section."
+            )
+        topo_feats = load_topo_station_features_dict(
+            topo_features_path, all_ids, topo_feature_names, n_train=N_train,
+        )
+        logger.info("Loaded topo station node features for WaveNet: %s", list(topo_feats.keys()))
+
     # ── ICON-D2 runs ─────────────────────────────────────────────────────────
     if use_case == "solar":
         from geostatistics.solar_preprocessing import load_solar_sl_runs
@@ -365,6 +402,7 @@ def main() -> None:
         ecmwf_coords          = ecmwf_coords,
         k_ecmwf               = next_n_ecmwf,
         aggregate_nwp         = aggregate_nwp,
+        topo_feats            = topo_feats,
     )
 
     # ── Model ────────────────────────────────────────────────────────────────
@@ -379,7 +417,9 @@ def main() -> None:
 
     model = GraphWaveNetModel(
         in_channels      = in_channels_model,
-        static_dim       = 6,
+        static_dim       = 6 + sampler.topo_dim,
+        topo_dim         = sampler.topo_dim,
+        broadcast_topo   = args.broadcast_topo,
         hidden           = mcfg.get("hidden", 64),
         n_blocks         = mcfg.get("n_blocks", 8),
         K_hop            = mcfg.get("K_hop", 2),

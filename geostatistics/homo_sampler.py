@@ -240,9 +240,10 @@ class HomoSampler:
         # Station-to-station coordinates (radians) for next_n_neighbors selection
         self._station_coords_rad = np.stack([lat_r, lon_r], axis=1).astype(np.float64)
 
-        # Topographic features (already z-score normalised in load_topo_node_features),
-        # in canonical order — appended after the 6 core static columns so
-        # MTGNN._pairwise_edge_features's fixed indices 0-4 stay valid.
+        # Topographic features (already transformed and train-only z-scored in
+        # load_topo_station_features_dict), in canonical order — appended after
+        # the 6 core static columns so MTGNN._pairwise_edge_features's fixed
+        # indices 0-4 stay valid.
         from .stgnn.utils.topo_features import TOPO_FEATURE_ORDER
         self._topo_names = [n for n in TOPO_FEATURE_ORDER if n in self._topo_feats]
         self._topo_arrays = [self._topo_feats[n] for n in self._topo_names]
