@@ -220,6 +220,15 @@ def main() -> None:
             "config serve both arms of an A/B run without being edited."
         ),
     )
+    parser.add_argument(
+        "--broadcast-topo", action="store_true",
+        help=(
+            "Additionally feed the topographic node features into the temporal "
+            "input channels (constant over time), not just into the graph-learning "
+            "embedding. Without this they only shape the adjacency and can never act "
+            "as a direct predictor of local NWP bias."
+        ),
+    )
     args = parser.parse_args()
 
     cfg      = load_yaml(args.config)
@@ -577,6 +586,8 @@ def main() -> None:
     model = GraphWaveNetModel(
         in_channels      = in_channels_model,
         static_dim       = 6 + sampler.topo_dim,
+        topo_dim         = sampler.topo_dim,
+        broadcast_topo   = args.broadcast_topo,
         hidden           = mcfg.get("hidden", 64),
         n_blocks         = mcfg.get("n_blocks", 8),
         K_hop      = mcfg.get("K_hop", 2),

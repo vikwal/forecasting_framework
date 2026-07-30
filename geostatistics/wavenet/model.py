@@ -217,6 +217,8 @@ class GraphWaveNetModel(nn.Module):
         predefined_adj: bool = False,
         adj_sigma: float = 0.2,
         adj_threshold: float = 0.1,
+        topo_dim: int = 0,
+        broadcast_topo: bool = False,
     ) -> None:
         super().__init__()
         self.H         = history_length
@@ -229,6 +231,8 @@ class GraphWaveNetModel(nn.Module):
         self.predefined_adj = predefined_adj
         self.adj_sigma      = adj_sigma
         self.adj_threshold  = adj_threshold
+        self.topo_dim       = topo_dim
+        self.broadcast_topo = broadcast_topo and topo_dim > 0
 
         if nwp_nodes:
             self.nwp_attn = HomoNWPAttentionLayer(
@@ -237,7 +241,9 @@ class GraphWaveNetModel(nn.Module):
                 heads=nwp_heads,
             )
             self.nwp_i2_channels = k_nwp * nwp_feat_dim  # slice boundary in x
-        proj_in = in_channels
+        # Broadcast widening is added here rather than by the caller so the two
+        # can never disagree.
+        proj_in = in_channels + (topo_dim if self.broadcast_topo else 0)
 
         # Inductive embedding: static → E
         self.emb_mlp = nn.Sequential(
@@ -428,6 +434,16 @@ class GraphWaveNetModel(nn.Module):
             nwp_agg = self.nwp_attn.forward_sequence(nwp_t[0], N, self.k_nwp)  # (T,N,d)
             nwp_agg = nwp_agg.permute(1, 0, 2).unsqueeze(0)                 # (1,N,T,d)
             x = torch.cat([meas, nwp_agg, ecmwf], dim=-1)                   # (B,N,T,M+d+E)
+
+        # Topographic node features as extra input channels, constant along T.
+        # Appended after the NWP re-assembly above so its slice boundaries stay
+        # valid. Paper Sec. 3.1 defines the input as X ∈ R^{N×D×S} with arbitrary
+        # D, and Sec. 3.2 notes the graph convolution "supports multi-dimensional
+        # inputs", so extra channels use the interface as specified.
+        if self.broadcast_topo:
+            topo = static_single[:, 6:6 + self.topo_dim]                     # (N, topo_dim)
+            topo = topo.view(1, N, 1, self.topo_dim).expand(B, N, T, self.topo_dim)
+            x = torch.cat([x, topo], dim=-1)
 
         # Input projection
         h = self.input_proj(x)                         # (B, N, T_total, hidden)

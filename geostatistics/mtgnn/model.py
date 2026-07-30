@@ -241,6 +241,7 @@ class MTGNNModel(nn.Module):
         M: int = 0,
         topk_graph: int | None = None,
         topo_dim: int = 0,
+        broadcast_topo: bool = False,
     ) -> None:
         super().__init__()
         self.H            = history_length
@@ -252,6 +253,7 @@ class MTGNNModel(nn.Module):
         self.nwp_feat_dim = nwp_feat_dim
         self.topk_graph   = topk_graph
         self.topo_dim     = topo_dim
+        self.broadcast_topo = broadcast_topo and topo_dim > 0
         T_total = history_length + forecast_horizon
 
         if nwp_nodes:
@@ -262,8 +264,10 @@ class MTGNNModel(nn.Module):
             )
             self.nwp_i2_channels = k_nwp * nwp_feat_dim  # slice boundary in x
         # in_channels is always proj_in; the training script must compute it as
-        # M + nwp_out_dim + ecmwf_channels when nwp_nodes=True
-        proj_in = in_channels
+        # M + nwp_out_dim + ecmwf_channels when nwp_nodes=True.
+        # The broadcast widening is added here rather than by the caller so the
+        # two can never disagree.
+        proj_in = in_channels + (topo_dim if self.broadcast_topo else 0)
 
         # Inductive node embedding MLP: static → embedding
         self.emb_mlp = nn.Sequential(
@@ -453,6 +457,16 @@ class MTGNNModel(nn.Module):
             nwp_agg = nwp_agg.permute(1, 0, 2).unsqueeze(0)                 # (1,N,T,d)
             # ECMWF channels passed through directly (already IDW-concat from sampler)
             x = torch.cat([meas, nwp_agg, ecmwf], dim=-1)                   # (B,N,T,M+d+E)
+
+        # Topographic node features as extra input channels, constant along T.
+        # Appended after the NWP re-assembly above so the slice boundaries used
+        # there (self.M, self.nwp_i2_channels) stay valid. Paper Sec. 3 defines
+        # the input as N x D x T with the first column the target and "the rest
+        # auxiliary features", so extra channels use the interface as specified.
+        if self.broadcast_topo:
+            topo = static_single[:, 6:6 + self.topo_dim]                     # (N, topo_dim)
+            topo = topo.view(1, N, 1, self.topo_dim).expand(B, N, T, self.topo_dim)
+            x = torch.cat([x, topo], dim=-1)
 
         # Input projection: (B, N, T, in) → (B, N, T, hidden)
         h = self.input_proj(x)    # (B, N, T, hidden)
