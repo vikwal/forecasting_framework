@@ -346,7 +346,7 @@ wavenet:
   min_target_stations: 1
   n_blocks: 12
   n_workers: 8
-  station_node_features: all
+  station_node_features: [slope, aspect_sin, aspect_cos, tpi5, tpi75, tdi, z0, dist_coast]
   topo_features_path: '/mnt/lambda1/nvme1/topo_features'
   next_n_ecmwf: 4
   next_n_icond2: 4
