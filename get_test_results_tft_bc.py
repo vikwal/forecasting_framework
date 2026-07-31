@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """
 get_test_results_tft_bc.py — Evaluate a trained tft_bc model (from train_cl_tft_bc.py)
-on held-out test_files, in PHYSICAL units (inverse-transformed via each station's own
-StandardScaler), analogous to geostatistics/get_test_results_dcrnn.py and
-train_mtgnn.py::_metrics (RMSE_phys).
+on held-out test_files, in PHYSICAL units, analogous to
+geostatistics/get_test_results_dcrnn.py and train_mtgnn.py::_metrics (RMSE_phys).
 
-This is deliberately per-station: prepare_data_for_tft fits a *per-station* scaler_y
-(no global scaler is injected in the tft_bc pipeline), so each test station's
-predictions/targets must be inverse-transformed with that station's own scaler before
-computing errors — never with a scaler from a different station or a pooled scaler.
+The target ('wind_speed', scale_target=False) is never scaled, so scaler_y is always
+None and tools.get_y() skips inverse-transforming y — no scaler_y handling needed here.
+
+Feature scaling (scaler_x) is a different story: since the v3 preprocessing change
+(utils/data_cache.py::_fit_global_scaler_x), training uses ONE StandardScaler fitted
+across all training stations, injected into the pipeline via config['scaler_x'] — not a
+scaler fitted per-station or per-call. Evaluation MUST reuse that exact fitted scaler,
+or prepare_data_for_tft silently falls back to its "LOCAL SCALING STRATEGY" branch (a
+fresh per-station scaler fit on the fly) and every feature — including the 13 static
+features, which the local branch collapses to 0 — would be scaled differently than
+during training, with no error or warning. This script recovers the training scaler by
+recomputing the training run's cache_id (DataCache._get_config_hash, same inputs as
+train_cl_tft_bc.py) and loading it from that run's cached metadata, where it was stored
+as a side effect of caching config['scaler_x'] alongside the rest of the config.
 
 Also computes R² and Skill (vs. persistence baseline = last actual measurement before
 forecast start), identical definitions to geostatistics/homo_sampler.py::evaluate_homo_model,
@@ -24,6 +33,7 @@ Usage
 """
 
 import os
+import copy
 import json
 import pickle
 import argparse
@@ -36,7 +46,7 @@ import torch
 import optuna
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-from utils import preprocessing, tools, models
+from utils import preprocessing, tools, models, data_cache
 
 
 def main() -> None:
@@ -120,6 +130,51 @@ def main() -> None:
 
     features = preprocessing.get_features(config=config)
     freq = config['data']['freq']
+
+    # --- Recover the training run's global scaler_x (utils/data_cache.py::_fit_global_scaler_x) ---
+    # Training injects config['scaler_x'] before calling preprocessing.pipeline() (see
+    # data_cache.create_or_load_preprocessed_data); if we don't do the same here,
+    # prepare_data_for_tft silently falls back to fitting a fresh per-station scaler
+    # (LOCAL SCALING STRATEGY) — wrong feature scaling with no error. The fitted scaler
+    # is recoverable from the training run's own cache metadata: reproduce the exact
+    # cache_id train_cl_tft_bc.py would have computed (same config/features/model_name
+    # inputs to DataCache._get_config_hash) and pull config['scaler_x'] back out of it.
+    hash_config = copy.deepcopy(config)
+    if metadata.get('test_mode'):
+        # Mirrors train_cl_tft_bc.py --test-mode: files += val_files, val_files cleared,
+        # before the training run's hash/cache lookup — must match here bit-for-bit or
+        # we compute the wrong cache_id.
+        hash_config['data']['files'] = (list(hash_config['data'].get('files', []))
+                                         + list(hash_config['data'].get('val_files', [])))
+        hash_config['data']['val_files'] = []
+
+    cache = data_cache.DataCache()
+    train_cache_id = cache._get_config_hash(hash_config, features, model_name=args.model_tag)
+    train_cache_paths = cache.get_cache_paths(train_cache_id)
+    if not os.path.exists(train_cache_paths['metadata']):
+        raise RuntimeError(
+            f"Could not recover the training scaler_x: no cache metadata found at "
+            f"{train_cache_paths['metadata']} for recomputed training cache_id "
+            f"{train_cache_id}. Refusing to fall back to a freshly-fit per-station "
+            f"scaler, which would silently mismatch the trained model's feature scaling. "
+            f"Check that the config/hpo-study/model-tag match the original training run "
+            f"exactly and that its cache entry hasn't been evicted."
+        )
+    with open(train_cache_paths['metadata'], 'rb') as f:
+        train_cache_meta = pickle.load(f)
+    scaler_x = train_cache_meta['config'].get('scaler_x')
+    if scaler_x is None or not hasattr(scaler_x, 'mean_'):
+        raise RuntimeError(
+            f"Training cache metadata at {train_cache_paths['metadata']} (cache_id "
+            f"{train_cache_id}) has no fitted scaler_x. Refusing to fall back to a "
+            f"freshly-fit per-station scaler."
+        )
+    config['scaler_x'] = scaler_x
+    logger.info(
+        f"Recovered global scaler_x from training cache_id {train_cache_id} "
+        f"({len(getattr(scaler_x, '_ff_feature_cols', []))} feature columns, "
+        f"has_target_feature_scaler={hasattr(scaler_x, '_ff_target_feature_scaler')})"
+    )
 
     # Neighbour pool at test time: every station in the experiment. The test stations'
     # own measurements are model INPUTS here (their future values are what gets scored),

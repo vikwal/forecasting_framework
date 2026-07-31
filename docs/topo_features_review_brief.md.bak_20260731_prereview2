@@ -1,0 +1,934 @@
+# Review-Briefing: Topografische Features in DCRNN/MTGNN/WaveNet
+
+**Zweck dieses Dokuments:** Eigenständiges Briefing für ein Code-Review durch
+eine andere KI-Session, die den Diff noch nicht kennt. Fasst zusammen, was
+geändert wurde, warum, was bereits verifiziert ist, und was gezielt geprüft
+werden sollte. Für die vollständige Entstehungsgeschichte (Screening-Ergebnisse,
+Entscheidungsverlauf) siehe [`topo_rehpo_plan.md`](topo_rehpo_plan.md) — dieses
+Dokument hier ist der kompakte Review-Einstieg.
+
+**Branch:** `fix/mtgnn-topo-static-dim` (gepusht, Basis `origin/main`).
+Commits: `e7bb373` … `a748085` (10 Commits, `git log origin/main..HEAD`).
+Zusätzlich **uncommitted** Änderungen in `geostatistics/hpo_dcrnn.py`,
+`geostatistics/hpo_mtgnn.py`, `geostatistics/hpo_wavenet.py` (siehe Abschnitt 5) —
+`git diff` zeigt diese separat von `git diff origin/main..HEAD`.
+
+---
+
+## 1. Aufgabenstellung
+
+DCRNN, MTGNN und WaveNet (Windenergie-Prognose, NWP-Bias-Correction,
+`geostatistics/`) nutzten bisher keine topografischen Stationsmerkmale
+(Höhe, Hangneigung, Exposition, Rauigkeitslänge, Küstenentfernung etc. — 9
+Features, `TOPO_FEATURE_ORDER`), obwohl ein TFT-Vergleichsmodell diese als
+statische Features bereits nutzt. Ziel: topografische Information in alle
+drei Graph-Architekturen einbauen, und zwar für jede Architektur über **jeden
+Kanal, den sie strukturell unterstützt**:
+
+- **Adjazenz** — Topo fließt in eine gelernte Knoten-Embedding-Matrix ein, die
+  wiederum die Graphstruktur (Nachbarschaftsgewichte) formt. Nur MTGNN und
+  WaveNet haben eine lernbare/adaptive Adjazenz.
+- **Feature-Strom** — Topo wird als zusätzlicher, zeitkonstanter Kanal direkt
+  in den Zeitreihen-Input gespeist (kann also direkt als Prädiktor wirken,
+  nicht nur als Ähnlichkeitsmaß). Bei DCRNN der einzig mögliche Kanal (siehe
+  Abschnitt 2), bei MTGNN/WaveNet als **Broadcast** additiv zur Adjazenz.
+
+**Wichtige Design-Entscheidung** (bitte nicht als Inkonsistenz werten): es
+wurde *nicht* pro Architektur der empirisch beste Kanal gewählt, sondern
+einheitlich der Feature-Strom-Kanal (+ Adjazenz, wo vorhanden) als
+HPO-Zielkonfiguration festgelegt — explizit um Cherry-Picking auf einem
+Ein-Seed-Screening zu vermeiden (Winner's-Curse-Argument, siehe
+`topo_rehpo_plan.md` Abschnitt 1).
+
+## 2. Architektonischer Hintergrund je Modell
+
+### DCRNN (Li et al. 2018, fester Distanz-Graph)
+Der Stationsgraph nutzt einen **festen** Gaußkern auf Distanz
+(`exp(-d²/σ²)`), keine gelernte Adjazenz. Verifiziert (synthetischer Test,
+siehe `topo_rehpo_plan.md`): `edge_weight_from_attr` reduziert `edge_attr`
+ohnehin auf Spalte 0 (Distanz) — zusätzliche Kanten-Features (Höhendifferenz,
+Richtung) haben nachweislich **keinen** Effekt auf den Output. Ein
+Kanten-basierter Topo-Kanal ist bei DCRNN daher architektonisch nicht
+sinnvoll umsetzbar, ohne einen gelernten Kanten-Bias einzuführen — das würde
+die Fixed-vs-Learned-Graph-Vergleichsachse verwischen und wurde bewusst
+**nicht** gemacht. DCRNN bekommt Topo daher ausschließlich über den
+Feature-Strom (`station_static` wird bei jedem Zeitschritt in den
+DCGRU-Input konkateniert, ohnehin bestehender Mechanismus).
+
+### MTGNN (Wu et al. 2020, "Connecting the Dots")
+Selbst-adaptive Adjazenz `A = ReLU(tanh(α(M1M2ᵀ − M2M1ᵀ)))` mit
+`M1=tanh(αE1Θ1)`, `M2=tanh(αE2Θ2)`. Die hier verwendete induktive Adaption
+(freie Embedding-Matrix `E1,E2` ersetzt durch `emb_mlp(static_features)`) ist
+**explizit paper-sanktioniert** (Sec. 4.2: "E1=E2=Z, wobei Z eine statische
+Knoten-Feature-Matrix ist").
+
+### Graph WaveNet (Wu et al. 2019)
+Analog adaptive Adjazenz `softmax(ReLU(E1E2ᵀ))`. Die induktive Adaption ist
+hier **nicht** durch das Original-Paper sanktioniert (das Paper motiviert
+freie Embeddings explizit mit "keine Vorabkenntnis nötig"), wird aber über
+das MTGNN-Präzedenzurteil gerechtfertigt (selbe Kernautoren, ein Jahr später
+publiziert). Zusätzlich wurde die im Paper (Eq. 6) beschriebene, aber im
+bisherigen Code fehlende **vorgegebene Distanz-Adjazenz als zweiter
+Diffusionszweig** nachgerüstet (`_predefined_adjacency`,
+`geostatistics/wavenet/model.py`, Commit `735c4d4`) — per Flag
+`predefined_adj` (Default `False`, verifiziert rückwärtskompatibel).
+
+## 3. Der Broadcast-Mechanismus (Kern der Änderung)
+
+In `geostatistics/mtgnn/model.py` und `geostatistics/wavenet/model.py`
+(Commit `ffe34f8`) gibt es jeweils ein neues `broadcast_topo: bool = False`
+Flag. Wenn aktiv:
+
+```python
+proj_in = in_channels + (topo_dim if self.broadcast_topo else 0)
+...
+# im forward(), nach der NWP-Reassemblierung, vor input_proj:
+if self.broadcast_topo:
+    topo = static_single[:, 6:6 + self.topo_dim]
+    topo = topo.view(1, N, 1, self.topo_dim).expand(B, N, T, self.topo_dim)
+    x = torch.cat([x, topo], dim=-1)
+```
+
+D. h. dieselben Topo-Spalten, die auch in `emb_mlp` für die Adjazenz genutzt
+werden, werden zusätzlich zeitkonstant in jeden Zeitschritt des Modell-Inputs
+kopiert. **Wichtig für den Review:** dieser Pfad wurde per synthetischem Test
+verifiziert (`/tmp/.../verify_broadcast.py`, nicht Teil des Repos, siehe
+`topo_rehpo_plan.md` für die Methodik):
+- `state_dict`-Keys identisch bei `broadcast_topo=False` (nur `input_proj`
+  breiter bei `True`).
+- Alte Checkpoints laden `strict=True` in ein Modell ohne das Flag.
+- Störung von `static[:, 6:]` (Topo-Spalten) verändert den Output **nur**
+  über die Adjazenz, wenn `broadcast_topo=False`; deutlich stärker, wenn
+  `True` — bestätigt, dass der Kanal tatsächlich etwas trägt.
+- Der Topo-Kanal ist nachweislich zeitkonstant (kein Leck von Zukunftsinfo).
+
+## 4. Datenpfad: topografische Features laden
+
+Zwei parallele Lader in `geostatistics/stgnn/utils/topo_features.py`:
+
+- `load_topo_node_features(...)` (bereits vorher vorhanden, unverändert) —
+  liefert **paarweise Differenzen** für Kanten-Features.
+- `load_topo_station_features(...)` (**neu**, Commit `cd59326`) — liefert
+  **absolute**, pro-Station z-skalierte Werte für Knoten-Features. Wichtige
+  Details, die ein Reviewer prüfen sollte:
+  - Varianzstabilisierende Transforms vor der z-Skalierung:
+    `log(z0)`, `log1p(slope/tdi/elev_std/dist_coast)`,
+    `sign(x)·log1p(|x|)` für `tpi5/tpi75` (stark rechtsschief).
+  - `tdi` wird für perfekt flaches Gelände (`elev_std==0`) auf `0` gesetzt,
+    nicht mit dem Median aufgefüllt (undefiniertes Verhältnis bei
+    Null-Relief, keine fehlende Messung — semantischer Unterschied).
+  - z-Skalierung nutzt **nur die ersten `n_train` Stationen** (kein
+    Leakage aus Val/Test in die Skalierungsstatistik).
+  - `aspect_sin`/`aspect_cos` werden hier berechnet, nicht aus einer
+    Rohspalte geladen — bitte Trigonometrie-Vorzeichen gegenrechnen.
+
+`geostatistics/stgnn/config.py::parse_station_node_features(...)` (neu)
+löst `--station-node-features` (CLI, `'all'` / `'none'` / kommagetrennte
+Liste) gegen `TOPO_FEATURE_ORDER` auf; wirft bei unbekannten Namen.
+
+## 5. CLI-Flags in den Trainings-/HPO-Skripten
+
+Alle sechs Skripte (`train_dcrnn.py`, `train_mtgnn.py`, `train_wavenet.py`,
+`hpo_dcrnn.py`, `hpo_mtgnn.py`, `hpo_wavenet.py`) haben jetzt:
+
+- `--station-node-features NAMES` — überschreibt die Config, erlaubt
+  derselben Config-Datei beide Arme (mit/ohne Topo) zu bedienen.
+- `--broadcast-topo` (nur MTGNN/WaveNet, DCRNN hat keinen separaten Schalter,
+  da dessen einziger Kanal ohnehin der Feature-Strom ist) — aktiviert den in
+  Abschnitt 3 beschriebenen Mechanismus.
+- `--shuffle-node-features` — Permutationskontrolle: vertauscht die
+  Topo-Zeilen zufällig (`seed=0`) über die Stationen, behält Parameterzahl
+  und Randverteilungen bei, zerstört nur die Stations↔Terrain-Zuordnung.
+  Trennt "mehr Kapazität hilft" von "Terrain-Information hilft".
+
+**Kritischer Punkt für den Review — Cache-Platzierung:** in allen drei
+`hpo_*.py`-Skripten gibt es einen `GNNCache`-Hit/Miss-Zweig (Rohdaten werden
+gecacht, um wiederholtes Parquet-Laden zu vermeiden). Der Topo-Lade-Block
+**muss außerhalb beider Zweige** stehen (nach `if/else`, vor der ersten
+Nutzung), sonst bekommt ein Cache-Hit eine andere `static_dim` als ein
+Cache-Miss, und das beim Retrain aus den HPO-Best-Params gebaute Modell passt
+nicht zum während der HPO tatsächlich trainierten. Das war ein realer Bug
+(Commit `e7bb373`, ursprünglich nur für MTGNN gefixt) — beim Nachziehen von
+`hpo_dcrnn.py`/`hpo_wavenet.py` (uncommitted, siehe unten) wurde bewusst an
+derselben Stelle platziert. **Bitte im Diff verifizieren, dass der Topo-Block
+tatsächlich nach dem `GNNCache`-Block und vor der ersten
+`DCRNNConfig.from_yaml`/`HomoSampler`/Model-Konstruktion steht.**
+
+**Uncommitted (`git diff`, noch kein Commit):**
+- `hpo_dcrnn.py`: Import `parse_station_node_features`,
+  `load_topo_station_features`; 2 neue CLI-Flags; Topo-Konkatenation nach dem
+  Cache-Block; `station_node_features=args.station_node_features` an beide
+  `DCRNNConfig.from_yaml(...)`-Aufrufe (Basis-Config und Pro-Trial-Config).
+- `hpo_wavenet.py`: identisches Muster zu `train_wavenet.py`
+  (`parse_edge_features`-Fallback wenn `--station-node-features` nicht
+  gesetzt ist), `topo_feats` an `HomoSampler`, `static_dim`/`topo_dim`/
+  `broadcast_topo` an `GraphWaveNetModel`. Vorher hatte `hpo_wavenet.py`
+  **überhaupt keinen** Topo-Pfad (`static_dim` war hart auf `6` codiert).
+- `hpo_mtgnn.py`: Umstellung vom alten `parse_edge_features`-only-Pfad
+  (Zwischenstand aus Commit `e7bb373`, reiner Bugfix ohne Broadcast-Fähigkeit)
+  auf den vollen `parse_station_node_features`/`broadcast_topo`-Pfad, jetzt
+  identisch zu `train_mtgnn.py`.
+
+Alle drei wurden mit `--preprocess-only --station-node-features all
+[--broadcast-topo]` smoke-getestet (Datenladen bis zum Modellbau, kein
+Training) — liefen fehlerfrei durch, korrekte finale Breite geloggt (z. B.
+DCRNN: `3 geo + 9 topo (+1 type indicator) → 13`).
+
+## 6. Was noch NICHT abgesichert ist (bitte im Review besonders beachten)
+
+- **Keine Permutationskontrolle für MTGNN.** DCRNN und WaveNet haben je einen
+  `--shuffle-node-features`-Kontrolllauf gefahren (Ergebnis: Effekt bleibt
+  bei DCRNN, WaveNet — Kapazitäts-Confound ausgeschlossen). MTGNN nicht.
+- **Screening ist n=1 pro Arm/Architektur**, ein Fold (fold1/GRID), nicht
+  signifikanzgetestet. Ergebnisse (siehe `topo_rehpo_plan.md` Abschnitt 1)
+  sind Plausibilitätsindikatoren, keine belastbaren Effektgrößen.
+- **`ecmwf_feature_mode`/`icond2_feature_mode` u. ä. Config-Interaktionen**
+  mit dem neuen Topo-Pfad wurden nicht systematisch durchgetestet, nur die
+  Standard-`nwp`-Varianten der drei Architekturen.
+- Der WaveNet-`predefined_adj`-Zweig (Eq. 6) ist implementiert und
+  rückwärtskompatibel verifiziert, aber **nicht** Teil der geplanten
+  Re-HPO-Kampagne (Default `False` bleibt in allen 9 neuen Studien) — falls
+  im Code aktiv gesetzt irgendwo auftaucht, ist das ein Fehler.
+
+## 7. GPU-Verteilung für die geplante Re-HPO-Kampagne
+
+9 Studien (DCRNN/MTGNN/WaveNet × `base`/`nwp`/`nwp_hist`), Ziel-Arm
+einheitlich Feature-Strom (+Adjazenz wo vorhanden), auf 3 Hosts / 13 GPUs:
+
+| Host | GPUs | Typ | VRAM |
+|---|---|---|---|
+| w-lambdablade2 ("L2", lokal) | 4 | A100 | 80 GB |
+| l1 (w-lambdablade1) | 7 nutzbar (1 fremdbelegt von GPU 3) | RTX A6000 | 49 GB |
+| ws (10.166.32.252) | 2 | RTX 4090 | 24 GB |
+
+DCRNN und MTGNN mit 3 Replikaten pro Studie, WaveNet mit 2 (kleinerer
+Umfang) → 24 parallele Optuna-Worker:
+
+| GPU | Worker 1 | Worker 2 |
+|---|---|---|
+| A100 #0 (L2) | DCRNN_BASE r1 | MTGNN_BASE r1 |
+| A100 #1 (L2) | DCRNN_NWP r1 | MTGNN_NWP r1 |
+| A100 #2 (L2) | DCRNN_NWP_HIST r1 | MTGNN_NWP_HIST r1 |
+| A100 #3 (L2) | WaveNet_BASE r1 | WaveNet_NWP r1 |
+| A6000 #0 (l1) | WaveNet_NWP_HIST r1 | WaveNet_BASE r2 |
+| A6000 #1 (l1) | WaveNet_NWP r2 | WaveNet_NWP_HIST r2 |
+| A6000 #2 (l1) | DCRNN_BASE r2 | MTGNN_BASE r2 |
+| A6000 #4 (l1) | DCRNN_NWP r2 | MTGNN_NWP r2 |
+| A6000 #5 (l1) | DCRNN_NWP_HIST r2 | MTGNN_NWP_HIST r2 |
+| A6000 #6 (l1) | DCRNN_BASE r3 | MTGNN_NWP r3 |
+| A6000 #7 (l1) | DCRNN_NWP r3 | MTGNN_NWP_HIST r3 |
+| RTX4090 #0 (ws) | DCRNN_NWP_HIST r3 | — |
+| RTX4090 #1 (ws) | MTGNN_BASE r3 | — |
+
+Prinzipien: nie zwei Replikate derselben Studie auf derselben GPU
+(Ausfallsicherheit); alle Worker einer Studie teilen sich einen gemeinsamen
+Optuna-Studiennamen über die Postgres-`OPTUNA_STORAGE`-DB — **kritischer
+Fallstrick:** nie unterschiedliche `-s`/`--suffix`-Werte zwischen parallelen
+Workern derselben Studie verwenden, das fragmentiert eine Studie in mehrere;
+nur Log-Dateiname/Screen-Session-Name darf variieren. `ws` braucht NFS-Mounts
+von l1 (`/mnt/lambda1/nvme1`, `/mnt/lambda1/nvme2` — l1's `/etc/exports` und
+`ufw` mussten für `ws`s IP freigegeben werden) sowie die Python-Pakete
+`torch_geometric`, `pyarrow`, `psycopg2-binary`, die dort nachinstalliert
+wurden.
+
+## 8. Vorschlag für den Review-Umfang
+
+Sinnvolle Prioritäten für ein fokussiertes Review:
+
+1. `geostatistics/stgnn/utils/topo_features.py` — Korrektheit der Transforms
+   und der Train-only-Skalierung (Leakage-Risiko).
+2. Cache-Platzierung in allen drei `hpo_*.py` (Abschnitt 5) — Breiten-Bug wie
+   in `e7bb373` ist die Art Fehler, die leicht wiederkehrt.
+3. `broadcast_topo`-Forward-Pfad in `mtgnn/model.py`/`wavenet/model.py` —
+   Indexierung `static_single[:, 6:6+topo_dim]`, Zeitkonstanz, Backward-Kompatibilität
+   bei `broadcast_topo=False`.
+4. Konsistenz der drei `--station-node-features`/`--shuffle-node-features`-
+   Implementierungen zwischen `train_*.py` und `hpo_*.py` (sollen identisch
+   sein, damit Retrain aus HPO-Best-Params dasselbe Modell baut wie die HPO
+   selbst trainiert hat).
+
+---
+
+# 9. Review-Ergebnis (externe Session, 30. Juli 2026)
+
+Reviewt gegen den Code auf **l2**, Branch `fix/mtgnn-topo-static-dim`, plus die
+uncommitteten Änderungen in den drei `hpo_*.py`. Zusätzlich gegen die
+Paper-Positionierung in `Graphs_Wind_Speed_Forecasting/story_positioning.md`
+und `critical_assessment_and_journals.md` (Literaturaudit vom 27./28. Juli).
+
+**Gesamturteil:** Die Änderung ist konzeptionell richtig und für die
+Paper-Story sogar notwendig, nicht bloß nützlich (siehe 9.6). Die Umsetzung ist
+in den geprüften Kernpunkten sauber. Es gibt aber **zwei Befunde, die die
+geplante Kampagne in der jetzt vorgesehenen Form entwerten würden**, und beide
+sind vor dem Start zu beheben. Danach ist das eine solide Basis für die Studie.
+
+## 9.1 BLOCKER — l1 hat den Topo-Code überhaupt nicht
+
+Geprüft und bestätigt:
+
+```
+l1:  git rev-parse --abbrev-ref HEAD   ->  iaims26
+l1:  git branch -a                     ->  iaims26, main, remotes/origin/main
+l1:  ls geostatistics/stgnn/utils/topo_features.py  ->  No such file or directory
+l1:  grep -c "broadcast_topo" geostatistics/hpo_mtgnn.py geostatistics/train_mtgnn.py  ->  0, 0
+```
+
+Der Branch `fix/mtgnn-topo-static-dim` existiert auf l1 nicht einmal als
+Remote-Ref. Der Kampagnenplan in Abschnitt 7 verteilt aber **12 der 24 Worker
+auf l1** (A6000 #0, #1, #2, #4, #5, #6, #7).
+
+Warum das nicht auffällt und trotzdem alles zerstört: alle Worker einer Studie
+teilen sich über die Postgres-`OPTUNA_STORAGE` einen Studiennamen. Optuna
+speichert Hyperparameter und Zielwert, **nicht** die Modellklasse. l1-Worker
+würden also Trials eines Modells *ohne* Topo-Features in dieselbe Studie
+schreiben wie l2-Worker mit Topo. Kein Absturz, keine Warnung, keine
+Dimensionsfehlermeldung, weil jeder Worker sein Modell aus seinem eigenen Code
+baut. Das Ergebnis ist eine Studie, deren Trials aus zwei verschiedenen
+Modellklassen stammen, und deren „bestes" Trial damit bedeutungslos ist.
+
+Das ist derselbe Fehlertyp wie der Cache-Bug aus `e7bb373`, nur auf Host-Ebene
+und deutlich schädlicher, weil er alle neun Studien gleichzeitig betrifft.
+
+**Zu tun vor dem Start:**
+
+1. `fix/mtgnn-topo-static-dim` auf l1 auschecken, und auf `ws` ebenfalls prüfen
+   (dort ungeprüft, wurde aber laut Abschnitt 7 aus l1 heraus aufgesetzt).
+2. Auf allen drei Hosts denselben Commit-Hash verifizieren, am besten als
+   Startbedingung im Launch-Skript: `git rev-parse HEAD` vergleichen und
+   abbrechen, wenn sie abweichen.
+3. **Achtung beim Auschecken auf l1:** dort liegen uncommittete Änderungen auf
+   `iaims26`, unter anderem an `configs/dcrnn/config_wind_dcrnn_{base,fold1,2,3}.yaml`
+   und ein gelöschtes `config_wind_dcrnn_nwp_hist.yaml`. Zusätzlich liegt dort
+   der Ablations-Patch aus derselben Session (`neighbour_meas_available`,
+   `station_connectivity: none`, Backups als `*.bak_ablation`, siehe
+   `implementation_plan_ablations.md`). Vor dem Branchwechsel sichern, sonst
+   wandert der Patch unbemerkt mit oder geht verloren.
+
+Ergänzend: eine Zeile pro Worker ins Log, die Hostname, Commit-Hash,
+`station_node_features` und `broadcast_topo` ausgibt, macht so etwas im
+Nachhinein überhaupt erst nachweisbar.
+
+## 9.2 BLOCKER — MTGNN und WaveNet benutzen den falschen Topo-Lader
+
+Das ist der inhaltlich wichtigere Befund. Geprüft in allen sechs Skripten:
+
+| Skript | aufgerufene Funktion |
+|---|---|
+| `train_dcrnn.py:829`, `hpo_dcrnn.py:629` | `load_topo_station_features` |
+| `train_mtgnn.py:434`, `hpo_mtgnn.py:591` | **`load_topo_node_features`** |
+| `train_wavenet.py:418`, `hpo_wavenet.py:576` | **`load_topo_node_features`** |
+
+`load_topo_node_features` ist der Kanten-Differenz-Lader. Er hat drei
+Eigenschaften, die genau für den Broadcast-Kanal falsch sind:
+
+1. **Keine varianzstabilisierenden Transforms.** `_TOPO_TRANSFORMS` wird dort
+   nicht angewandt. Die Begründung im Docstring des anderen Laders trifft
+   wörtlich auf den Broadcast zu: *„tdi has median 0.90 but max 361 (sigma
+   29.7), so a plain z-score leaves 202 of 203 stations inside ±0.15 sigma and
+   one at +12 sigma. As an absolute node feature that constant offset goes
+   straight into every GRU gate / input channel, so the skew matters much more
+   here than in a pairwise difference."* Der Broadcast **ist** der
+   Absolutwert-Fall. MTGNN und WaveNet broadcasten also einen praktisch
+   konstanten Kanal plus einen Ausreißer in jeden Zeitschritt.
+2. **Skalierung über alle Stationen.** Die Funktion hat keinen `n_train`-Parameter,
+   `mean` und `std` werden über `train + val` gebildet. Val-Statistik leckt in
+   die Normalisierung. DCRNN vermeidet das, MTGNN und WaveNet nicht.
+3. **Keine tdi-Flachland-Behandlung.** Der `elev_std == 0 -> tdi = 0`-Zweig
+   fehlt, flaches Gelände bekommt den Median statt der physikalisch richtigen 0.
+
+**Konsequenz für die Paper-Story, und deshalb ist es ein Blocker:** der
+Architekturvergleich DCRNN vs. MTGNN vs. WaveNet ist damit durch die
+Feature-Vorverarbeitung konfundiert. Jeder Unterschied zwischen den
+Architekturen ist teilweise ein Unterschied zwischen zwei Skalierungspipelines.
+Genau diese Achse ist im Research Summary als „Kern-Modellvergleich der
+Publikation" ausgewiesen, und ein Reviewer aus der ST-GNN-Community, der
+ohnehin skeptisch ist (`shao2024basicts` zeigt, dass gemeldete Gewinne unter
+fairem Benchmarking verschwinden), wird genau hier hinsehen.
+
+**Zu tun:** MTGNN und WaveNet auf `load_topo_station_features` umstellen und
+`n_train` durchreichen. Der Lader liefert bereits ein `(N, F)`-Array in
+kanonischer Reihenfolge, `homo_sampler` erwartet ein Dict, also entweder den
+Rückgabewert in ein Dict umsetzen oder `_topo_arrays` direkt aus dem Array
+füllen. Der Kommentar in `homo_sampler.py:243` („already z-score normalised in
+load_topo_node_features") ist dann mit anzupassen.
+
+**Nebenwirkung, die vorher zu bedenken ist:** die fehlende
+Permutationskontrolle für MTGNN (Abschnitt 6) ist dadurch nicht weniger,
+sondern **mehr** wert. Solange der Topo-Kanal nach der Skalierung nahezu
+konstant ist, würde eine Permutation dieses Kanals folgerichtig nichts ändern,
+und das Ergebnis „Terrain trägt nichts" wäre ein Artefakt der Skalierung, nicht
+ein Befund über das Terrain. Die Kontrolle also erst **nach** dem Umstellen
+fahren, sonst misst sie das Falsche.
+
+## 9.3 Zwei kleinere Korrektheitsbefunde
+
+**Median-Imputation leckt, in beiden Ladern.** `values.median()` wird über alle
+Stationen gebildet, also inklusive Val, und erst danach greift die
+Train-only-z-Skalierung. Das widerspricht der eigenen Zusage im Docstring
+(*„instead of leaking val/test station statistics into the normalisation"*).
+Betrifft nur einen Skalar pro Feature und nur bei fehlenden Werten, ist aber
+genau die Art Detail, die in einem Review auffällt. Korrektur:
+`values.iloc[:n_train].median()`.
+
+**`aspect_sin`/`aspect_cos` bei undefinierter Exposition.** Auf perfekt flachem
+Gelände ist die Exposition undefiniert und `aspect` vermutlich NaN. Diese NaNs
+laufen in die Median-Auffüllung und bekommen damit eine willkürliche
+Himmelsrichtung zugewiesen. Semantisch richtig wäre `sin = cos = 0`, also der
+Nullvektor „keine Vorzugsrichtung" — exakt analog zur tdi-Behandlung, die an
+derselben Stelle bewusst und richtig gelöst wurde. Bitte prüfen, wie viele
+Stationen betroffen sind, und die beiden Fälle konsistent behandeln.
+
+## 9.4 Was geprüft wurde und in Ordnung ist
+
+- **Cache-Platzierung**, der explizit angefragte Punkt: in allen drei
+  `hpo_*.py` liegt der Topo-Block hinter dem Cache-Schreibblock und vor der
+  ersten Modell- beziehungsweise Sampler-Konstruktion
+  (`hpo_dcrnn` 614 -> 629 -> 747/895, `hpo_mtgnn` 569 -> 591 -> 742/775,
+  `hpo_wavenet` 554 -> 576 -> 726/758). Der Bug aus `e7bb373` ist nicht
+  zurückgekehrt.
+- **Der Offset 6 im Broadcast** ist korrekt. `homo_sampler._build_static` legt
+  `[sin_lat, cos_lat, sin_lon, cos_lon, alt_norm, type_indicator]` an, danach
+  Topo in `TOPO_FEATURE_ORDER`. `static_single[:, 6:6+topo_dim]` trifft damit
+  genau die Topo-Spalten und überspringt den Type-Indikator.
+- **`n_train`** ist korrekt: `all_ids = train_ids + val_ids` und
+  `N_train = len(train_ids)`, also selektiert `arr[:n_train]` tatsächlich die
+  Trainingsstationen.
+- Die Entscheidung, **einheitlich den Feature-Strom-Arm** als HPO-Ziel zu
+  nehmen statt pro Architektur den Screening-Sieger, ist richtig und sollte im
+  Paper genau mit dem Winner's-Curse-Argument begründet werden. Bei n=1 pro Arm
+  wäre die Auswahl sonst nicht verteidigbar.
+
+## 9.5 Ein Fallstrick, der heute noch nicht greift
+
+Die Train-only-Skalierung beruht auf `arr[:n_train]`, setzt also voraus, dass
+`station_ids` train-zuerst sortiert ist. Solange die drei Folds **zeitliche**
+Folds sind (fold1/2/3 unterscheiden sich in `test_start`/`test_end`, der
+Stationssplit ist fix), stimmt das.
+
+`story_positioning.md` Abschnitt 3.2 führt aber **k-fold räumliche
+Kreuzvalidierung** als nicht verhandelbaren Punkt 2 der Umsetzungsreihenfolge —
+ohne sie ruht die zentrale induktive Aussage auf 50 einmalig gezogenen
+Stationen, was genau die Schwäche ist, die `baran2024clustering` hat und die ein
+Referee mit Hydrologie-Hintergrund benennen wird. Sobald der Stationssplit pro
+Fold wechselt, muss `all_ids` **pro Fold** neu geordnet und die Topo-Skalierung
+**pro Fold** neu gefittet werden. Sonst leckt ab diesem Moment jede Fold-Testmenge
+in die Skalierungsstatistik. Bitte jetzt schon als Kommentar an der Stelle
+vermerken, weil die Umstellung ansonsten still schiefgeht.
+
+## 9.6 Passung zur Paper-Story
+
+Hier ist die Nachricht gut. Contribution (i) in `story_positioning.md`
+beansprucht wörtlich, dass die Zuordnung von Standort zu Korrektur gemeinsam
+aus *statischen topographischen Deskriptoren*, aus der leadtime-aufgelösten
+NWP-Prognose und aus den Live-Beobachtungen der Nachbarstationen gelernt wird.
+Ohne Topo-Features in den Graphmodellen war dieser Anspruch für DCRNN, MTGNN
+und WaveNet schlicht nicht eingelöst: die Modelle hatten keinerlei Möglichkeit
+zu wissen, *an was für einem Standort* sie korrigieren. Die Änderung ist damit
+keine Verbesserung, sondern eine Voraussetzung.
+
+Zweitens: das Alleinstellungsargument gegenüber den fünf induktiven Vorarbeiten
+ist ausdrücklich, dass bodennaher Wind stärker als Temperatur von lokaler
+Rauigkeit, Abschattung und Geländeexposition kontrolliert wird, und dass
+deshalb eine *gelernte, terrainkonditionierte* Korrektur hier mehr bringen soll
+als in den publizierten Temperaturfällen. Das ist eine testbare Vorhersage, und
+die Topo-Features sind der Mechanismus, der sie überhaupt prüfbar macht.
+
+---
+
+# 10. Was zusätzlich in den Experimentplan gehört
+
+Die ersten drei Punkte kosten kaum etwas und ändern, was das Paper behaupten
+kann. Der Rest sind Kampagnen-Entscheidungen, die jetzt fallen sollten, weil
+sie sonst eine zweite HPO-Runde erzwingen.
+
+## 10.1 Die Permutationskontrolle als berichtetes Experiment, nicht als Sanity-Check
+
+`--shuffle-node-features` ist derzeit als interne Kontrolle gedacht. Sie sollte
+ein **Ergebnis im Paper** werden, aus einem Grund, der außerhalb dieses Repos
+liegt: die Schwesterstudie (iAIMS26, TFT auf Windleistung) fand, dass physische
+Statics die Zero-Shot-Generalisierung **nicht** tragen (0.813 gegen 0.818,
+p = 0.44), weil die 48 h Leistungshistorie im Encoder den Standort implizit
+identifiziert. Hier ist die Historie der Zielstation maskiert, dieser Kanal
+existiert also nicht. Wenn Topo hier trägt und dort nicht, ist das ein
+sauberer, mechanistisch erklärter Kontrast zwischen zwei eigenen Studien und
+ein starkes Argument dafür, dass die induktive Aufgabe qualitativ anders ist
+als die transduktive. Wenn es hier ebenfalls nicht trägt, muss man das wissen,
+bevor Contribution (i) so formuliert wird.
+
+Konkret: je einen Shuffle-Lauf pro Architektur mit den finalen
+Hyperparametern, gepaart pro Station gegen den echten Lauf, Wilcoxon mit
+Holm-Korrektur. Für MTGNN erst nach der Korrektur aus 9.2.
+
+## 10.2 Terrain-Stratifizierung als Auswertung, nicht als eigener Lauf
+
+Axis B der Paper-Story verlangt Skill aufgeschlüsselt nach *Terrain-Unähnlichkeit
+zur Trainingsmenge*. Die dafür nötigen Größen liegen nach dieser Änderung
+vollständig vor: die neun z-skalierten Topo-Spalten pro Station. Distanzmaß im
+Terrain-Raum zur nächsten Trainingsstation, dann Skill dagegen plotten. Kostet
+keine GPU-Minute und ist eine der vier Kurven, die Axis B ausmachen. Sollte im
+Plan stehen, damit die Topo-Arrays nach dem Training mit abgespeichert werden
+und nicht rekonstruiert werden müssen.
+
+## 10.3 Die `next_n_ecmwf`-Randverteilung mitschreiben
+
+Beide Suchräume haben `next_n_ecmwf` mit unterer Schranke 0, das Modell darf
+ECMWF also verwerfen. Über neun Studien mit je mehreren Replikaten entsteht
+damit ohne Zusatzkosten eine sehr belastbare Sensitivitätsaussage zu
+Contribution (iv), der Merkmalsebenen-Fusion zweier NWP-Systeme. Das ist die
+stärkere Evidenzform als ein einzelner Ablationslauf, weil das Modell die
+Quelle verwerfen *darf* und es nicht tut. Auszuwerten ist die Randverteilung
+über alle COMPLETE-Trials plus `optuna.importance`, nicht nur das beste Trial.
+
+Wichtig: wenn die Trials überwiegend 0 wählen, ist Contribution (iv) nicht zu
+halten und muss zu einer Methodennotiz degradiert werden. Das sollte man aus
+den eigenen Studien erfahren, nicht aus einem Gutachten.
+
+## 10.4 Die Variantenliste jetzt festlegen, nicht nach der Kampagne
+
+Die Kampagne fährt 3 Architekturen × {base, nwp, nwp_hist}. Vier Anmerkungen
+dazu, alle mit Konsequenz für die Anzahl der Studien:
+
+- **`base` verteidigt nur Contribution (iv)**, also die am stärksten gefährdete.
+  „Erster heterogener Graph mit Gitterpunkt-Knoten" ist durch `yang2025offgrid`
+  v1, `wu2024weathergnn`, `blasone2025gnn4cd` und `low2026spatialsupport`
+  erledigt. Zusätzlich ist `base` derzeit **keine saubere Ablation**: sein
+  HPO-Raum ist enger als der von `nwp` (`next_n_icond2` 1–4 statt 1–7, `K_hop`
+  1–2 statt 1–3), die NWP-Variante darf also strikt mehr. Behält man `base`,
+  müssen die Räume harmonisiert werden.
+- **`nwp_hist` ist keine Ablation mehr, sondern tragende Evidenz** für
+  Contribution (iii), die Kurve „was kostet es, keine lokale Historie zu haben".
+  Sie interpoliert zwischen `nwp` bei null Tagen und `nwp_hist` bei voller
+  Historie. Also unbedingt behalten, aber im Paper anders einordnen.
+- **Die Aggregations-Ablation fehlt**, die das Literaturaudit als faktisch
+  verpflichtend führt: GATv2 ersetzt durch feste inverse-Distanz-Gewichte über
+  dieselben k Gitterpunkte. Sie ist die Ablation, die `yang2025offgrid` fehlt,
+  und sie beantwortet den Referee-Einwand „das ist doch nur Interpolation".
+  Kostenvorteil gegenüber `base`: identische Architektur mit eingefrorenen
+  Attention-Koeffizienten, also gleiche Dimensionen und gleiche Module, damit
+  ist das Erben der Hyperparameter inhaltlich vertretbar und es braucht keine
+  eigene Studie.
+- **Die zwei neuen Ablationen aus `implementation_plan_ablations.md` sind nicht
+  im Plan**: `neighbour_meas_available: false` (kein Stationsmesswert irgendwo)
+  und `station_connectivity: none` (keine Stationskanten). Code liegt auf l1,
+  17 Verifikationstests grün. Zusammen zerlegen sie den Beitrag des
+  Stationsgraphen in den Messkanal und den Geometrie-/Kontextkanal und
+  entscheiden, ob Contribution (i) ihren zentralen Abgrenzungssatz halten kann.
+  Wenn sie nicht in dieser Kampagne mitlaufen, braucht es später eine dritte
+  HPO-Runde.
+
+Erwägenswert als Zuschnitt: **volles Variantenraster nur auf der
+Headline-Architektur**, MTGNN und WaveNet nur in der `nwp`-Konfiguration als
+Architekturvergleich. Das ist übliche Praxis, schrumpft die Studienzahl
+deutlich, und die frei werdende Rechenzeit deckt die Ablationen aus dem
+vorigen Absatz plus die räumliche k-fold-CV ab, die für die zentrale Aussage
+wichtiger ist als die dritte Architektur in der dritten Variante.
+
+## 10.5 Was ohnehin noch aussteht
+
+Aus dem Literaturaudit, unabhängig von dieser Änderung, aber im selben
+Kampagnenfenster zu planen, weil beides Rechenzeit braucht:
+
+- **k-fold räumliche Kreuzvalidierung** statt des einzelnen 103/50/50-Splits.
+  Siehe auch 9.5, die Topo-Skalierung muss dafür pro Fold neu gefittet werden.
+- **Klassische Baselines**: Quantile Regression Forest und ein lokales
+  MOS-Modell. Beide trainieren aus deterministischem NWP, beide sind Standard,
+  und `schulz2022machine` zeigt, dass der QRF schwer zu schlagen ist. Laut
+  Audit die billigste verfügbare Glaubwürdigkeitsinvestition.
+- **Saisonale Stratifizierung** oder ein Testfenster über einen Winter. Das
+  Fenster August bis Oktober 2025 schließt die Sturmsaison aus, die die
+  deutsche Windstatistik dominiert. Diese Nachfrage kommt sicher.
+
+---
+
+# 11. Beschlossener Kampagnenzuschnitt (Stand 30. Juli 2026)
+
+Entscheidungen des Autors nach dem Review in Abschnitt 9. Dieser Abschnitt ist
+die verbindliche Fassung und ersetzt die Tabelle in Abschnitt 7.
+
+## 11.1 Studienliste, 11 statt 9
+
+| # | Studie | Config-Stem | Zweck im Paper |
+|---|---|---|---|
+| 1 | DCRNN_BASE | `wind_dcrnn_base` | Ablation `nwp_nodes` |
+| 2 | DCRNN_NWP | `wind_dcrnn` | Headline-Modell |
+| 3 | DCRNN_NWP_HIST | `wind_dcrnn_nwp_hist` | Endpunkt der Gauging-Kurve |
+| 4 | **DCRNN_B** | `wind_dcrnn_nomeas` | **neu**, kein Stationsmesswert irgendwo |
+| 5 | **DCRNN_C** | `wind_dcrnn_nograph` | **neu**, keine Stationskanten |
+| 6-8 | MTGNN × base/nwp/nwp_hist | wie bisher | Architekturvergleich |
+| 9-11 | WaveNet × base/nwp/nwp_hist | wie bisher | Architekturvergleich |
+
+**B und C laufen nur für DCRNN**, und beide **ohne historische Messwerte an der
+Zielstation** (`hist_wind_available: false`, ererbt aus `config_wind_dcrnn.yaml`).
+Das ist nicht nur konsistent, es ist notwendig: behielte die Zielstation ihre
+eigene Historie, gäbe es weiterhin Messwerte im Graphen und die Aussage „keine
+Station trägt Messwerte" wäre schlicht falsch. Die Ablation wäre inkohärent.
+
+Warum B und C eigene Studien bekommen statt die Hyperparameter zu erben: A minus B
+ist die tragende Zahl für den Abgrenzungssatz von Contribution (i), also dafür,
+dass die Korrektur auch aus den Live-Beobachtungen der Nachbarn gelernt wird.
+Erben benachteiligt systematisch die Ablation. Solange die Ablation gut
+abschneidet, ist das konservativ und unproblematisch. Das erwartete Ergebnis ist
+aber, dass B schlechter ist, und genau dann lässt sich „Nachbarmessungen tragen
+etwas" nicht mehr von „die geerbten Hyperparameter passten für B nicht" trennen.
+Der Confound greift also präzise die Schlussfolgerung an, die gezogen werden soll.
+
+Keine eigene Studie brauchen: die **IDW-Ablation** (identische Architektur, nur
+eingefrorene Attention-Koeffizienten, also gleiche Dimensionen und Module minus
+dem Attention-MLP), die **Shuffle-Kontrolle** (muss per Definition dieselben
+Hyperparameter nutzen, sonst ist sie keine Kontrolle) und die **Fold-Trainings**
+(ziehen sich die Parameter über den `_fold\d+`-Strip aus der Studie ihrer Variante).
+
+## 11.2 `direction_to_adj` wird global entfernt
+
+Der Parameter hat nirgends etwas gebracht und wird aus dem HPO-Suchraum genommen
+sowie überall fest auf `false` gesetzt. Betrifft nur DCRNN, MTGNN und WaveNet
+haben eigene Adjazenzmechanismen.
+
+Zwei Nebenwirkungen, beide willkommen:
+
+- Der DCRNN-Suchraum verliert eine Dimension, die Suche wird etwas effizienter.
+- Variante C muss dadurch nur noch `K_hop` und `next_n_neighbors` pinnen statt
+  drei Parameter.
+
+Und eine Klarstellung, die die Interpretation von C **verbessert**: laut
+Abschnitt 2 reduziert `edge_weight_from_attr` die `edge_attr` ohnehin auf Spalte 0,
+also die Distanz. Ohne `direction_to_adj` ist der DCRNN-Stationsgraph damit ein
+reiner fester Distanzkern. Die Differenz B minus C misst also sauber den Wert
+eines distanzgewichteten räumlichen Kontexts, ohne Beimischung von Richtungs-
+oder Höheninformation. Das ist im Paper leichter zu erklären als die vorherige
+Situation.
+
+## 11.3 Suchraum von Variante C
+
+`K_hop` und `next_n_neighbors` werden gepinnt und aus dem `params`-Block
+entfernt, `next_n_neighbors` auf das Minimum. Begründung: ohne Stationskanten
+kann keiner der beiden das Modell beeinflussen. Das ist nicht vermutet, sondern
+verifiziert — der Permutationstest der Ablations-Verifikation zeigt, dass die
+Ausgabe an einem Knoten bitgleich bleibt, wenn die Features aller anderen Knoten
+permutiert werden (`0.00e+00`), während dieselbe Permutation mit Delaunay-Kanten
+sehr wohl durchschlägt (`2.22e+00`).
+
+`next_n_neighbors` ist dabei nicht nur wirkungslos, sondern teuer: die
+Nachbarknoten belegen Speicher und Rechenzeit und tragen nachweislich nichts bei.
+Am Minimum wird C dadurch spürbar billiger pro Trial als A oder B, was den
+Einzel-Worker aus 11.4 teilweise kompensiert.
+
+Im Suchraum von C bleiben: `next_n_icond2`, `next_n_ecmwf`, `nwp_heads`,
+`nwp_out_per_head`, `hidden`, `num_layers`, `dropout`, `lr`, `weight_decay`,
+`grad_accum`, `horizon_decay`, `teacher_forcing_ratio`, `gradient_clip`. Die
+NWP-Attention ist von dieser Ablation nicht betroffen, ihre Parameter bleiben
+also alle sinnvoll.
+
+## 11.4 Worker-Verteilung, ersetzt die Tabelle aus Abschnitt 7
+
+Die beiden WaveNet-Doppel, die als **zweiter Worker** auf einer GPU lagen
+(`WaveNet_BASE r2` auf A6000 #0 und `WaveNet_NWP_HIST r2` auf A6000 #1), werden
+durch B und C ersetzt. Gesamtzahl bleibt 24 Worker.
+
+| GPU | Worker 1 | Worker 2 |
+|---|---|---|
+| A100 #0 (L2) | DCRNN_BASE r1 | MTGNN_BASE r1 |
+| A100 #1 (L2) | DCRNN_NWP r1 | MTGNN_NWP r1 |
+| A100 #2 (L2) | DCRNN_NWP_HIST r1 | MTGNN_NWP_HIST r1 |
+| A100 #3 (L2) | WaveNet_BASE r1 | WaveNet_NWP r1 |
+| A6000 #0 (l1) | WaveNet_NWP_HIST r1 | **DCRNN_B r1** |
+| A6000 #1 (l1) | WaveNet_NWP r2 | **DCRNN_C r1** |
+| A6000 #2 (l1) | DCRNN_BASE r2 | MTGNN_BASE r2 |
+| A6000 #4 (l1) | DCRNN_NWP r2 | MTGNN_NWP r2 |
+| A6000 #5 (l1) | DCRNN_NWP_HIST r2 | MTGNN_NWP_HIST r2 |
+| A6000 #6 (l1) | DCRNN_BASE r3 | MTGNN_NWP r3 |
+| A6000 #7 (l1) | DCRNN_NWP r3 | MTGNN_NWP_HIST r3 |
+| RTX4090 #0 (ws) | DCRNN_NWP_HIST r3 | — |
+| RTX4090 #1 (ws) | MTGNN_BASE r3 | — |
+
+Replikate danach: DCRNN base/nwp/nwp_hist je 3, MTGNN je 3, WaveNet_NWP 2,
+WaveNet_BASE 1, WaveNet_NWP_HIST 1, DCRNN_B 1, DCRNN_C 1.
+
+**Zwei Konsequenzen, die vor dem Start bedacht sein wollen:**
+
+1. **B und C sind mit je einem Worker die langsamsten Studien der Kampagne.** Bei
+   gleichem Trial-Budget brauchen sie rund die dreifache Wandzeit der
+   Drei-Replikat-Studien und bestimmen damit das Ende der Kampagne. C ist durch
+   den beschnittenen Raum und das gepinnte `next_n_neighbors` billiger, B nicht.
+   Entweder Trial-Budget für B und C reduzieren, oder einplanen, dass sie
+   nachlaufen.
+2. **Kein Failover für B und C.** Das Prinzip „nie zwei Replikate derselben
+   Studie auf derselben GPU" greift bei einem einzelnen Worker nicht mehr;
+   stirbt er, steht die Studie. Da B und C für Contribution (i) tragend sind und
+   WaveNet nur den Architekturvergleich stützt, wäre die Priorität streng
+   genommen umgekehrt. Wer B und C je zwei Replikate geben will, gibt zusätzlich
+   `WaveNet_NWP r2` ab. Auf den beiden 4090 ist kein Platz, die 24 GB tragen nur
+   einen Worker.
+
+## 11.5 Pre-Flight-Checkliste
+
+Abzuarbeiten **bevor** ein Worker startet. Die ersten beiden Punkte sind die
+Blocker aus 9.1 und 9.2.
+
+**Blocker 1 — Code-Stand auf allen Hosts.** `l1` steht auf Branch `iaims26` und
+hat den Topo-Code überhaupt nicht (`topo_features.py` fehlt, null Treffer für
+`broadcast_topo`, der Branch `fix/mtgnn-topo-static-dim` existiert dort nicht
+einmal als Remote-Ref). Der Plan setzt aber 12 der 24 Worker auf l1. Da alle
+Worker einer Studie sich über die Postgres-Storage einen Studiennamen teilen und
+Optuna nur Hyperparameter und Zielwert speichert, nicht die Modellklasse, würden
+l1-Worker Trials eines Modells ohne Topo in dieselbe Studie schreiben. Kein
+Absturz, keine Warnung, das beste Trial wäre bedeutungslos, und zwar in allen
+Studien gleichzeitig.
+
+- [ ] `fix/mtgnn-topo-static-dim` auf l1 auschecken, auf `ws` prüfen
+- [ ] Vor dem Branchwechsel auf l1 die uncommitteten Änderungen sichern: die vier
+      dcrnn-Configs, das gelöschte `config_wind_dcrnn_nwp_hist.yaml`, und den
+      Ablations-Patch (`neighbour_meas_available`, `station_connectivity: none`,
+      Backups liegen als `*.bak_ablation`)
+- [ ] `git rev-parse HEAD` auf allen drei Hosts vergleichen, als Startbedingung
+      ins Launch-Skript, Abbruch bei Abweichung
+- [ ] Eine Zeile pro Worker ins Log: Hostname, Commit-Hash,
+      `station_node_features`, `broadcast_topo`. Ohne das ist ein solcher Fehler
+      im Nachhinein nicht nachweisbar
+
+**Blocker 2 — MTGNN und WaveNet auf den richtigen Topo-Lader umstellen.** Alle
+vier Skripte rufen `load_topo_node_features` (Kanten-Differenz-Lader), nur DCRNN
+ruft `load_topo_station_features`. Damit fehlen MTGNN und WaveNet die
+varianzstabilisierenden Transforms, ihre z-Skalierung läuft über `train + val`
+statt nur über Train, und die tdi-Flachland-Behandlung fehlt. Der
+Architekturvergleich wäre durch die Vorverarbeitung konfundiert.
+
+- [ ] `train_mtgnn.py`, `hpo_mtgnn.py`, `train_wavenet.py`, `hpo_wavenet.py` auf
+      `load_topo_station_features` umstellen, `n_train` durchreichen
+- [ ] Rückgabewert ist ein `(N, F)`-Array, `homo_sampler` erwartet ein Dict:
+      entweder umsetzen oder `_topo_arrays` direkt aus dem Array füllen
+- [ ] Kommentar in `homo_sampler.py:243` anpassen („already z-score normalised in
+      load_topo_node_features")
+- [ ] Danach die fehlende MTGNN-Permutationskontrolle fahren, **nicht vorher**:
+      solange der Topo-Kanal nach der Skalierung nahezu konstant ist, ändert eine
+      Permutation folgerichtig nichts, und „Terrain trägt nichts" wäre ein
+      Skalierungsartefakt statt ein Befund
+
+**Weitere Punkte:**
+
+- [ ] Median-Imputation in **beiden** Ladern auf `values.iloc[:n_train].median()`
+      umstellen (leckt derzeit Val-Statistik, entgegen der Zusage im Docstring)
+- [ ] `aspect_sin`/`aspect_cos` bei undefinierter Exposition auf 0 setzen statt
+      Median, analog zur tdi-Behandlung. Vorher zählen, wie viele Stationen
+      betroffen sind
+- [ ] `direction_to_adj` aus allen DCRNN-`params`-Blöcken entfernen und in den
+      `dcrnn`-Sektionen auf `false` setzen
+- [ ] Ablations-Patch auf den Topo-Branch portieren. **Geprüft: alle sechs Anker
+      existieren dort mit exakt den erwarteten Trefferzahlen** (Sampler-Konstruktor 1,
+      Maskierung train 1, Maskierung eval 1, evaluation-Signatur 2, kwarg-Stellen
+      2/1/1, delaunay-Zweig 1). Das Patch-Skript läuft also unverändert durch
+- [ ] C-Configs generieren, sobald der Patch auf dem Branch liegt (B-Configs
+      existieren bereits auf l1)
+- [ ] Falls BASE behalten wird: HPO-Ränge mit NWP harmonisieren
+      (`next_n_icond2` derzeit 1–4 gegen 1–7, `K_hop` 1–2 gegen 1–3). Sonst darf
+      die NWP-Variante strikt mehr und der Vergleich ist keine saubere Ablation
+
+## 11.6 Eine offene Entscheidung, die die Stationslisten bestimmt
+
+Die HPO validiert auf `n_val_stations: 50` aus `val_files`. Führt das Paper
+später räumliche k-fold-Kreuzvalidierung, tauchen genau diese Stationen in
+irgendeinem Fold als Teststationen auf, und die Hyperparameter wären in Kenntnis
+dieser Stationen gewählt worden. Bei einer Studie, deren Kernaussage „Skill an
+vollständig zurückgehaltenen Stationen" lautet, ist das die Art Detail, die
+auffällt.
+
+Zwei vertretbare Auswege: entweder eine Gruppe Stationen komplett aus der HPO
+heraushalten und nur dort die Headline-Zahl berichten, oder es offenlegen und
+begründen. Die Entscheidung fällt vor dem Start, weil sie die Stationslisten der
+Kampagne festlegt.
+
+---
+
+# 12. Räumliche Kreuzvalidierung (Stand 31. Juli 2026) — neu zu reviewen
+
+**Dieser Abschnitt ist der eigentliche Gegenstand des zweiten Reviews.** Er
+ersetzt die offene Entscheidung aus 11.6 und erledigt den Fallstrick aus 9.5
+sowie den ersten Punkt aus 10.5. Der Rest des Dokuments beschreibt weiterhin die
+Topo-Features und ist unverändert gültig.
+
+## 12.1 Was sich geändert hat und warum
+
+Die drei Fold-Configs je Architektur unterschieden sich bisher **nur im
+Zeitfenster** (`test_start`/`test_end`), der Stationssplit war über alle Folds
+identisch. Zusätzlich lief **innerhalb** der HPO eine zweite, davon unabhängige
+CV: eine zeitliche Expanding-Window-Schleife über `hpo.n_folds: 3`, deren
+Fold-Grenzen aus `test_start` abgeleitet wurden (`hpo_*.py`). Beide Ebenen maßen
+zeitliche Robustheit.
+
+Die zentrale Aussage der Studie ist aber Generalisierung auf ungesehene
+*Standorte*. Deshalb rotieren jetzt die **Stationen** statt der Zeitfenster:
+
+- Die 153 Stationen aus `files + val_files` sind in `configs/spatial_folds.yaml`
+  in drei Gruppen à 51 partitioniert. Jede Station ist genau einmal Val, sonst
+  Train (102/51 pro Fold).
+- Die zeitliche Expanding-Window-CV in den HPO-Skripten ist durch diese drei
+  räumlichen Folds ersetzt: ein Trial trainiert dreimal, Optuna bekommt wie
+  bisher den Mittelwert.
+- Das Zeitfenster ist in allen drei Folds **identisch** (siehe 12.3).
+
+Die 50 `test_files` bleiben unangetastet und sind in keinem Fold Ziel — die
+Frage aus 11.6 ist damit im Sinne von „Gruppe komplett aus der HPO heraushalten"
+entschieden.
+
+## 12.2 Warum nicht geblockt (die übliche Empfehlung)
+
+Die Lehrbuchvariante für räumliche CV — zusammenhängende Blöcke zurückhalten —
+ist hier **architekturfeindlich**, weil Nachbarstationen bei dieser Architektur
+ein bewusster Input sind und kein Leckagekanal. Ein geblockter Split nimmt den
+Zielstationen genau den Messkanal weg, den das Modell nutzen soll. Gemessen an
+den echten 153 Stationen (geodätisch, WGS-84):
+
+| Strategie | größte Nachbar-Lücke (Val→nächste Train) | Terrain-Ungleichgewicht |
+|---|---|---|
+| Geblockt (Längengrad-Streifen) | 261.7 km | 0.252 |
+| Zufällig | 85.6 km | 0.197 |
+| **Gestreut + terrain-balanciert** | **70.8 km** | **0.046** |
+
+Verwendet wird gestreut + terrain-balanciert: räumlich nahe Tripel bilden, aus
+jedem Tripel geht eine Station in einen Fold; die Zuordnung innerhalb der Tripel
+wird per lokaler Suche so permutiert, dass die Terrain-Mittel der Folds
+möglichst gleich sind. Damit liegt zu jeder Val-Station garantiert ihr
+unmittelbarer räumlicher Partner im Train-Satz.
+
+Erzeugt von `geostatistics/make_spatial_folds.py` (`--compare` reproduziert die
+Tabelle, `--n-val` variiert die Fold-Größe, `--write` schreibt die YAML).
+
+**Zwei Zahlen, die ein Reviewer kennen sollte:**
+
+- Die 51/51/51-Folds erreichen median 40.8 km Abstand Val→nächste Train-Station.
+  Die **Untergrenze** des 153er-Netzes (jede Station zur nächsten der 152
+  anderen) liegt bei median 39.3 km — die Folds liegen also praktisch auf dem
+  Optimum. Eine Variante mit kleineren Val-Mengen (30/30/30, 123 Trainings-
+  nachbarn) wurde durchgerechnet und bringt **nichts** (median 40.7 km), kostet
+  aber Terrain-Balance (0.120 statt 0.046) und statistische Aussagekraft.
+- Die finale Testauswertung ist mit median 23.9 km **dichter vernetzt** als jeder
+  HPO-Fold (50 Ziele gegen alle 153 Nachbarn). Das ist eine Eigenschaft des
+  fixen, per Kennard-Stone gewählten Testsets, nicht der Fold-Konstruktion, und
+  es geht in die unkritische Richtung: die Hyperparameter werden unter etwas
+  dünnerer Vernetzung gewählt, als das finale Modell vorfindet. Gehört so in die
+  Methodik.
+
+## 12.3 Das Zeitfenster — drei Perioden, in jedem Fold gleich
+
+| Periode | Fenster | Rolle |
+|---|---|---|
+| Training | 2023-07-24 → 2024-07-31 | ein Jahr |
+| Validierung | 2024-08-01 → 2025-07-31 | ein Jahr |
+| Test | ab 2025-08-01 | zurückgehalten, nur `--test-mode` |
+
+Die Validierung ist damit räumlich **und** zeitlich out-of-sample: 51 ungesehene
+Stationen in einem ungesehenen Jahr. Die Folds unterscheiden sich ausschließlich
+in den Stationen.
+
+Umgesetzt über **einen** neuen Config-Schlüssel, weil die Skripte Run-Paare
+ohnehin an einer Zeitgrenze teilen — es kam nur die zweite Grenze dazu:
+
+```yaml
+data:
+  val_start:  '2024-08-01'   # Train davor, Validierung danach
+  test_start: '2025-08-01'   # ab hier zurueckgehalten (finaler Test)
+```
+
+`--test-mode` schaltet `val_start` bewusst ab: dort *ist* die Testperiode ab
+`test_start` die Val-Menge, mit `test_files` als Zielstationen. Damit ist auch
+der Einwand aus 10.5 („Testfenster schließt die Sturmsaison aus") erledigt — das
+Testfenster umfasst jetzt ein volles Jahr ab August 2025 inklusive Winter.
+
+## 12.4 Geänderte Dateien
+
+| Datei | Änderung |
+|---|---|
+| `geostatistics/spatial_cv.py` | **neu** (~130 Z.) — lädt/validiert `spatial_folds.yaml`, bildet Stationspool und Fold-Indizes, löst `hpo.cv_mode` auf |
+| `geostatistics/make_spatial_folds.py` | überarbeitet — geodätisch statt Haversine, `--n-val`/`--n-folds`/`--compare`/`--write` |
+| `geostatistics/fold_dashboard.py` | **neu** — Streamlit-Karte der Train/Val/Test-Aufteilung je Fold, Nachbar-Kennzahlen, Terrain-Balance |
+| `geostatistics/stgnn/utils/topo_features.py` | `load_topo_station_features(_dict)` nimmt wahlweise `n_train` **oder** `train_idx` |
+| `geostatistics/hpo_{dcrnn,mtgnn,wavenet}.py` | `cv_mode`-Weiche, Fold-Pläne statt `fold_splits`, Scaler und Topo-z-Score pro Fold, Cache-Key auf den Pool abgebildet (je ~200 Z. Diff) |
+| `geostatistics/train_{dcrnn,mtgnn,wavenet}.py` | `val_start` als zweite Zeitgrenze (je ~25 Z. Diff) |
+| `configs/{dcrnn,mtgnn,wavenet}/*_fold[123].yaml` | 33 Configs: Stationslisten, `val_start`/`test_start`, `hpo.cv_mode: spatial`, `n_val_stations: null`, `test_end`/`val_frac` entfernt |
+
+## 12.5 Der Fallstrick aus 9.5 ist erledigt
+
+9.5 warnte: sobald der Stationssplit pro Fold wechselt, muss die Topo-Skalierung
+pro Fold neu gefittet werden, sonst leckt jede Fold-Val-Menge in die
+Skalierungsstatistik — und zwar still.
+
+Genau das war der invasivste Teil der Umstellung. `arr[:n_train]` setzte voraus,
+dass `station_ids` train-zuerst sortiert ist. Im räumlichen Modus wird der
+153er-Pool **einmal** geladen (sortierte Vereinigung, unabhängig davon, welche
+Fold-Config übergeben wurde) und pro Fold nur umindiziert; die Rollen sind dann
+nicht mehr durch die Reihenfolge kodiert. `load_topo_station_features` nimmt
+deshalb jetzt explizite `train_idx`, und `n_train` bleibt nur für den
+zeitlichen Pfad. Gilt gleichermaßen für Median-Imputation und z-Score.
+
+Belegt im Log (mtgnn, 1-Trial-Lauf gegen die echte fold1-Config):
+
+```
+Zeitfenster je Fold — Train bis 2024-08-01 (1473 Paare), Val 2024-08-01 bis 2025-08-01 (1460 Paare)
+Loaded 8 topographic station features (z-score on 102 train stations, explicit indices)
+spatial_fold1 — 102 Trainings-/51 Zielstationen
+spatial_fold2 — 102 Trainings-/51 Zielstationen
+spatial_fold3 — 102 Trainings-/51 Zielstationen
+Trial 1 spatial_fold1 — best_val_rmse=1.6670
+Trial 1 spatial_fold2 — best_val_rmse=1.8262
+Trial 1 spatial_fold3 — best_val_rmse=1.9107
+```
+
+Dieselbe Zeile erscheint dreimal mit **je 102** Stationen — nicht einmal mit 153.
+
+## 12.6 Rückwärtskompatibilität (bewusste Anforderung)
+
+Der zeitliche Modus wird nicht verworfen, er bleibt wählbar:
+
+- `hpo.cv_mode` ist per Default `temporal` → Expanding Window wie bisher.
+- Ohne `data.val_start` fällt die Val-Grenze wie bisher auf `test_start`.
+- 15 Configs (u. a. alle `_fold9`) tragen keinen der neuen Schlüssel und laufen
+  unverändert.
+- Der `val_frac`-Fallback bleibt bestehen und ist **nicht** toter Code.
+
+## 12.7 Worauf das Review besonders schauen sollte
+
+1. **Scaler-Leckage im räumlichen Modus.** `meas_scaler`, `e2_scaler` und der
+   Topo-z-Score fitten jetzt auf `[:scaler_t, fold_train_idx]`. `scaler_t` ist
+   der Index von `val_start`, `fold_train_idx` sind die 102 Trainingsstationen
+   des Folds. Bitte prüfen, ob irgendwo noch ein `:N_train` steht, das im
+   räumlichen Modus 153 statt 102 bedeutet — `stat_scaler.fit(raw_static[:N_train])`
+   in `hpo_dcrnn.py` ist ein bewusst belassener Fall (rein geometrische Features,
+   wird gecacht, daher fold-unabhängig), aber genau der Typ Stelle, der geprüft
+   gehört.
+2. **Cache-Key.** Im räumlichen Modus werden `files`/`val_files` im Key durch den
+   gemeinsamen Pool ersetzt (sonst drei identische Cache-Einträge für drei
+   Fold-Configs), und `val_start` fällt aus dem Key (es teilt nur bereits
+   geladene Paare auf). `test_start`/`test_end` bleiben drin, weil sie den
+   geladenen Zeitraum kappen. Ist die Argumentation lückenlos?
+3. **`--test-mode`-Pfad.** `val_start` wird dort abgeschaltet. Stimmt damit die
+   Kette Retrain → `get_test_results_*.py` noch, insbesondere die
+   Scaler-Zuschnitte und die Topo-Skalierung im Testlauf? Die
+   `get_test_results_*.py` wurden **nicht** angefasst und rufen weiterhin
+   `n_train=N_train` — das ist im Testlauf korrekt (dort ist `all_ids`
+   train-zuerst), sollte aber gegengeprüft werden.
+4. **Studiennamen.** `hpo_stem = re.sub(r'_fold\d+$', '', config_stem)` ist
+   unverändert. Im räumlichen Modus ignorieren die HPO-Skripte die
+   `files`/`val_files` der übergebenen Config — es ist also egal, welche der drei
+   Fold-Configs die HPO bekommt, und alle drei zeigen weiter auf **eine**
+   gemeinsame Studie. Ist das gewollt eindeutig oder eine Fußangel?
+5. **`hpo.n_val_stations`.** Stand auf 50 und hätte die 51er-Fold-Val-Menge um
+   eine Station beschnitten. In den Configs jetzt `null`; `build_folds()` warnt,
+   falls doch gesetzt. Reicht die Warnung, oder sollte es ein Fehler sein?
+6. **`spatial_folds.yaml` als stille Abhängigkeit.** Die HPO liest die
+   Stationslisten aus dieser Datei statt aus der Config. Ändert jemand die Datei
+   zwischen zwei Workern derselben Studie, mischen sich unbemerkt zwei
+   Fold-Definitionen in einer Optuna-Studie — dieselbe Fehlerklasse wie Blocker 1
+   in 11.5. Sollte der Fold-Hash mit ins Log oder in die Trial-`user_attrs`?
+
+## 12.8 Stand der Verifikation
+
+- [x] `--preprocess-only` für mtgnn und wavenet: räumlicher Modus erkannt,
+      153-Stationen-Pool, ein gemeinsamer Cache-Key
+- [x] 1-Trial/1-Epochen-Lauf mtgnn gegen die echte fold1-Config: alle drei Folds
+      durchlaufen, Zeitfenster und Stationszahlen wie oben belegt
+- [ ] Dasselbe für wavenet und dcrnn (läuft zum Zeitpunkt des Schreibens)
+- [ ] Cache-Key-Vergleich der drei Fold-Configs untereinander (erwartet:
+      identisch, weil alle denselben Pool laden)
+- [ ] `--test-mode`-Durchlauf gegen einen retrainierten Checkpoint
+- [ ] Gegenprobe, dass eine unveränderte Config (`_fold9`) im zeitlichen Modus
+      identische Fold-Grenzen erzeugt wie vor der Umstellung

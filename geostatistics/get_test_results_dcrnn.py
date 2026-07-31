@@ -253,17 +253,33 @@ def main() -> None:
         logger.info("Circular encoding: measurement_features → %s  (M=%d)", measurement_cols, len(measurement_cols))
         target_feat_idx = measurement_cols.index(dcrnn_cfg.get("target_col", "wind_speed"))
 
-    # Temporal split
+    # Temporal split — mirrors train_dcrnn.py's val_start/test_start boundary
+    # (review brief H2): without this, a dev-mode eval on a spatial-CV fold
+    # model silently scores against the held-out test period, because
+    # test_start was the only boundary this script knew about.
     test_start = data_cfg.get("test_start")
     test_end   = data_cfg.get("test_end")
-    if test_start:
-        ts_cutoff = pd.Timestamp(test_start, tz="UTC")
+    val_start  = data_cfg.get("val_start")
+    boundary   = test_start if (args.test_mode or not val_start) else val_start
+    if boundary:
+        ts_cutoff = pd.Timestamp(boundary, tz="UTC")
         split_t = int(np.searchsorted(timestamps, ts_cutoff, side="left"))
     else:
         split_t = int(T * (1 - data_cfg.get("val_frac", 0.2)))
     split_time = timestamps[split_t]
     run_cutoff = pd.Timestamp(test_end, tz="UTC") if test_end else None
-    logger.info("Test period starts at %s", split_time)
+    # Dev-mode upper bound: everything from test_start on is held-out test
+    # material and must not leak into a --test-mode-less eval run.
+    if val_start and test_start and not args.test_mode:
+        _vc = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+        eval_cutoff = timestamps[_vc] if _vc < T else None
+    else:
+        eval_cutoff = None
+    logger.info(
+        "Evaluation period: %s%s  (mode=%s)",
+        split_time, f" .. {eval_cutoff}" if eval_cutoff is not None else " .. end",
+        "test" if args.test_mode else "dev",
+    )
 
     # Metadata
     lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=data_cfg.get("stations_master"))
@@ -370,6 +386,7 @@ def main() -> None:
     for r_curr in range(R):
         t_run = run_times[r_curr]
         if t_run < split_time: continue
+        if eval_cutoff is not None and t_run >= eval_cutoff: continue
         if t_run not in ts_lookup.index: continue
         t_run_abs = int(ts_lookup[t_run])
         if t_run_abs < H_hist or t_run_abs + H_fore > T: continue

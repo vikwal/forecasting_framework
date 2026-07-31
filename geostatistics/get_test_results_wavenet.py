@@ -242,13 +242,30 @@ def main() -> None:
     meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
 
     # ── Temporal split ───────────────────────────────────────────────────────
+    # Mirrors train_wavenet.py's val_start/test_start boundary (review brief
+    # H2): without this, a dev-mode eval on a spatial-CV fold model silently
+    # scores against the held-out test period, because test_start was the
+    # only boundary this script knew about.
     test_start = data_cfg.get("test_start")
-    if test_start:
-        split_t = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+    val_start  = data_cfg.get("val_start")
+    boundary   = test_start if (args.test_mode or not val_start) else val_start
+    if boundary:
+        split_t = int(np.searchsorted(timestamps, pd.Timestamp(boundary, tz="UTC"), side="left"))
     else:
         split_t = int(T * (1 - data_cfg.get("val_frac", 0.2)))
     split_time = timestamps[split_t]
-    logger.info("Test period starts at %s", split_time)
+    # Dev-mode upper bound: everything from test_start on is held-out test
+    # material and must not leak into a --test-mode-less eval run.
+    if val_start and test_start and not args.test_mode:
+        _vc = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+        eval_cutoff = timestamps[_vc] if _vc < T else None
+    else:
+        eval_cutoff = None
+    logger.info(
+        "Evaluation period: %s%s  (mode=%s)",
+        split_time, f" .. {eval_cutoff}" if eval_cutoff is not None else " .. end",
+        "test" if args.test_mode else "dev",
+    )
 
     # ── Station metadata ─────────────────────────────────────────────────────
     meta_path = data_cfg.get("stations_master")
@@ -356,6 +373,8 @@ def main() -> None:
     for r_curr in range(R):
         t_run = run_times[r_curr]
         if t_run < split_time:
+            continue
+        if eval_cutoff is not None and t_run >= eval_cutoff:
             continue
         if t_run not in ts_lookup.index:
             continue

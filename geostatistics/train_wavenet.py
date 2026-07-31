@@ -370,11 +370,26 @@ def main() -> None:
             knn_arr  = load_knn_imputation(knnimputer_path, col, all_ids, timestamps, freq=freq)
             meas_raw = apply_knn_imputation(meas_raw, knn_arr, measurement_cols, col)
 
+    # Nur das Fenster pruefen, das ueberhaupt Run-Paare liefern kann: im Dev-Lauf
+    # bis test_start, im --test-mode bis test_end bzw. Datenende. Sonst schlaegt
+    # der Check auf einem Randstueck an, das nie benutzt wird — seit test_end aus
+    # den Fold-Configs raus ist, reicht der geladene Zeitraum bis ans Datenende.
+    _ts_dev = data_cfg.get("test_start")
+    if _ts_dev and not args.test_mode:
+        audit_t = int(np.searchsorted(timestamps, pd.Timestamp(_ts_dev, tz="UTC"), side="left"))
+    else:
+        audit_t = len(timestamps)
+
     handle_nans = mcfg.get("handle_nans", "break")
-    nan_counts  = np.isnan(meas_raw).any(axis=2).sum(axis=0)
+    nan_counts  = np.isnan(meas_raw[:audit_t]).any(axis=2).sum(axis=0)
     bad_ids     = [all_ids[i] for i in np.where(nan_counts > 0)[0]]
+    _beyond = int(np.isnan(meas_raw[audit_t:]).any(axis=2).sum())
+    if _beyond:
+        logger.info("Messwerte: %d NaN jenseits von %s (nicht verwendet — OK).",
+                    _beyond, timestamps[audit_t - 1].date())
     if bad_ids:
-        msg = f"{len(bad_ids)} station(s) still have NaN after imputation: {bad_ids}"
+        msg = (f"{len(bad_ids)} station(s) still have NaN after imputation "
+               f"within the used window (bis {timestamps[audit_t - 1].date()}): {bad_ids}")
         if handle_nans == "break":
             raise ValueError(msg)
         logger.warning(msg)
@@ -382,13 +397,33 @@ def main() -> None:
     _meas_nan_any = np.isnan(meas_raw).any(axis=(1, 2))
     meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
 
+    # Drei Zeitraeume, zwei Grenzen:
+    #   [start, val_start)      Training
+    #   [val_start, test_start) Validierung
+    #   [test_start, ...]       zurueckgehalten, nur fuer --test-mode
+    # Ohne val_start faellt die Val-Grenze wie bisher auf test_start zusammen
+    # (altes Verhalten, alle Configs ohne den Schluessel bleiben unveraendert).
+    # Im --test-mode ist die Testperiode selbst die Val-Menge, dann gilt wieder
+    # test_start als Grenze und die Kappung entfaellt.
     test_start = data_cfg.get("test_start")
-    if test_start:
-        split_t = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+    val_start  = data_cfg.get("val_start")
+    boundary   = test_start if (args.test_mode or not val_start) else val_start
+    if boundary:
+        split_t = int(np.searchsorted(timestamps, pd.Timestamp(boundary, tz="UTC"), side="left"))
     else:
         split_t = int(T * (1 - data_cfg.get("val_frac", 0.2)))
     split_time = timestamps[split_t]
-    logger.info("Temporal split at %s  (train: %d  val: %d steps)", split_time.date(), split_t, T - split_t)
+
+    # Obergrenze der Val-Periode: alles ab test_start ist Testmaterial.
+    if val_start and test_start and not args.test_mode:
+        val_cutoff_t = int(np.searchsorted(
+            timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+        val_cutoff = timestamps[val_cutoff_t] if val_cutoff_t < T else None
+    else:
+        val_cutoff = None
+    logger.info("Temporal split at %s  (train: %d steps, val bis %s)",
+                split_time.date(), split_t,
+                val_cutoff.date() if val_cutoff is not None else "Datenende")
 
     # ------------------------------------------------------------------
     # Station metadata
@@ -400,10 +435,12 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Topographic node features (absolute, into the static tensor → emb_mlp)
     # ------------------------------------------------------------------
-    # --station-node-features is authoritative when given (including 'none'), so a
-    # single config can serve both arms of an A/B run; otherwise fall back to the
-    # topo names in edge_features.
-    if args.station_node_features is not None:
+    # --station-node-features (or the config's own station_node_features key) is
+    # authoritative when given (including 'none'), so a single config can serve
+    # both arms of an A/B run; only configs that set neither fall back to the
+    # topo names in edge_features, which is the pre-existing behaviour kept for
+    # backward compatibility with configs predating this key (review brief B3).
+    if args.station_node_features is not None or "station_node_features" in mcfg:
         topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
     else:
         _, _, _, topo_feature_names = parse_edge_features(mcfg)
@@ -552,6 +589,9 @@ def main() -> None:
             skipped += 1; continue
         if _meas_nan_any[t_run_abs - H:t_run_abs + F_h].any():
             skipped += 1; continue
+
+        if val_cutoff is not None and t_run >= val_cutoff:
+            skipped += 1; continue   # Testperiode — hier nicht verwenden
 
         pair = (r_curr, r_hist, t_run_abs)
         (train_run_pairs if t_run < split_time else val_run_pairs).append(pair)

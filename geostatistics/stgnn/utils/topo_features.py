@@ -61,11 +61,36 @@ _TOPO_TRANSFORMS = {
 }
 
 
+def _resolve_train_idx(
+    n_stations: int,
+    n_train: int | None,
+    train_idx: list[int] | np.ndarray | None,
+) -> np.ndarray:
+    """Trainingsstationen als explizite Indizes.
+
+    ``n_train`` (die fuehrenden N Stationen) gilt nur, solange die Stationsliste
+    train-zuerst sortiert ist. Bei raeumlicher CV rotieren die Rollen innerhalb
+    einer einmal geladenen Stationsmenge, dann muss ``train_idx`` uebergeben
+    werden. Genau eines von beiden ist erforderlich.
+    """
+    if (n_train is None) == (train_idx is None):
+        raise ValueError("Genau eines von n_train / train_idx angeben")
+    if train_idx is not None:
+        idx = np.asarray(train_idx, dtype=int)
+        if idx.size == 0:
+            raise ValueError("train_idx ist leer")
+        if idx.min() < 0 or idx.max() >= n_stations:
+            raise IndexError(f"train_idx ausserhalb von 0..{n_stations - 1}")
+        return idx
+    return np.arange(int(n_train))
+
+
 def load_topo_station_features(
     topo_dir: str,
     station_ids: list[str],
     feature_names: list[str],
-    n_train: int,
+    n_train: int | None = None,
+    train_idx: list[int] | np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """
     Load absolute per-station topographic features for use as **node** features.
@@ -74,8 +99,8 @@ def load_topo_station_features(
     three ways that only matter for absolute values:
 
     1. Variance-stabilising transforms (see ``_TOPO_TRANSFORMS``) before scaling.
-    2. The z-score is fitted on the **first n_train stations only**, matching
-       every other scaler in the pipeline (meas/i2/e2/static) instead of leaking
+    2. The z-score is fitted on the **train stations only**, matching every
+       other scaler in the pipeline (meas/i2/e2/static) instead of leaking
        val/test station statistics into the normalisation.
     3. ``tdi`` is set to 0 where the terrain is perfectly flat (elev_std == 0)
        rather than median-filled. The ratio is 0/0 on zero relief, so 0 is the
@@ -88,7 +113,11 @@ def load_topo_station_features(
     topo_dir :      directory containing topo_features.csv and dist_coast.csv
     station_ids :   station IDs, same order as station_coords/alts
     feature_names : subset of TOPO_FEATURE_ORDER (order-independent)
-    n_train :       number of leading train stations to fit the z-score on
+    n_train :       number of leading train stations to fit the z-score on —
+                    only valid if ``station_ids`` is sorted train-first
+    train_idx :     explicit train-station indices, for spatial CV where the
+                    roles rotate within one loaded station set. Exactly one of
+                    ``n_train`` / ``train_idx`` must be given.
 
     Returns
     -------
@@ -97,6 +126,8 @@ def load_topo_station_features(
     requested = [f for f in TOPO_FEATURE_ORDER if f in feature_names]
     if not requested:
         return np.zeros((len(station_ids), 0), dtype=np.float32), []
+
+    tr_idx = _resolve_train_idx(len(station_ids), n_train, train_idx)
 
     topo_df = pd.read_csv(Path(topo_dir) / "topo_features.csv", dtype={"location_id": str})
     topo_df = topo_df[topo_df["kind"] == "station"].set_index("location_id")
@@ -144,11 +175,11 @@ def load_topo_station_features(
             # Train-only median for the same reason the z-score is train-only:
             # a median over all stations leaks val/test statistics into the
             # imputation, contradicting point 2 of this docstring.
-            median = values.iloc[:n_train].median()
+            median = values.iloc[tr_idx].median()
             logger.warning(
                 "Topo station feature '%s': %d/%d missing, filling with median (%.4g) "
                 "over the %d train stations. Missing IDs: %s",
-                name, n_missing, len(station_ids), median, n_train,
+                name, n_missing, len(station_ids), median, len(tr_idx),
                 [sid for sid, v in zip(station_ids, values.isna()) if v][:10],
             )
             values = values.fillna(median)
@@ -158,15 +189,29 @@ def load_topo_station_features(
         if transform is not None:
             arr = transform(arr)
 
-        train_slice = arr[:n_train]
+        if name in ("aspect_sin", "aspect_cos"):
+            # Do NOT z-score these: they are a unit-circle pair, already
+            # bounded in [-1, 1]. Scaling each independently with its own
+            # mean/std (as the branch below does for every other feature)
+            # applies a different factor to sin and cos, turning the unit
+            # circle into an ellipse — the angular distance between two
+            # exposures then depends on direction, which defeats the point
+            # of encoding aspect as sin/cos in the first place (review
+            # brief L4).
+            cols.append(arr.astype(np.float32))
+            continue
+
+        train_slice = arr[tr_idx]
         mean = float(train_slice.mean())
         std = max(float(train_slice.std()), 1e-6)
         cols.append(((arr - mean) / std).astype(np.float32))
 
     out = np.stack(cols, axis=1).astype(np.float32)
     logger.info(
-        "Loaded %d topographic station features (z-score on first %d stations): %s",
-        out.shape[1], n_train, requested,
+        "Loaded %d topographic station features (z-score on %d train stations, "
+        "%s): %s",
+        out.shape[1], len(tr_idx),
+        "leading" if train_idx is None else "explicit indices", requested,
     )
     return out, requested
 
@@ -175,7 +220,8 @@ def load_topo_station_features_dict(
     topo_dir: str,
     station_ids: list[str],
     feature_names: list[str],
-    n_train: int,
+    n_train: int | None = None,
+    train_idx: list[int] | np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """
     ``load_topo_station_features`` in the dict form ``HomoSampler`` expects.
@@ -188,7 +234,7 @@ def load_topo_station_features_dict(
     normalisation differs.
     """
     arr, names = load_topo_station_features(
-        topo_dir, station_ids, feature_names, n_train=n_train,
+        topo_dir, station_ids, feature_names, n_train=n_train, train_idx=train_idx,
     )
     return {name: arr[:, i] for i, name in enumerate(names)}
 

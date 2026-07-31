@@ -828,7 +828,12 @@ class GNNCache:
         """Stable MD5 hash over all fields that affect tensor content."""
         import hashlib, json
         data_cfg  = cfg["data"]
-        dcrnn_cfg = cfg.get("dcrnn", cfg.get("stgnn2", {}))
+        # hpo_{dcrnn,mtgnn,wavenet}.py all wrap their actual feature lists
+        # under a "dcrnn" key before calling this (see their _key_cfg
+        # construction) so this lookup always finds them; the mtgnn/wavenet
+        # fallbacks here are defense-in-depth only, in case a future caller
+        # passes its config section under its own name instead.
+        dcrnn_cfg = cfg.get("dcrnn", cfg.get("stgnn2", cfg.get("mtgnn", cfg.get("wavenet", {}))))
         key_dict = {
             "path":             data_cfg.get("path", ""),
             "nwp_path":         data_cfg.get("nwp_path", ""),

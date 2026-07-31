@@ -553,16 +553,45 @@ def main() -> None:
 
     _meas_nan_any = np.isnan(meas_raw).any(axis=(1, 2))
 
-    if test_start:
-        ts_cutoff = pd.Timestamp(test_start, tz="UTC")
-        split_t   = int(np.searchsorted(timestamps, ts_cutoff, side="left"))
+    # Drei Zeitraeume, zwei Grenzen:
+    #   [start, val_start)      Training
+    #   [val_start, test_start) Validierung
+    #   [test_start, ...]       zurueckgehalten, nur fuer --test-mode
+    # Ohne val_start faellt die Val-Grenze wie bisher auf test_start zusammen
+    # (altes Verhalten, alle Configs ohne den Schluessel bleiben unveraendert).
+    # Im --test-mode ist die Testperiode selbst die Val-Menge, dann gilt wieder
+    # test_start als Grenze und die Kappung entfaellt.
+    val_start = data_cfg.get("val_start")
+    boundary  = test_start if (args.test_mode or not val_start) else val_start
+    if boundary:
+        split_t = int(np.searchsorted(timestamps, pd.Timestamp(boundary, tz="UTC"), side="left"))
     else:
         split_t = int(T * (1 - data_cfg.get("val_frac", 0.2)))
     split_time = timestamps[split_t]
 
+    # Obergrenze der Val-Periode: alles ab test_start ist Testmaterial.
+    if val_start and test_start and not args.test_mode:
+        _vc = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+        val_cutoff = timestamps[_vc] if _vc < T else None
+    else:
+        val_cutoff = None
+
     # NaN audit — restricted to [0, test_end].
     handle_nans = dcrnn_cfg.get("handle_nans", "break")
-    audit_t = int(np.searchsorted(timestamps, run_cutoff, side="right")) if run_cutoff else T
+    # Nur das Fenster pruefen, das ueberhaupt Run-Paare liefern kann: im Dev-Lauf
+    # bis test_start, im --test-mode bis test_end bzw. Datenende. Sonst schlaegt
+    # der Check auf einem Randstueck an, das nie benutzt wird — seit test_end aus
+    # den Fold-Configs raus ist, reicht der geladene Zeitraum bis ans Datenende.
+    if run_cutoff is not None:
+        audit_t = int(np.searchsorted(timestamps, run_cutoff, side="right"))
+    elif test_start and not args.test_mode:
+        audit_t = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+    else:
+        audit_t = T
+    _beyond = int(np.isnan(meas_raw[audit_t:]).any(axis=2).sum())
+    if _beyond:
+        logger.info("Messwerte: %d NaN jenseits von %s (nicht verwendet — OK).",
+                    _beyond, timestamps[min(audit_t, T) - 1].date())
     nan_counts = np.isnan(meas_raw[:audit_t]).any(axis=2).sum(axis=0)
     bad_ids = [all_ids[i] for i in np.where(nan_counts > 0)[0]]
     audit_end = timestamps[min(audit_t, T) - 1].date()
@@ -813,7 +842,19 @@ def main() -> None:
 
     stat_scaler = StandardScaler()
     raw_static  = np.stack([lats, lons, alts], axis=1)
-    stat_scaler.fit(raw_static[:N_train])
+    # Spatial-CV configs (val_start set): hpo_dcrnn.py loads the geo/altitude
+    # scaler once against the full 153-station pool, before any fold split
+    # exists, and reuses it across all three folds. Retrain must fit on the
+    # same population, else the HPO-tuned model and the retrained model see
+    # differently normalised lat/lon/alt for the same three static channels
+    # (review brief M5). No leakage concern either way — coordinates and
+    # altitude of a target station are always-known inputs for an inductive
+    # model, not measurements. Legacy temporal-mode configs (no val_start)
+    # keep the original train-only fit, matching hpo_dcrnn.py's temporal path.
+    # --test-mode must keep the train-only fit: there, all_ids appends the
+    # held-out test_files after the 153-station pool, and including them in
+    # the fit would leak the actual test stations into the scaler.
+    stat_scaler.fit(raw_static if (val_start and not args.test_mode) else raw_static[:N_train])
     station_static_scaled = stat_scaler.transform(raw_static)
 
     # Absolute topographic node features, appended after lat/lon/alt. The sampler
@@ -892,6 +933,9 @@ def main() -> None:
             skipped += 1; continue
         if grid_nan_by_run[r_curr] or grid_nan_by_run[r_hist]:
             skipped += 1; skipped_grid_nan += 1; continue
+
+        if val_cutoff is not None and t_run >= val_cutoff:
+            skipped += 1; continue   # Testperiode — hier nicht verwenden
 
         pair = (r_curr, r_hist, t_run_abs)
         (train_run_pairs if t_run < split_time else val_run_pairs).append(pair)

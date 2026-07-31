@@ -67,6 +67,9 @@ import copy
 import logging
 import math
 import os
+import re as _re
+import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -97,6 +100,9 @@ from geostatistics.train_mtgnn import (
 )
 from geostatistics.homo_sampler import HomoSampler
 from geostatistics.mtgnn import MTGNNModel
+from geostatistics.spatial_cv import (
+    build_folds, fold_hash, load_spatial_folds, resolve_cv_mode, station_pool,
+)
 from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features
 from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.stgnn.utils.topo_features import load_topo_station_features_dict
@@ -120,9 +126,31 @@ def _setup_logging(log_path: Path) -> None:
     sh.setFormatter(fmt)
     root.addHandler(fh)
     root.addHandler(sh)
+    # optuna's own logger doesn't propagate to root by default and uses its
+    # own stderr-only handler, so trial exceptions caught via catch=(Exception,)
+    # never reach this log file. Route them through the same handlers.
+    optuna.logging.disable_default_handler()
+    optuna.logging.enable_propagation()
 
 
 logger = logging.getLogger(__name__)
+
+
+def _git_commit() -> str:
+    """HEAD commit hash, or '<unknown>' outside a git checkout — never raises.
+
+    Provenance line for the campaign: two hosts on different commits (or one
+    on a branch missing the topo/spatial-CV code entirely) write trials into
+    the same shared Optuna study with no crash and no warning — this makes
+    that mismatch detectable after the fact (review brief 9.1/B4/M6).
+    """
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except Exception:
+        return "<unknown>"
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +180,7 @@ def _build_all_run_pairs(
     run_times: pd.DatetimeIndex,
     timestamps: pd.DatetimeIndex,
     meas_nan_any: np.ndarray,
-    test_start: pd.Timestamp,
+    test_start: pd.Timestamp | None,
     H: int,
     F_h: int,
     freq_h: float = 1.0,
@@ -164,7 +192,8 @@ def _build_all_run_pairs(
 
     for r_curr in range(len(run_times)):
         t_run = run_times[r_curr]
-        if t_run >= test_start:
+        # test_start=None (raeumliche CV): kein zeitlicher Rueckhalt, voller Zeitraum
+        if test_start is not None and t_run >= test_start:
             continue
         if t_run not in ts_lookup.index:
             skipped += 1
@@ -304,6 +333,10 @@ def main() -> None:
 
     config_path = Path(args.config)
     config_stem = config_path.stem.replace("config_", "")
+    # Strip _fold<N> so the three spatial-CV fold configs of one study share a
+    # single Optuna study name — matches train_mtgnn.py's hpo_stem, otherwise
+    # the retrain can't find the study the HPO wrote to (review brief B2).
+    hpo_stem = _re.sub(r'_fold\d+$', '', config_stem)
     suffix      = f"_{args.suffix}" if args.suffix else ""
 
     cfg      = load_yaml(args.config)
@@ -320,7 +353,7 @@ def main() -> None:
     freq_h   = _fmap.get(freq, 1.0)
     F_h_base = mcfg.get("forecast_horizon", 48)
 
-    study_name = f"cl_m-mtgnn_out-{F_h_base}_freq-{freq}_{config_stem}"
+    study_name = f"cl_m-mtgnn_out-{F_h_base}_freq-{freq}_{hpo_stem}"
 
     _setup_logging(Path("logs") / f"hpo_mtgnn_{config_stem}{suffix}.log")
     logger.info("=" * 70)
@@ -375,17 +408,55 @@ def main() -> None:
     use_case      = data_cfg.get("use_case", "wind")
 
     # ── Station IDs ───────────────────────────────────────────────────────────
-    train_ids = [str(s) for s in data_cfg["files"]]
-    val_ids   = [str(s) for s in data_cfg["val_files"]]
-    all_ids   = train_ids + val_ids
-    N_train   = len(train_ids)
-    N_val     = len(val_ids)
-    logger.info("Stations — train: %d  val: %d", N_train, N_val)
+    cv_mode, spatial_folds_path = resolve_cv_mode(hpo_cfg)
+    spatial_fold_defs = None
+    if cv_mode == "spatial":
+        # Ein Pool fuer alle Folds (sortierte Vereinigung), damit Ladevorgang und
+        # Cache-Key nicht davon abhaengen, welche Fold-Config uebergeben wurde.
+        # files/val_files der Config werden dabei bewusst ignoriert.
+        spatial_fold_defs = load_spatial_folds(spatial_folds_path)
+        all_ids   = station_pool(spatial_fold_defs)
+        train_ids, val_ids = all_ids, []
+        N_train   = len(all_ids)
+        N_val     = 0
+        logger.info(
+            "CV-Modus: raeumlich — %d Folds aus %s, %d Stationen im Pool",
+            len(spatial_fold_defs), spatial_folds_path, len(all_ids),
+        )
+        # n_folds/min_train_date only ever apply to the temporal expanding-
+        # window CV; under spatial CV the fold count comes from
+        # spatial_folds.yaml and min_train_date has no effect at all. A stale
+        # value left over from a temporal config would silently do nothing
+        # (review brief L3) — warn instead of staying quiet about it.
+        if "n_folds" in hpo_cfg and n_folds != len(spatial_fold_defs):
+            logger.warning(
+                "hpo.n_folds=%d ist unter cv_mode=spatial wirkungslos — "
+                "spatial_folds.yaml definiert %d Folds.",
+                n_folds, len(spatial_fold_defs),
+            )
+        if min_train_date:
+            logger.warning(
+                "hpo.min_train_date=%s ist unter cv_mode=spatial wirkungslos "
+                "(nur die temporale Expanding-Window-CV nutzt es).",
+                min_train_date,
+            )
+    else:
+        train_ids = [str(s) for s in data_cfg["files"]]
+        val_ids   = [str(s) for s in data_cfg["val_files"]]
+        all_ids   = train_ids + val_ids
+        N_train   = len(train_ids)
+        N_val     = len(val_ids)
+        logger.info("CV-Modus: zeitlich — Stationen train: %d  val: %d", N_train, N_val)
 
     test_start = data_cfg.get("test_start")
     test_end   = data_cfg.get("test_end")
     run_cutoff = pd.Timestamp(test_end, tz="UTC") if test_end else None
-    test_start_dt = pd.Timestamp(test_start, tz="UTC")
+    test_start_dt = pd.Timestamp(test_start, tz="UTC") if test_start else None
+    if cv_mode == "temporal" and test_start_dt is None:
+        raise ValueError(
+            "hpo.cv_mode='temporal' braucht data.test_start — daraus werden die "
+            "Fold-Grenzen abgeleitet. Fuer raeumliche Folds hpo.cv_mode='spatial' setzen."
+        )
 
     # ── Static config settings (must be known before cache key) ───────────────
     next_n_ecmwf   = mcfg.get("next_n_ecmwf", 0)
@@ -411,7 +482,18 @@ def main() -> None:
     use_cache = cache_cfg.get("use_cache", True)
     cache_dir = cache_cfg.get("cache_dir", "data_cache/gnns")
     gnn_cache = GNNCache(cache_dir) if use_cache else None
-    _key_cfg  = {"data": cfg["data"], "dcrnn": {
+    _key_data = dict(cfg["data"])
+    if cv_mode == "spatial":
+        # Alle drei Fold-Configs laden denselben Pool — Key darauf abbilden,
+        # sonst liegen drei identische Cache-Eintraege auf der Platte.
+        _key_data["files"], _key_data["val_files"] = all_ids, []
+        # test_start/test_end kappen weiterhin den geladenen Zeitraum und
+        # bleiben deshalb Teil des Keys.
+        # val_start trennt nur Train von Val innerhalb der geladenen Paare und
+        # aendert am Cache-Inhalt nichts — sonst laedt jede Verschiebung der
+        # Val-Grenze zwei Jahre Rohdaten neu.
+        _key_data.pop("val_start", None)
+    _key_cfg  = {"data": _key_data, "dcrnn": {
         "icond2_features":    list(icond2_features),
         "ecmwf_features":     list(ecmwf_features),
         "measurement_features": list(measurement_cols),
@@ -573,36 +655,61 @@ def main() -> None:
     # both the hit and the miss path must end up with the same static width.
     # Must mirror train_mtgnn.py — otherwise HPO tunes a narrower model than
     # the one the retrain step builds from the resulting best params.
-    # --station-node-features is authoritative when given (including 'none'), so a
-    # single config can serve both arms of an A/B run; otherwise fall back to the
-    # topo names in edge_features, which is the pre-existing behaviour.
-    if args.station_node_features is not None:
+    # --station-node-features (or the config's own station_node_features key) is
+    # authoritative when given (including 'none'), so a single config can serve
+    # both arms of an A/B run; only configs that set neither fall back to the
+    # topo names in edge_features, which is the pre-existing behaviour kept for
+    # backward compatibility with configs predating this key (review brief B3).
+    if args.station_node_features is not None or "station_node_features" in mcfg:
         topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
     else:
         _, _, _, topo_feature_names = parse_edge_features(mcfg)
-    topo_feats: dict[str, np.ndarray] = {}
-    if topo_feature_names:
+
+    _prov_host   = socket.gethostname()
+    _prov_commit = _git_commit()
+    _prov_fold_hash = fold_hash(spatial_folds_path) if cv_mode == "spatial" else "n/a (temporal)"
+    logger.info(
+        "Provenance — host: %s  commit: %s  station_node_features: %s  "
+        "broadcast_topo: %s  fold_hash: %s",
+        _prov_host, _prov_commit,
+        ",".join(topo_feature_names) if topo_feature_names else "(none)",
+        args.broadcast_topo, _prov_fold_hash,
+    )
+
+    def _load_topo(train_idx: list[int]) -> dict[str, np.ndarray]:
+        """Topo-Node-Features, z-Score auf den Trainingsstationen dieses Folds.
+
+        Bei raeumlicher CV pro Fold neu — die Rollen rotieren innerhalb einer
+        einmal geladenen Stationsmenge, ein globaler z-Score wuerde die
+        Statistik der Zielstationen mit hineinnehmen.
+        """
+        if not topo_feature_names:
+            return {}
         topo_features_path = mcfg.get("topo_features_path")
         if not topo_features_path:
             raise ValueError(
                 "edge_features includes topographic names but 'topo_features_path' "
                 "is not set in the mtgnn config section."
             )
-        topo_feats = load_topo_station_features_dict(
-            topo_features_path, all_ids, topo_feature_names, n_train=N_train,
+        feats = load_topo_station_features_dict(
+            topo_features_path, all_ids, topo_feature_names, train_idx=train_idx,
         )
-        logger.info("Loaded topo station node features for MTGNN: %s", list(topo_feats.keys()))
         if args.shuffle_node_features:
             # Permutation control: station i receives station j's terrain. Parameter
             # count, marginal distributions and scaling stay identical — only the
             # station<->terrain assignment is destroyed. If the gain over the
             # no-topo arm survives this, it came from capacity, not information.
             _perm = np.random.default_rng(0).permutation(len(all_ids))
-            topo_feats = {k: v[_perm] for k, v in topo_feats.items()}
+            feats = {k: v[_perm] for k, v in feats.items()}
             logger.warning(
                 "CONTROL RUN: topographic node features shuffled across stations "
                 "(seed 0) — this run carries no real terrain information."
             )
+        return feats
+
+    if cv_mode == "temporal":
+        topo_feats = _load_topo(list(range(N_train)))
+        logger.info("Loaded topo station node features for MTGNN: %s", list(topo_feats.keys()))
 
     # ── Circular / dir_in_deg encoding (applied once, after cache) ───────────
     meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
@@ -631,31 +738,7 @@ def main() -> None:
         logger.info("--preprocess-only done. Exiting.")
         return
 
-    # ── HPO val stations ──────────────────────────────────────────────────────
-    n_hpo_val = min(n_val_stations, N_val) if n_val_stations else N_val
-    hpo_val_station_indices = list(range(N_train, N_train + n_hpo_val))
-    train_station_indices   = list(range(N_train))
-    logger.info("HPO val stations: %d of %d", n_hpo_val, N_val)
-
     target_feat_idx = measurement_cols.index(target_col)
-
-    # ── CV fold boundaries (expanding window) ─────────────────────────────────
-    if min_train_date:
-        min_train_dt = pd.Timestamp(min_train_date, tz="UTC")
-    else:
-        min_train_dt = timestamps[0]
-
-    foldable_secs = (test_start_dt - min_train_dt).total_seconds()
-    seg_secs      = foldable_secs / (n_folds + 1)
-    fold_splits: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-    for k in range(n_folds):
-        val_start = min_train_dt + pd.Timedelta(seconds=seg_secs * (k + 1))
-        val_end   = min_train_dt + pd.Timedelta(seconds=seg_secs * (k + 2))
-        fold_splits.append((val_start, val_end))
-        logger.info(
-            "Fold %d — train: [start, %s)  val: [%s, %s)",
-            k, val_start.date(), val_start.date(), val_end.date(),
-        )
 
     def _fold_pairs(val_start: pd.Timestamp, val_end: pd.Timestamp):
         tr, va = [], []
@@ -665,8 +748,85 @@ def main() -> None:
             elif t < val_end:   va.append((r_curr, r_hist, t_run_abs))
         return tr, va
 
+    # ── CV folds ──────────────────────────────────────────────────────────────
+    # Ein Fold-Plan traegt alles, was pro Fold feststeht und nicht vom Trial
+    # abhaengt: Run-Paare, Stationsrollen, der Zuschnitt fuer die Scaler und die
+    # darauf gefitteten Topo-Features.
+    fold_plans: list[dict] = []
+
+    if cv_mode == "spatial":
+        # Raeumlich: die Stationsrollen rotieren, das Zeitfenster ist in allen
+        # Folds dasselbe. Mit data.val_start liegt zusaetzlich eine feste
+        # zeitliche Grenze dazwischen (Train davor, Val danach bis test_start),
+        # sodass die Validierung raeumlich UND zeitlich out-of-sample ist.
+        _val_start = data_cfg.get("val_start")
+        if _val_start:
+            _vs = pd.Timestamp(_val_start, tz="UTC")
+            _va_end = test_start_dt if test_start_dt is not None \
+                else timestamps[-1] + pd.Timedelta(hours=1)
+            _tr_p, _va_p = _fold_pairs(_vs, _va_end)
+            _scaler_t    = int(np.searchsorted(timestamps, _vs, side="left"))
+            _scaler_runs = run_times < _vs
+            logger.info("Zeitfenster je Fold — Train bis %s (%d Paare), "
+                        "Val %s bis %s (%d Paare)",
+                        _vs.date(), len(_tr_p), _vs.date(), _va_end.date(), len(_va_p))
+        else:
+            _tr_p = _va_p = all_run_pairs
+            _scaler_t    = len(timestamps)
+            _scaler_runs = np.ones(len(run_times), dtype=bool)
+            logger.info("Kein data.val_start — voller Zeitraum in Train und Val")
+
+        for sf in build_folds(spatial_fold_defs, all_ids, max_val_stations=n_val_stations):
+            fold_plans.append({
+                "label":       sf.name,
+                "tr_pairs":    _tr_p,
+                "va_pairs":    _va_p,
+                "train_idx":   sf.train_idx,
+                "val_idx":     sf.val_idx,
+                "scaler_t":    _scaler_t,
+                "scaler_runs": _scaler_runs,
+                "topo":        _load_topo(sf.train_idx),
+            })
+            logger.info("%s — %d Trainings-/%d Zielstationen",
+                        sf.name, len(sf.train_idx), len(sf.val_idx))
+    else:
+        # Zeitlich: expanding window, Stationsrollen ueber alle Folds identisch.
+        n_hpo_val = min(n_val_stations, N_val) if n_val_stations else N_val
+        hpo_val_station_indices = list(range(N_train, N_train + n_hpo_val))
+        train_station_indices   = list(range(N_train))
+        logger.info("HPO val stations: %d of %d", n_hpo_val, N_val)
+
+        min_train_dt = pd.Timestamp(min_train_date, tz="UTC") if min_train_date \
+            else timestamps[0]
+        foldable_secs = (test_start_dt - min_train_dt).total_seconds()
+        seg_secs      = foldable_secs / (n_folds + 1)
+        for k in range(n_folds):
+            val_start = min_train_dt + pd.Timedelta(seconds=seg_secs * (k + 1))
+            val_end   = min_train_dt + pd.Timedelta(seconds=seg_secs * (k + 2))
+            tr_p, va_p = _fold_pairs(val_start, val_end)
+            fold_plans.append({
+                "label":       f"fold{k}",
+                "tr_pairs":    tr_p,
+                "va_pairs":    va_p,
+                "train_idx":   train_station_indices,
+                "val_idx":     hpo_val_station_indices,
+                "scaler_t":    int(np.searchsorted(timestamps, val_start, side="left")),
+                "scaler_runs": run_times < val_start,
+                "topo":        topo_feats,
+            })
+            logger.info(
+                "Fold %d — train: [start, %s)  val: [%s, %s)",
+                k, val_start.date(), val_start.date(), val_end.date(),
+            )
+
     # ── Objective ─────────────────────────────────────────────────────────────
     def objective(trial: optuna.Trial) -> float:
+        trial.set_user_attr("host", _prov_host)
+        trial.set_user_attr("commit", _prov_commit)
+        trial.set_user_attr("station_node_features", topo_feature_names)
+        trial.set_user_attr("broadcast_topo", args.broadcast_topo)
+        trial.set_user_attr("fold_hash", _prov_fold_hash)
+
         sampled = sample_hyperparameters(trial, hpo_params)
         logger.info("Trial %d — hyperparameters: %s", trial.number, sampled)
 
@@ -704,21 +864,22 @@ def main() -> None:
 
         fold_rmses: list[float] = []
 
-        for fold_idx, (val_start, val_end) in enumerate(fold_splits):
-            tr_pairs, va_pairs = _fold_pairs(val_start, val_end)
+        for fold_idx, plan in enumerate(fold_plans):
+            tr_pairs, va_pairs = plan["tr_pairs"], plan["va_pairs"]
             if not tr_pairs or not va_pairs:
                 logger.warning(
-                    "Trial %d fold %d: empty split (train=%d val=%d), skipping",
-                    trial.number, fold_idx, len(tr_pairs), len(va_pairs),
+                    "Trial %d %s: empty split (train=%d val=%d), skipping",
+                    trial.number, plan["label"], len(tr_pairs), len(va_pairs),
                 )
                 continue
 
-            # Per-fold scalers: fit only on fold-train window + train stations
-            fold_t = int(np.searchsorted(timestamps, val_start, side="left"))
-            fold_r = run_times < val_start
+            # Per-fold scalers: fit only on this fold's train window + train stations
+            fold_t = plan["scaler_t"]
+            fold_r = plan["scaler_runs"]
+            fold_train_idx = plan["train_idx"]
 
             meas_scaler = StandardScaler()
-            meas_scaler.fit(meas_raw[:fold_t, :N_train].reshape(-1, M_meas))
+            meas_scaler.fit(meas_raw[:fold_t, fold_train_idx].reshape(-1, M_meas))
             meas_scaled = meas_scaler.transform(
                 meas_raw.reshape(-1, M_meas)
             ).reshape(T, len(all_ids), M_meas)
@@ -746,8 +907,8 @@ def main() -> None:
                 grid_icond2_scaled    = grid_icond2_scaled,
                 train_run_pairs       = tr_pairs,
                 val_run_pairs         = va_pairs,
-                train_station_indices = train_station_indices,
-                val_station_indices   = hpo_val_station_indices,
+                train_station_indices = fold_train_idx,
+                val_station_indices   = plan["val_idx"],
                 lats                  = lats,
                 lons                  = lons,
                 alts                  = alts,
@@ -765,7 +926,7 @@ def main() -> None:
                 k_ecmwf               = next_n_ecmwf_trial,
                 aggregate_nwp         = aggregate_nwp,
                 hist_wind_available   = mcfg.get("hist_wind_available", False),
-                topo_feats            = topo_feats,
+                topo_feats            = plan["topo"],
             )
 
             M_meas_only     = len(measurement_cols)
@@ -824,8 +985,8 @@ def main() -> None:
 
             fold_rmses.append(best_rmse)
             logger.info(
-                "Trial %d fold %d — best_val_rmse=%.4f  stopped=%d",
-                trial.number, fold_idx, best_rmse, stopped,
+                "Trial %d %s — best_val_rmse=%.4f  stopped=%d",
+                trial.number, plan["label"], best_rmse, stopped,
             )
 
             trial.report(float(np.mean(fold_rmses)), step=fold_idx)
@@ -854,7 +1015,7 @@ def main() -> None:
         )
         logger.info("Optuna storage: PostgreSQL (OPTUNA_STORAGE)")
     else:
-        db_path = Path(studies_path) / f"hpo_mtgnn_{config_stem}{suffix}.db"
+        db_path = Path(studies_path) / f"hpo_mtgnn_{hpo_stem}{suffix}.db"
         storage = f"sqlite:///{db_path}"
         logger.info("Optuna storage: SQLite → %s", db_path)
 
@@ -874,10 +1035,50 @@ def main() -> None:
         completed, remaining, n_trials,
     )
 
+    _MAX_CONSECUTIVE_FAILURES = 3
+    _consecutive_fails = 0
+
+    class _NoTrialCompletedError(RuntimeError):
+        pass
+
+    def _abort_on_repeated_failure(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        # catch=(Exception,) turns every trial crash into a silent FAIL and the
+        # optimize loop just keeps going — a config typo would otherwise burn
+        # a full night of GPU time without a single COMPLETE trial and without
+        # anyone noticing (see topo_features_review_brief.md B1).
+        #
+        # Two things this must NOT do (both broke real runs, see followup review):
+        # - count PRUNED trials as failures — MedianPruner is the default
+        #   pruner, so several PRUNED trials in a row is normal, healthy
+        #   behaviour, not a sign anything is broken.
+        # - look at study.trials, which is the shared Postgres study: it
+        #   contains other workers' RUNNING/PRUNED/FAIL trials too, so a
+        #   single crash of *this* worker would abort it based on trials it
+        #   never ran. The streak below is process-local and only advances
+        #   on this worker's own trials (this callback only fires for trials
+        #   this process itself executed).
+        nonlocal _consecutive_fails
+        if trial.state == optuna.trial.TrialState.FAIL:
+            _consecutive_fails += 1
+        else:
+            _consecutive_fails = 0
+        if _consecutive_fails >= _MAX_CONSECUTIVE_FAILURES:
+            raise _NoTrialCompletedError(
+                f"Aborting: {_MAX_CONSECUTIVE_FAILURES} consecutive trials failed "
+                "(FAIL, not PRUNED) in this worker. Check the traceback logged "
+                "just above (now routed into this log file, see _setup_logging)."
+            )
+
     while remaining > 0:
         try:
-            study.optimize(objective, n_trials=remaining, catch=(Exception,))
+            study.optimize(
+                objective, n_trials=remaining, catch=(Exception,),
+                callbacks=[_abort_on_repeated_failure],
+            )
             break
+        except _NoTrialCompletedError:
+            logger.error("HPO ABORTED — no trial completed, refusing to continue.")
+            raise
         except Exception as exc:
             logger.warning("study.optimize interrupted (%s) — reconnecting …", exc)
             completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])

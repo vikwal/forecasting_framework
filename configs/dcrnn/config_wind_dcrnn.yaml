@@ -215,10 +215,6 @@ dcrnn:
         low: 0.5
         high: 5.0
 
-      direction_to_adj:
-        type: categorical
-        choices: [true, false]
-
       icond2_feature_mode:
         type: categorical
         choices: [absolute, dir_in_deg]

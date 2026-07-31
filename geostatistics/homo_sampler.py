@@ -241,9 +241,10 @@ class HomoSampler:
         self._station_coords_rad = np.stack([lat_r, lon_r], axis=1).astype(np.float64)
 
         # Topographic features (already transformed and train-only z-scored in
-        # load_topo_station_features_dict), in canonical order — appended after
-        # the 6 core static columns so MTGNN._pairwise_edge_features's fixed
-        # indices 0-4 stay valid.
+        # load_topo_station_features_dict, except aspect_sin/aspect_cos which
+        # stay unscaled to keep them a unit-circle pair — see topo_features.py),
+        # in canonical order — appended after the 6 core static columns so
+        # MTGNN._pairwise_edge_features's fixed indices 0-4 stay valid.
         from .stgnn.utils.topo_features import TOPO_FEATURE_ORDER
         self._topo_names = [n for n in TOPO_FEATURE_ORDER if n in self._topo_feats]
         self._topo_arrays = [self._topo_feats[n] for n in self._topo_names]
