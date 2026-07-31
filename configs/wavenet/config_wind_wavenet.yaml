@@ -48,6 +48,8 @@ wavenet:
   target_col: 'wind_speed'
   n_workers: 8
   icond2_run_hours: [6,9,12,15]
+  station_node_features: all
+  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
 
   # NWP aggregation
   nwp_nodes: false                         # true → GATv2 over k grid points; false → concat into station.x
