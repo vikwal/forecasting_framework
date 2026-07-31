@@ -26,6 +26,7 @@ data:
             '02925', '02928', '03166', '03268', '03362', '03660', '03897', '03946', '03987', '04024',
             '04032', '00198', '04039', '04177', '04336', '13711', '04501', '04928', '05158', '05347',
             '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342']
+  val_start:  '2024-08-01'
   test_start: '2025-08-01'
   test_end:   '2025-10-31'
   interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
@@ -97,6 +98,8 @@ mtgnn:
   # HPO bounds — read by hpo_mtgnn.py
   # ---------------------------------------------------------------------------
   hpo:
+    cv_mode: spatial
+    spatial_folds: 'configs/spatial_folds.yaml'
     trials: 1000
     studies_path: studies/
     tensorboard_monitoring: true
@@ -104,8 +107,7 @@ mtgnn:
     pruner_n_startup_trials: 20
     pruner_n_warmup_steps: 1
     n_folds: 3
-    min_train_date: '2024-03-31'
-    n_val_stations: 50
+    n_val_stations: null
     max_epochs_per_trial: 100
     patience_per_trial: 10
 

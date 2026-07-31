@@ -28,6 +28,7 @@ data:
             '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342'
             ]
   # Optional: restrict to a time window for evaluation (comment out to use all data)
+  val_start:  '2024-08-01'
   test_start: '2025-08-01'
   test_end:   '2025-10-31'
   wind_parameter_path: 'data/stations_master.csv'
@@ -118,16 +119,16 @@ dcrnn:
   # All other dcrnn params not listed here keep their fixed values above.
   # ---------------------------------------------------------------------------
   hpo:
+    cv_mode: spatial
+    spatial_folds: 'configs/spatial_folds.yaml'
     trials: 1000
     studies_path: studies/
     tensorboard_monitoring: true
     pruner: median
     pruner_n_startup_trials: 20   # trials before pruner activates
     pruner_n_warmup_steps: 1
-    # Cross-validation: expanding-window, same idea as hpo_cl.py
     n_folds: 3
-    min_train_date: '2024-03-31'  # end of chunk-0 (always training); folds validate on [2024-07-31 … 2025-08-01]
-    n_val_stations: 50            # use first N stations from val_files as HPO val set
+    n_val_stations: null            # use first N stations from val_files as HPO val set
     # max training epochs per trial (usually shorter than the final run)
     max_epochs_per_trial: 100
     patience_per_trial: 10

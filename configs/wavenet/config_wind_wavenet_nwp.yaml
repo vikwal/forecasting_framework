@@ -164,6 +164,7 @@ data:
   - '00342'
   test_start: '2025-08-01'
   use_case: wind
+  val_start: '2024-08-01'
   val_files:
   - '01550'
   - 02907
@@ -236,10 +237,11 @@ wavenet:
   history_length: 48
   horizon_decay: 0.9
   hpo:
+    cv_mode: spatial
+    spatial_folds: 'configs/spatial_folds.yaml'
     max_epochs_per_trial: 100
-    min_train_date: '2024-03-31'
     n_folds: 3
-    n_val_stations: 50
+    n_val_stations: null
     params:
       K_hop:
         high: 3
