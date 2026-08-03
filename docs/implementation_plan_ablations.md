@@ -12,8 +12,8 @@ A minus B = value of the neighbour measurements. B minus C = value of the geomet
 C = the pure per-site downscaling floor.
 
 **Status, 3 August 2026 — current.** Everything except the short training run (§4.7) is
-**implemented, committed and rolled out to all three hosts** on branch
-`fix/mtgnn-topo-static-dim`. Full evidence with concrete numbers:
+**implemented, committed and rolled out to all three hosts** as commit `3f8d6b8` on branch
+`fix/mtgnn-topo-static-dim` (parent `674a043`). Full evidence with concrete numbers:
 [`docs/ablations_verification_results.md`](ablations_verification_results.md).
 
 | Item | State |

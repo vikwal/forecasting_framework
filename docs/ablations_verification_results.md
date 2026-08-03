@@ -432,7 +432,41 @@ subgraph, so the batch composition matches A and B".
 
 ---
 
-## 6. Reproduktion
+## 6. Rollout
+
+Commit `3f8d6b8` auf Branch `fix/mtgnn-topo-static-dim`, Elternteil `674a043`.
+25 Dateien, 4676 Einfügungen, 6 Löschungen.
+
+| Host | Repo | HEAD | Arbeitsbaum |
+|---|---|---|---|
+| `l2` (`w-lambdablade2`) | `/home/viktor/Work/forecasting_framework` | `3f8d6b8` | sauber (0 Einträge) |
+| `l1` (`w-lambdablade1`) | `/home/viktorwalter/Work/forecasting_framework` | `3f8d6b8` | 87 modifizierte Configs, **ausschließlich** Pfad-Rewrites |
+| `ws` (`w-lambda-vector`) | `/home/viktor/Work/forecasting_framework` | `3f8d6b8` | sauber (0 Einträge) |
+
+Auf `l1` wurden die Pfad-Rewrites nach dem Pull neu angewendet
+(`/mnt/lambda1/nvme1/` → `/mnt/nvme1/`). Kontrolle:
+
+```
+git diff -U0 | grep "^[+-]" | grep -v "^[+-][+-]" | grep -cv "mnt/nvme1\|mnt/lambda1"
+→ 0
+```
+
+87 statt vorher 79 modifizierte Config-Dateien: die acht neuen Varianten-Configs
+erben die `/mnt/lambda1/nvme1/`-Pfade aus ihren A-Quellen und werden daher
+ebenfalls umgeschrieben.
+
+Die Verifikationssuite wurde auf **allen drei Hosts** ausgeführt, jeweils
+**76 passed, 0 failed**. Auf `l1` bestätigt sie zusätzlich, dass die
+Pfad-Rewrites die Varianten-Configs nicht beschädigt haben.
+
+Aufgeräumt: die veralteten Backups `geostatistics/stgnn/graph_builder.py.bak_ablation`
+und `geostatistics/stgnn/training/sampler.py.bak_ablation` (30.07.) auf `l1`
+wurden gelöscht — ein Zurückspielen hätte die Runde-1-Fixes A2, A4, B1, B2 und B6
+wieder entfernt.
+
+---
+
+## 7. Reproduktion
 
 ```bash
 ssh l2
