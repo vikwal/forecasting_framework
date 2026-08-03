@@ -130,7 +130,7 @@ bleibt) und je drei Jobs in `launch_eval_pipeline.py`.
 | `geostatistics/ablations/guard.py` | Bannerzeile + harte Assertion (§1.3) |
 | `geostatistics/ablations/fixture.py` | deterministische Test-Fixture: echte Config, echte Stations-IDs/Koordinaten/Höhen aus `data/stations_master.csv`, echte Topo-Features, echter Graph-Builder und Sampler; nur die Messwert- und NWP-**Werte** sind geseedet synthetisch |
 | `geostatistics/ablations/batch_fingerprint.py` | Plan §4.1 — SHA-256-Fingerabdruck aller Sampler-Tensoren, vor und nach der Änderung lauffähig |
-| `geostatistics/ablations/verify.py` | Plan §4.2–§4.6 plus Config-Prüfung, 76 Checks |
+| `geostatistics/ablations/verify.py` | Plan §4.2–§4.6 plus Config-Prüfung, 79 Checks |
 | `geostatistics/ablations/gen_variant_configs.py` | Config-Generator |
 
 Damit liegen die früher in `/tmp` verstreuten Skripte (Plan §10) im Repository.
@@ -238,7 +238,8 @@ sondern die Folge des fehlenden Stationsgraphen. Damit ist auch belegt, dass
 in C keine zweite Informationsbrücke zwischen Stationen existiert.
 
 Nebenbefund: das ist zugleich der direkte Beweis für Plan §9.2 — `K_hop` und
-`next_n_neighbors` können in C nichts bewirken (siehe §4 offene Entscheidung).
+`next_n_neighbors` können in C nichts bewirken. Auf dieser Grundlage wurden sie
+aus C's HPO-Suchraum entfernt, siehe §4.
 
 ### §4.6 — Die Assertion feuert
 
@@ -294,7 +295,7 @@ zwischen jeder Variantenconfig und ihrer Quelle:
 |---|---|
 | `config_wind_dcrnn_nomeas.yaml` | `dcrnn.neighbour_meas_available: <absent>→False`, `dcrnn.hpo.trials: 150→60` |
 | `config_wind_dcrnn_nomeas_fold{1,2,3}.yaml` | `dcrnn.neighbour_meas_available: <absent>→False` |
-| `config_wind_dcrnn_nograph.yaml` | `dcrnn.neighbour_meas_available: <absent>→False`, `dcrnn.station_connectivity: 'delaunay'→'none'`, `dcrnn.hpo.trials: 150→60` |
+| `config_wind_dcrnn_nograph.yaml` | `dcrnn.neighbour_meas_available: <absent>→False`, `dcrnn.station_connectivity: 'delaunay'→'none'`, `dcrnn.hpo.trials: 150→60`, **plus die sechs gepinnten Suchraum-Schlüssel** `dcrnn.hpo.params.{K_hop,next_n_neighbors}.{type,low,high}: …→<absent>` (siehe §4) |
 | `config_wind_dcrnn_nograph_fold{1,2,3}.yaml` | `dcrnn.neighbour_meas_available: <absent>→False`, `dcrnn.station_connectivity: 'delaunay'→'none'`, `dcrnn.direction_to_adj: <absent>→False` |
 
 Sonst **kein** einziger Schlüssel. Weiter geprüft, je Datei:
@@ -314,7 +315,7 @@ tatsächliche Wert ändert sich dadurch nirgends.
 ### Gesamtergebnis
 
 ```
-76 passed, 0 failed  (of 76 checks)
+79 passed, 0 failed  (of 79 checks)
 ```
 plus `IDENTICAL — 28 tensor fingerprints` für §4.1.
 
@@ -379,43 +380,85 @@ konservativ. Wer das vermeiden will, setzt `trials` in beiden Basis-Configs auf
 
 ---
 
-## 4. Offene Entscheidung: inerte Parameter in Variante C (Plan §9.2)
+## 4. Inerte Parameter in Variante C (Plan §9.2) — entschieden
 
-`K_hop` und `next_n_neighbors` stehen weiterhin in C's HPO-Suchraum.
-`direction_to_adj` ist in C explizit `false` und war nie Teil des Suchraums.
-
-Der Permutationstest (§4.5, max\|Δpred\| = **0.000e+00**) beweist direkt, dass
-beide Parameter die Vorhersage in C nicht beeinflussen können. Sie belegen also
-Suchraumdimensionen ohne Gegenwert, und `next_n_neighbors` ist zusätzlich
-**teuer**: es steuert, wie viele Nachbarknoten in den Teilgraphen kommen, und die
-kosten in C Speicher und Rechenzeit, ohne etwas beizutragen.
-
-**Bewusst nicht entschieden**, weil der Auftrag diese Entscheidung ausdrücklich
-als offen ausweist. Der Generator hat dafür einen Schalter:
+**Entscheidung des Nutzers: `K_hop` und `next_n_neighbors` werden aus dem
+HPO-Suchraum von Variante C entfernt; die statischen Werte `K_hop: 2` und
+`next_n_neighbors: 90` bleiben stehen.** Umgesetzt mit
 
 ```bash
 python -m geostatistics.ablations.gen_variant_configs \
     --variant nograph --trials 60 --pin-inert --force
 ```
 
-`--pin-inert` entfernt `K_hop` und `next_n_neighbors` aus C's `hpo.params` und
-hinterlässt an ihrer Stelle eine Kommentarzeile. Die statischen Werte
-(`K_hop: 2`, `next_n_neighbors: 90`) bleiben stehen, C's Batch-Zusammensetzung
-bliebe also identisch zu A und B.
+`direction_to_adj` war nie Teil des Suchraums und steht in C ohnehin explizit
+auf `false`.
 
-**Empfehlung: ja, anwenden.** Es gibt einen Präzedenzfall im selben Repo:
+### Warum
+
+**Die beiden Parameter sind nachweislich wirkungslos.** Der Permutationstest in
+§4.5 liefert für C max\|Δpred\| = **0.000e+00** — exakt null, nicht nur
+innerhalb der Toleranz. Ohne station↔station-Kanten kann `K_hop` (Anzahl der
+Diffusionssprünge) nichts diffundieren, und `next_n_neighbors` (wie viele
+Nachbarknoten in den Teilgraphen kommen) bestimmt nur, wie viele Knoten
+rechnen, ohne dass ihr Ergebnis irgendwo ankommt. Beide belegten also
+Suchraumdimensionen ohne Gegenwert; `next_n_neighbors` ist zusätzlich **teuer**,
+weil die wirkungslosen Nachbarknoten Speicher und Rechenzeit kosten.
+
+**Es gibt den Präzedenzfall im selben Repository.**
 `config_wind_dcrnn_base.yaml` wurde aus `config_wind_dcrnn.yaml` generiert und
 hat `nwp_heads` / `nwp_out_per_head` aus dem Suchraum entfernt, weil sie ohne
-GATv2 wirkungslos sind — exakt dieselbe Situation. Zwei Dimensionen weniger
-sind bei 60 Trials spürbar, und ein Appendix, der inerte Parameter in einem
-Suchraum auflistet, liest sich schlecht.
+GATv2 wirkungslos sind (`# nwp_heads / nwp_out_per_head entfallen: ohne GATv2
+sind sie wirkungslos.`) — exakt dieselbe Situation, dieselbe Konsequenz.
 
-**Nicht empfohlen** ist dagegen, `next_n_neighbors` zusätzlich auf sein Minimum
-zu ziehen. Es wäre für das *Ergebnis* nachweislich folgenlos, ändert aber die
-Knotenzahl je Batch und damit den Verbrauch des Dropout-RNG-Stroms — die
-Trainingstrajektorie wäre eine andere (statistisch äquivalent, nicht identisch).
-Und Plan §4 selbst nennt es als wünschenswert, dass „C still samples a station
-subgraph, so the batch composition matches A and B".
+**Bei 60 Trials zählen zwei Dimensionen.** Der Suchraum von C schrumpft von
+**17 auf 15** Parameter. Und ein Appendix, der inerte Parameter als „gesucht"
+auflistet, liest sich schlecht.
+
+### Was bewusst *nicht* getan wurde
+
+* **`next_n_neighbors` wurde nicht auf sein Minimum gezogen.** Das wäre für das
+  Ergebnis nachweislich folgenlos, ändert aber die Knotenzahl je Batch und damit
+  den Verbrauch des Dropout-RNG-Stroms — die Trainingstrajektorie wäre eine
+  andere (statistisch äquivalent, nicht identisch). Plan §4 nennt es
+  ausdrücklich als wünschenswert, dass „C still samples a station subgraph, so
+  the batch composition matches A and B"; mit `next_n_neighbors: 90` gilt das.
+* **Die drei Fold-Configs von C wurden nicht angefasst.** Sie fahren nie HPO
+  (`train_dcrnn.py` liest die besten Parameter aus der Studie, den `hpo:`-Block
+  der Fold-Datei liest niemand). `--pin-inert` wirkt deshalb — genau wie
+  `--trials` — nur auf die Studien-Config. Der semantische Diff der drei
+  Fold-Dateien gegen ihre A-Quellen bleibt damit auf die reine Ablationsachse
+  beschränkt (3 Schlüssel), und sie sind gegenüber dem vorherigen Commit
+  byteidentisch geblieben.
+* **Variante B wurde nicht angefasst.** B benutzt den Stationsgraphen, dort sind
+  beide Parameter wirksam. Geprüft: `config_wind_dcrnn_nomeas.yaml` hat
+  weiterhin **17** Suchraumparameter, identisch zu A, `K_hop` und
+  `next_n_neighbors` inklusive.
+
+### Beleg
+
+Im Suchraum von `config_wind_dcrnn_nograph.yaml` stehen an Stelle der beiden
+Blöcke jetzt Kommentarzeilen:
+
+```yaml
+      # K_hop entfaellt: ohne station<->station Kanten wirkungslos (Permutationstest: max|dpred| = 0.0).
+      # next_n_neighbors entfaellt: ohne station<->station Kanten wirkungslos (Permutationstest: max|dpred| = 0.0).
+```
+
+Die Statikwerte sind unverändert:
+
+```
+  K_hop: 2
+  next_n_neighbors: 90
+```
+
+Automatisch geprüft (§2, Zusatzcheck):
+
+| Check | Ergebnis |
+|---|---|
+| `K_hop` / `next_n_neighbors` aus `hpo.params` verschwunden | ja, Suchraum **17 → 15** Parameter |
+| Statikwerte erhalten | `{'K_hop': 2, 'next_n_neighbors': 90}` — identisch zu A |
+| B's Suchraum unangetastet | 17 Parameter, beide weiterhin gesucht |
 
 ---
 
@@ -424,7 +467,6 @@ subgraph, so the batch composition matches A and B".
 | Punkt | Status |
 |---|---|
 | Plan §4.7, kurzer Trainingslauf von B | offen, braucht GPU; siehe §2 §4.7 |
-| Inerte Parameter in C (Plan §9.2) | Entscheidung offen; Kommando steht in §4 |
 | HPO-Läufe für `wind_dcrnn_nomeas` / `wind_dcrnn_nograph` | nicht gestartet |
 | 6 Trainingsläufe (2 Varianten × 3 Folds) | nicht gestartet, brauchen die HPO-Ergebnisse |
 | Evaluation in `excl_val` / `incl_val` | nicht gestartet |
@@ -456,7 +498,7 @@ erben die `/mnt/lambda1/nvme1/`-Pfade aus ihren A-Quellen und werden daher
 ebenfalls umgeschrieben.
 
 Die Verifikationssuite wurde auf **allen drei Hosts** ausgeführt, jeweils
-**76 passed, 0 failed**. Auf `l1` bestätigt sie zusätzlich, dass die
+**79 passed, 0 failed**. Auf `l1` bestätigt sie zusätzlich, dass die
 Pfad-Rewrites die Varianten-Configs nicht beschädigt haben.
 
 Aufgeräumt: die veralteten Backups `geostatistics/stgnn/graph_builder.py.bak_ablation`
@@ -479,12 +521,12 @@ CUDA_VISIBLE_DEVICES="" python -m geostatistics.ablations.batch_fingerprint \
 CUDA_VISIBLE_DEVICES="" python -m geostatistics.ablations.batch_fingerprint \
     --out /tmp/fp_after.json --compare /tmp/fp_before.json
 
-# Plan §4.2 … §4.6 plus Config-Checks, 76 Checks, ~40 s, keine Daten, keine GPU
+# Plan §4.2 … §4.6 plus Config-Checks, 79 Checks, ~40 s, keine Daten, keine GPU
 CUDA_VISIBLE_DEVICES="" python -m geostatistics.ablations.verify
 
 # Configs neu erzeugen (idempotent mit --force)
 python -m geostatistics.ablations.gen_variant_configs --variant nomeas  --trials 60 --force
-python -m geostatistics.ablations.gen_variant_configs --variant nograph --trials 60 --force
+python -m geostatistics.ablations.gen_variant_configs --variant nograph --trials 60 --pin-inert --force
 
 # Trockenlauf der Launcher
 python geostatistics/launch_train_pipeline.py --gpus 0 --groups DCRNN_NOMEAS,DCRNN_NOGRAPH --dry-run

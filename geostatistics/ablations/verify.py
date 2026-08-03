@@ -454,8 +454,16 @@ def check_7_configs(cfg_dir: str) -> None:
                     "station_connectivity": "none",
                     "direction_to_adj": False},
     }
-    # deliberate, documented deviation: reduced HPO budget on the study configs
+    # Deliberate, documented deviations on the *study* (non-fold) configs:
+    #   * reduced HPO budget, 150 → 60
+    #   * variant C only: K_hop / next_n_neighbors pinned, i.e. removed from the
+    #     HPO search space because the permutation test proves they cannot
+    #     influence C (max|Δpred| = 0.0). Same move as config_wind_dcrnn_base.yaml,
+    #     which dropped nwp_heads / nwp_out_per_head for the same reason.
     budget_key = "hpo.trials"
+    PINNED_IN_C = ("K_hop", "next_n_neighbors")
+    pinned_keys = {f"dcrnn.hpo.params.{p}.{f}"
+                   for p in PINNED_IN_C for f in ("type", "low", "high", "step", "log")}
 
     for variant, want in expected.items():
         for fold in ("", "_fold1", "_fold2", "_fold3"):
@@ -472,6 +480,8 @@ def check_7_configs(cfg_dir: str) -> None:
             allowed = {f"dcrnn.{k}" for k in want}
             if fold == "":
                 allowed.add(f"dcrnn.{budget_key}")
+                if variant == "nograph":
+                    allowed |= pinned_keys
             unexpected = changed - allowed
             record(
                 f"{dst.name}: only the ablated axis differs",
@@ -503,6 +513,34 @@ def check_7_configs(cfg_dir: str) -> None:
             want_sn = f"cl_m-dcrnn_out-48_freq-1h_wind_dcrnn_{variant}"
             record(f"{dst.name}: Optuna study resolution",
                    sn == want_sn, sn)
+
+            # Inert parameters in C (plan §9.2, decided: pin them).
+            params = b["dcrnn"].get("hpo", {}).get("params", {})
+            a_params = a["dcrnn"].get("hpo", {}).get("params", {})
+            if variant == "nograph" and fold == "":
+                gone = [p for p in PINNED_IN_C if p not in params]
+                statics_kept = {p: b["dcrnn"].get(p) for p in PINNED_IN_C}
+                record(
+                    f"{dst.name}: inert params removed from the search space",
+                    len(gone) == len(PINNED_IN_C),
+                    f"absent from hpo.params: {gone} (A had "
+                    f"{[p for p in PINNED_IN_C if p in a_params]}); "
+                    f"search space {len(a_params)} → {len(params)} parameters",
+                )
+                record(
+                    f"{dst.name}: static values of the pinned params kept",
+                    all(statics_kept[p] == a["dcrnn"].get(p) for p in PINNED_IN_C),
+                    f"{statics_kept} — identical to A, so C's batch composition "
+                    "still matches A and B",
+                )
+            elif variant == "nomeas" and fold == "":
+                record(
+                    f"{dst.name}: search space untouched (B still uses the graph)",
+                    all(p in params for p in PINNED_IN_C)
+                    and len(params) == len(a_params),
+                    f"{len(params)} parameters, same as A; "
+                    f"{list(PINNED_IN_C)} still searched",
+                )
 
             # parse through the production config parser
             try:

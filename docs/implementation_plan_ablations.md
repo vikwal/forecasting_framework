@@ -22,12 +22,12 @@ C = the pure per-site downscaling floor.
 | `station_connectivity: "none"` branch in the graph builder | **done**, edge-feature width probed (F = 12, incl. the 8 topo columns; a flags-only count would have given 4) |
 | Assertion + startup banner (`geostatistics/ablations/guard.py`) | **done**, wired into `train_dcrnn.py`, `get_test_results_dcrnn.py` **and** `hpo_dcrnn.py` |
 | Variant B configs, 4 files | **done**, generated; semantic diff against A = only `neighbour_meas_available` (+ `hpo.trials` on the study config) |
-| Variant C configs, 4 files | **done**, generated; semantic diff against A = only `neighbour_meas_available`, `station_connectivity`, `direction_to_adj` (+ `hpo.trials`) |
+| Variant C configs, 4 files | **done**, generated; semantic diff against A = only `neighbour_meas_available`, `station_connectivity`, `direction_to_adj` (+ `hpo.trials` and the pinned search-space keys on the study config) |
 | Groups `DCRNN_NOMEAS` / `DCRNN_NOGRAPH` | **done** in `launch_train_pipeline.py` and `launch_eval_pipeline.py` |
 | §4.1 variant A untouched | **bit-identical** — 28 SHA-256 tensor fingerprints, before vs. after the patch |
-| §4.2–§4.6 verification suite (no data, no GPU) | **76 passed, 0 failed**; §4.5 gives max\|Δpred\| = **0.000e+00** for C against 5.9e-1 for the B and A controls |
+| §4.2–§4.6 verification suite (no data, no GPU) | **79 passed, 0 failed** on all three hosts; §4.5 gives max\|Δpred\| = **0.000e+00** for C against 5.9e-1 for the B and A controls |
 | §4.7 short training run | **open** — needs GPU; the A campaign occupies all 14 GPUs and has 0 completed trials |
-| Inert parameters in C (§9.2) | **decision still open**; `gen_variant_configs.py --pin-inert` applies it in one command, recommendation in the results doc §4 |
+| Inert parameters in C (§9.2) | **decided: pinned.** `K_hop` and `next_n_neighbors` removed from C's HPO search space (17 → 15 parameters); the static values `K_hop: 2` / `next_n_neighbors: 90` stay, so C's batch composition still matches A and B. Rationale in the results doc §4 |
 | HPO runs and trainings for B and C | **not started** |
 
 Author decisions incorporated: **own HPO study per variant** (route (b) of
@@ -36,6 +36,17 @@ of 60 instead of 150; committed and rolled out to `l2`, `l1` and `ws`. Because e
 tuned on its own study, B and C no longer inherit A's hyperparameters — the fairness objection in §6
 is largely defused. What remains is the smaller search budget, which still favours A slightly and
 makes the measured channel contributions upper bounds.
+
+Author decision on §9.2, taken after the verification ran: **pin the inert parameters in C.**
+`K_hop` and `next_n_neighbors` cannot influence variant C — with no station edges there is nothing
+to diffuse over and the extra neighbour nodes compute results that reach nobody. The permutation
+check proves it directly (max|Δpred| = **0.000e+00**, exactly zero, against 5.9e-1 for the
+otherwise identical variant-B control). They were therefore removed from C's HPO search space,
+which shrinks it from 17 to 15 parameters — the same move `config_wind_dcrnn_base.yaml` already
+makes for `nwp_heads` / `nwp_out_per_head`, which are inert without GATv2. The static values
+`K_hop: 2` and `next_n_neighbors: 90` are kept, so C still samples a station subgraph of the same
+size as A and B, as §4 of this plan asks for. Only the study config is touched; the three fold
+configs never run HPO and stayed byte-identical.
 
 The helper scripts that used to live in `/tmp` on `l1` are now in the repository under
 `geostatistics/ablations/`. `/tmp/patch_ablations.py` was used as a **reference only**: its edits
@@ -329,6 +340,17 @@ not mirror the base config the way one would assume, and if the HPO is being red
 moment to regenerate them from a single source.
 
 ### 9.2 Variant C's search space contains three provably inert parameters
+
+> **DECIDED on 3 August 2026 — implemented.** `K_hop` and `next_n_neighbors` were removed
+> from variant C's HPO search space (17 → 15 parameters) via
+> `gen_variant_configs.py --pin-inert`; `direction_to_adj` was never in the search space and is
+> explicitly `false` in C. The static values `K_hop: 2` / `next_n_neighbors: 90` were **kept**,
+> so C keeps A's and B's batch composition — the recommendation below to pin
+> `next_n_neighbors` at its minimum was deliberately *not* followed, because a different node
+> count changes how much of the dropout RNG stream each step consumes and would make C's
+> training trajectory merely equivalent instead of comparable. The claim below that the
+> parameters are inert is no longer an argument but a measurement: the permutation check gives
+> max|Δpred| = 0.000e+00. Only the study config was touched; the fold configs never run HPO.
 
 With no station edges, `K_hop`, `next_n_neighbors` and `direction_to_adj` cannot influence the model. The
 permutation check in the verification suite proves this directly: with `station_connectivity: none` the

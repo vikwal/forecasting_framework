@@ -39,7 +39,10 @@ With no station edges, ``K_hop`` and ``next_n_neighbors`` provably cannot change
 the prediction (verified: max|Δpred| = 0.0 under a full neighbour permutation).
 ``--pin-inert`` drops them from C's HPO search space, mirroring what was done for
 ``config_wind_dcrnn_base.yaml`` (which dropped ``nwp_heads`` /
-``nwp_out_per_head``).  Off by default — see docs/implementation_plan_ablations.md §9.2.
+``nwp_out_per_head``).  The static values ``K_hop: 2`` / ``next_n_neighbors: 90``
+stay, so C's batch composition still matches A and B.  Applies to the non-fold
+config only, since the fold configs never run HPO.  See
+docs/implementation_plan_ablations.md §9.2 — the campaign uses ``--pin-inert``.
 
 Usage
 -----
@@ -233,7 +236,11 @@ def main() -> None:
         if args.trials is not None and not is_fold:
             notes.append(f"hpo.trials: {args.trials}  [{set_trials(lines, lo, hi, args.trials)}]")
 
-        if args.pin_inert and args.variant == "nograph":
+        # Only the non-fold config ever runs HPO, so only its search space is
+        # touched — exactly like --trials above. The fold configs keep their
+        # (unused) hpo blocks byte for byte, which keeps their diff against the
+        # variant-A fold configs confined to the ablated axis.
+        if args.pin_inert and args.variant == "nograph" and not is_fold:
             lines, dropped = drop_hpo_params(lines, lo, hi, INERT_IN_C)
             notes.append(f"dropped from HPO search space: {dropped or 'none found'}")
 

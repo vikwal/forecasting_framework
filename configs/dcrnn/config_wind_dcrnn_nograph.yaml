@@ -169,10 +169,7 @@ dcrnn:
         low: 1
         high: 3
 
-      K_hop:
-        type: int
-        low: 1
-        high: 3
+      # K_hop entfaellt: ohne station<->station Kanten wirkungslos (Permutationstest: max|dpred| = 0.0).
 
       # NWP attention heads — sampled first; nwp_out_dim is then forced to be
       # a multiple of nwp_heads via nwp_out_per_head (see hpo_dcrnn.py)
@@ -220,10 +217,7 @@ dcrnn:
         low: 0.5
         high: 0.87
 
-      next_n_neighbors:
-        type: int
-        low: 50
-        high: 90
+      # next_n_neighbors entfaellt: ohne station<->station Kanten wirkungslos (Permutationstest: max|dpred| = 0.0).
 
       gradient_clip:
         type: float
