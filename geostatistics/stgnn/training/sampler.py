@@ -123,6 +123,33 @@ class TrainingSampler:
 
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _station_ecmwf_block(
+        all_global: list[int],
+        station_ecmwf_nwp: np.ndarray,        # (T, N_stations, E2) — naechster Gitterpunkt
+        e2_grid_window: np.ndarray,           # (T_total, N_ecmwf, E2) — Fenster ueber das Gitter
+        t_from: int,
+        t_to: int,
+        station_k_nearest_ecmwf: np.ndarray | None,
+    ) -> np.ndarray:
+        """ECMWF-Kanaele fuer station.x, (N_sub, T_total, [k_e*]E2).
+
+        Mit ``station_k_nearest_ecmwf`` werden die k naechsten Gitterpunkte
+        distanzsortiert konkateniert — genau spiegelbildlich zu ICON-D2 unter
+        ``nwp_nodes=False``. Ohne den Index bleibt es beim einzelnen naechsten
+        Gitterpunkt aus ``station_ecmwf_nwp`` (der Pfad, den nwp_nodes=True
+        ohnehin ignoriert, weil das Modell dort die ecmwf-Knoten liest).
+        """
+        if station_k_nearest_ecmwf is None:
+            block = station_ecmwf_nwp[t_from:t_to, :, :][:, all_global, :]
+            return block.transpose(1, 0, 2)                      # (N_sub, T_total, E2)
+        ke  = station_k_nearest_ecmwf[all_global]                # (N_sub, k_e)
+        sub = e2_grid_window[:, ke, :]                           # (T_total, N_sub, k_e, E2)
+        n_sub, t_tot = len(all_global), e2_grid_window.shape[0]
+        return sub.transpose(1, 0, 2, 3).reshape(n_sub, t_tot, -1)
+
+    # ------------------------------------------------------------------
+
     def sample_train(
         self,
         r_curr: int,
@@ -140,6 +167,7 @@ class TrainingSampler:
         interpol_meas: np.ndarray | None = None,          # (T, N_stations) Kriging lag, pre-scaled
         grid_icond2_uv_runs: np.ndarray | None = None,   # (R, 48, N_grid, 2) raw u/v
         station_k_nearest_grid: np.ndarray | None = None,  # (N_stations, k) — k nearest grid indices
+        station_k_nearest_ecmwf: np.ndarray | None = None, # (N_stations, k_e) — k nearest ECMWF indices
     ) -> SampleBatch:
         H_hist  = self.cfg.history_length
         H_fore  = self.cfg.forecast_horizon
@@ -205,9 +233,11 @@ class TrainingSampler:
             ], axis=0)   # (96, N_grid, 2)
 
         # ECMWF
-        e2_full      = station_ecmwf_nwp[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
-        e2_full      = e2_full.transpose(1, 0, 2)                    # (N_sub, 96, E2)
         e2_grid_full = ecmwf_nwp[t_hist_abs:t_run_abs + H_fore]      # (96, N_ecmwf, E2)
+        e2_full      = self._station_ecmwf_block(
+            all_global, station_ecmwf_nwp, e2_grid_full,
+            t_hist_abs, t_run_abs + H_fore, station_k_nearest_ecmwf,
+        )                                                            # (N_sub, 96, [k_e*]E2)
 
         # Measurements: history only, (H, N_sub, M)
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
@@ -263,6 +293,7 @@ class TrainingSampler:
         interpol_meas: np.ndarray | None = None,          # (T, N_stations) Kriging lag, pre-scaled
         grid_icond2_uv_runs: np.ndarray | None = None,   # (R, 48, N_grid, 2) raw u/v
         station_k_nearest_grid: np.ndarray | None = None,  # (N_stations, k) — k nearest grid indices
+        station_k_nearest_ecmwf: np.ndarray | None = None, # (N_stations, k_e) — k nearest ECMWF indices
     ) -> SampleBatch:
         H_hist = self.cfg.history_length
         H_fore = self.cfg.forecast_horizon
@@ -304,9 +335,11 @@ class TrainingSampler:
                 grid_icond2_uv_runs[r_curr],
             ], axis=0)   # (96, N_grid, 2)
 
-        e2_full      = station_ecmwf_nwp[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
-        e2_full      = e2_full.transpose(1, 0, 2)                    # (N_all, 96, E2)
         e2_grid_full = ecmwf_nwp[t_hist_abs:t_run_abs + H_fore]
+        e2_full      = self._station_ecmwf_block(
+            all_global, station_ecmwf_nwp, e2_grid_full,
+            t_hist_abs, t_run_abs + H_fore, station_k_nearest_ecmwf,
+        )                                                            # (N_all, 96, [k_e*]E2)
 
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
         if not self.hist_wind_available:

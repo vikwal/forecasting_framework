@@ -388,7 +388,11 @@ def main() -> None:
         if t_run < split_time: continue
         if eval_cutoff is not None and t_run >= eval_cutoff: continue
         if t_run not in ts_lookup.index: continue
-        t_run_abs = int(ts_lookup[t_run])
+        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
+        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
+        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
+        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
+        t_run_abs = int(ts_lookup[t_run]) + 1
         if t_run_abs < H_hist or t_run_abs + H_fore > T: continue
         
         t_hist_target = t_run - pd.Timedelta(hours=H_hist)
@@ -420,15 +424,25 @@ def main() -> None:
     sampler = TrainingSampler(model_cfg, builder, base_graph, target_feat_idx=target_feat_idx, station_coords=station_coords)
 
     # k nearest ICON-D2 grid points for nwp_nodes=False (same logic as train_dcrnn.py)
-    station_k_nearest_grid = None
+    station_k_nearest_grid  = None
+    station_k_nearest_ecmwf = None
     if not dcrnn_cfg.get("nwp_nodes", True):
-        from sklearn.neighbors import BallTree as _BallTree
-        _k = model_cfg.graph.next_n_icond2_grid_points
-        _bt = _BallTree(np.radians(icond2_coords), metric="haversine")
-        station_k_nearest_grid = _bt.query(
-            np.radians(station_coords), k=_k, return_distance=False,
-        ).astype(np.int64)  # (N_stations, k)
-        logger.info("nwp_nodes=False → station_k_nearest_grid: %s  (k=%d)", station_k_nearest_grid.shape, _k)
+        from geostatistics.stgnn.utils.spatial import geodesic_knn
+        _k  = model_cfg.graph.next_n_icond2_grid_points
+        _ke = model_cfg.graph.next_n_ecmwf_grid_points
+        _, station_k_nearest_grid = geodesic_knn(icond2_coords, station_coords, k=_k)
+        station_k_nearest_grid = station_k_nearest_grid.astype(np.int64)
+        logger.info(
+            "nwp_nodes=False — station_k_nearest_grid: %s  (k=%d, geodaetisch)",
+            station_k_nearest_grid.shape, _k,
+        )
+        if _ke > 0 and len(ecmwf_coords) > 0:
+            _, station_k_nearest_ecmwf = geodesic_knn(ecmwf_coords, station_coords, k=_ke)
+            station_k_nearest_ecmwf = station_k_nearest_ecmwf.astype(np.int64)
+            logger.info(
+                "nwp_nodes=False — station_k_nearest_ecmwf: %s  (k=%d, geodaetisch)",
+                station_k_nearest_ecmwf.shape, _ke,
+            )
 
     model = DCRNN(model_cfg)
 
@@ -452,6 +466,7 @@ def main() -> None:
         all_ids=all_ids, test_run_pairs=test_run_pairs,
         timestamps=timestamps,
         station_k_nearest_grid=station_k_nearest_grid,
+        station_k_nearest_ecmwf=station_k_nearest_ecmwf,
         hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
     )
 

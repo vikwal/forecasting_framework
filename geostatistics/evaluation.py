@@ -75,6 +75,7 @@ def build_eval_batch(
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
     hist_wind_available: bool = False,
     station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
+    station_k_nearest_ecmwf: np.ndarray | None = None, # (N_all, k_e) — k nearest ECMWF, nwp_nodes=False
 ) -> tuple:
     """
     Build a HeteroData evaluation batch for the given station split.
@@ -110,9 +111,15 @@ def build_eval_batch(
         grid_icond2_runs_scaled[r_curr],
     ], axis=0)                                                   # (96, N_grid, I2)
 
-    e2_full = station_ecmwf_nwp_scaled[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
-    e2_full = e2_full.transpose(1, 0, 2)                        # (N_all, 96, E2)
     e2_grid_full = ecmwf_nwp_scaled[t_hist_abs:t_run_abs + H_fore]   # (96, N_ecmwf, E2)
+    if station_k_nearest_ecmwf is not None:
+        # k naechste ECMWF-Punkte konkateniert, spiegelbildlich zu ICON-D2 oben
+        ke_idx  = station_k_nearest_ecmwf[all_global]            # (N_all, k_e)
+        e2_full = e2_grid_full[:, ke_idx, :].transpose(1, 0, 2, 3).reshape(
+            N_all, e2_grid_full.shape[0], -1)                    # (N_all, 96, k_e*E2)
+    else:
+        e2_full = station_ecmwf_nwp_scaled[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
+        e2_full = e2_full.transpose(1, 0, 2)                     # (N_all, 96, E2)
 
     meas_hist = station_meas_scaled[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
     if not hist_wind_available:
@@ -174,6 +181,7 @@ def evaluate(
     hist_wind_available: bool = False,
     timestamps: "pd.DatetimeIndex | None" = None,
     station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
+    station_k_nearest_ecmwf: np.ndarray | None = None, # (N_all, k_e) — k nearest ECMWF, nwp_nodes=False
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
     Single-pass evaluation over all test run pairs.
@@ -201,6 +209,7 @@ def evaluate(
         station_meas_scaled=meas_scaled,
         station_nearest_grid=station_nearest_grid,
         station_k_nearest_grid=station_k_nearest_grid,
+        station_k_nearest_ecmwf=station_k_nearest_ecmwf,
         grid_icond2_runs_scaled=grid_icond2_runs_scaled,
         station_ecmwf_nwp_scaled=station_ecmwf_nwp_scaled,
         station_static=station_static,
@@ -265,7 +274,7 @@ def evaluate(
                 t_run_abs:t_run_abs + H_fore, :, target_feat_idx
             ][:, val_station_indices].T  # (N_val, H_fore)
 
-            run_ts = timestamps[t_run_abs] if timestamps is not None else None
+            run_ts = timestamps[t_run_abs - 1] if timestamps is not None else None
             for i, gidx in enumerate(val_station_indices):
                 nwp_h  = _nwp_ref(gidx, r_curr)
                 pers_h = _pers_ref(gidx, t_run_abs)

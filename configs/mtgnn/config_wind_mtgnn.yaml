@@ -49,6 +49,12 @@ mtgnn:
   target_col: 'wind_speed'
   edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
   topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  # Alle neun Topo-Features als absolute Knotenfeatures. Ohne diesen
+  # Schluessel bekam DCRNN gar keine (parse_station_node_features hat
+  # keinen edge_features-Fallback) und MTGNN/WaveNet nur die acht aus
+  # edge_features — die Retrain-Configs setzen aber 'all', womit die HPO
+  # ein schmaleres Modell getunt hat als der Retrain baut.
+  station_node_features: all
   n_workers: 8
   icond2_run_hours: [6,9,12,15]
 
@@ -100,7 +106,7 @@ mtgnn:
   hpo:
     cv_mode: spatial
     spatial_folds: 'configs/spatial_folds.yaml'
-    trials: 1000
+    trials: 150
     studies_path: studies/
     tensorboard_monitoring: true
     pruner: median

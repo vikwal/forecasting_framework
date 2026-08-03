@@ -86,6 +86,11 @@ def _masked_loss(pred: torch.Tensor, gt: torch.Tensor, w: torch.Tensor) -> torch
 # Training loop
 # ---------------------------------------------------------------------------
 
+def _edge(t, device):
+    """Kantenattribute auf das Device schieben (None bleibt None)."""
+    return None if t is None else t.to(device)
+
+
 def _metrics(
     preds: torch.Tensor,
     gts: torch.Tensor,
@@ -132,7 +137,9 @@ def _train_epoch(
         if target_mask.sum() == 0:
             continue
 
-        pred = model(x, static, target_mask)
+        pred = model(x, static, target_mask,
+                     nwp_edge_attr=_edge(batch.nwp_edge_attr, device),
+                     ecmwf_edge_attr=_edge(batch.ecmwf_edge_attr, device))
         loss = _masked_loss(pred, gt, w) / grad_accum
         loss.backward()
         total_loss += loss.item() * grad_accum
@@ -177,7 +184,9 @@ def _val_epoch(
         gt          = batch.ground_truth.to(device)
         if target_mask.sum() == 0:
             continue
-        pred = model(x, static, target_mask)
+        pred = model(x, static, target_mask,
+                     nwp_edge_attr=_edge(batch.nwp_edge_attr, device),
+                     ecmwf_edge_attr=_edge(batch.ecmwf_edge_attr, device))
         total_loss += _masked_loss(pred, gt, w).item()
         all_preds.append(pred.cpu())
         all_gts.append(gt.cpu())
@@ -578,7 +587,11 @@ def main() -> None:
         t_run = run_times[r_curr]
         if t_run not in ts_lookup.index:
             skipped += 1; continue
-        t_run_abs = int(ts_lookup[t_run])
+        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
+        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
+        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
+        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
+        t_run_abs = int(ts_lookup[t_run]) + 1
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1; continue
 

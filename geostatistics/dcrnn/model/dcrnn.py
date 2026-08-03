@@ -80,14 +80,17 @@ class DCRNN(nn.Module):
             nwp_out_dim      = config.nwp_out_dim
             station_nwp_dim  = 0
         else:
-            # nwp_nodes=False: k nearest NWP grid points concatenated into station.x, no GATv2
+            # nwp_nodes=False: k nearest NWP grid points concatenated into station.x, no GATv2.
+            # ECMWF wird genauso mit k_e Punkten konkateniert (der Sampler liefert
+            # k_e*E2 Kanaele) — vorher stand hier nur E2, weil station.x den einen
+            # naechsten ECMWF-Punkt trug und next_n_ecmwf in diesem Arm folgenlos war.
             _k_i2 = config.graph.next_n_icond2_grid_points
-            enc_meas_dim    = (config.station_meas_features
-                               + _k_i2 * config.icond2_features_per_step
-                               + config.ecmwf_features_per_step)     # M + k*I2 + E2
+            _k_e2 = config.graph.next_n_ecmwf_grid_points
+            _nwp_ch = (_k_i2 * config.icond2_features_per_step
+                       + _k_e2 * config.ecmwf_features_per_step)     # k_i*I2 + k_e*E2
+            enc_meas_dim    = config.station_meas_features + _nwp_ch # M + k_i*I2 + k_e*E2
             nwp_out_dim     = 0
-            station_nwp_dim = (_k_i2 * config.icond2_features_per_step
-                               + config.ecmwf_features_per_step)     # k*I2 + E2
+            station_nwp_dim = _nwp_ch
 
         shared_kwargs = dict(
             icond2_dim=config.icond2_features_per_step,

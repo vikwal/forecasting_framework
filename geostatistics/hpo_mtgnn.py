@@ -198,7 +198,11 @@ def _build_all_run_pairs(
         if t_run not in ts_lookup.index:
             skipped += 1
             continue
-        t_run_abs = int(ts_lookup[t_run])
+        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
+        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
+        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
+        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
+        t_run_abs = int(ts_lookup[t_run]) + 1
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1
             continue
@@ -650,6 +654,46 @@ def main() -> None:
             )
             logger.info("GNNCache — cache written.")
 
+    # ── ICON-D2-Grid-NaN: betroffene Run-Paare ausschliessen ────────────────
+    # load_icond2_ml_runs loggt NaN im Grid nur, filtert sie aber nie. Faellt ein
+    # Val-Run in eine Gitterluecke, wird der Loss NaN (reproduziert bei MTGNN
+    # Fold 3). hpo_dcrnn.py hatte den Filter bereits, hier fehlte er.
+    _grid_nan_runs = set(
+        int(i) for i in np.where(np.isnan(grid_icond2_runs).any(axis=(1, 2, 3)))[0]
+    )
+    if _grid_nan_runs:
+        _n_before = len(all_run_pairs)
+        all_run_pairs = [
+            (rc, rh, t) for rc, rh, t in all_run_pairs
+            if rc not in _grid_nan_runs and rh not in _grid_nan_runs
+        ]
+        logger.warning(
+            "Excluded %d run pairs due to NaN in ICON-D2 grid data (%d run(s) affected).",
+            _n_before - len(all_run_pairs), len(_grid_nan_runs),
+        )
+
+    # ── NWP-Knotenhoehen fuer die Kantenattribute ───────────────────────────
+    # Distanz/Azimut allein wuerden reichen, um die Permutationsinvarianz der
+    # NWP-Attention zu brechen; die Hoehendifferenz kommt dazu, damit die Kanten
+    # dieselbe Breite haben wie beim DCRNN (edge_input_dim = 4).
+    icond2_alts = ecmwf_alts = None
+    _weather_db = os.environ.get("WEATHER_DB_URL")
+    _ecmwf_db   = os.environ.get("ECMWF_WIND_SL_URL")
+    if _weather_db:
+        from geostatistics.train_stgnn2 import _load_elevations_from_table
+        icond2_alts = _load_elevations_from_table(
+            _weather_db, "icon_d2_grid_points", icond2_coords) + 10.0
+        if _ecmwf_db and ecmwf_coords is not None and len(ecmwf_coords) > 0:
+            ecmwf_alts = _load_elevations_from_table(
+                _ecmwf_db, "ecmwf_grid_points", ecmwf_coords) + 10.0
+        logger.info("NWP-Knotenhoehen geladen (ICON-D2: %s, ECMWF: %s)",
+                    "ja", "ja" if ecmwf_alts is not None else "nein")
+    else:
+        logger.warning(
+            "WEATHER_DB_URL nicht gesetzt — NWP-Kantenattribute ohne Hoehendifferenz "
+            "(Distanz und Azimut bleiben erhalten)."
+        )
+
     # ── Topographic node features ───────────────────────────────────────────
     # Outside the cache branches on purpose: they depend only on all_ids, and
     # both the hit and the miss path must end up with the same static width.
@@ -743,7 +787,7 @@ def main() -> None:
     def _fold_pairs(val_start: pd.Timestamp, val_end: pd.Timestamp):
         tr, va = [], []
         for r_curr, r_hist, t_run_abs in all_run_pairs:
-            t = timestamps[t_run_abs]
+            t = timestamps[t_run_abs - 1]   # Laufzeit, nicht erster Prognoseschritt
             if   t < val_start: tr.append((r_curr, r_hist, t_run_abs))
             elif t < val_end:   va.append((r_curr, r_hist, t_run_abs))
         return tr, va
@@ -925,6 +969,8 @@ def main() -> None:
                 ecmwf_coords          = ecmwf_coords,
                 k_ecmwf               = next_n_ecmwf_trial,
                 aggregate_nwp         = aggregate_nwp,
+                icond2_alts           = icond2_alts,
+                ecmwf_alts            = ecmwf_alts,
                 hist_wind_available   = mcfg.get("hist_wind_available", False),
                 topo_feats            = plan["topo"],
             )
@@ -932,8 +978,13 @@ def main() -> None:
             M_meas_only     = len(measurement_cols)
             nwp_out_dim     = int(trial_cfg.get("nwp_out_dim", mcfg.get("nwp_out_dim", 32))) if nwp_nodes else 0
             nwp_heads_v     = int(trial_cfg.get("nwp_heads",   mcfg.get("nwp_heads", 4)))    if nwp_nodes else 4
-            ecmwf_channels  = (sampler.in_channels - M_meas_only - next_n_icond2_trial * _t_I2) if nwp_nodes else 0
-            in_ch_model     = (M_meas_only + nwp_out_dim + ecmwf_channels) if nwp_nodes else sampler.in_channels
+            # ECMWF laeuft unter nwp_nodes=True durch eine eigene Attention-Schicht
+            # (wie beim DCRNN), traegt also nwp_out_dim Kanaele statt k_e*E2.
+            E2_trial        = (_t_ecmwf.shape[2]
+                               if (_t_ecmwf is not None and next_n_ecmwf_trial > 0) else 0)
+            ecmwf_out_dim   = nwp_out_dim if (nwp_nodes and E2_trial > 0) else 0
+            in_ch_model     = ((M_meas_only + nwp_out_dim + ecmwf_out_dim)
+                               if nwp_nodes else sampler.in_channels)
 
             model = MTGNNModel(
                 in_channels      = in_ch_model,
@@ -954,6 +1005,9 @@ def main() -> None:
                 k_nwp            = next_n_icond2_trial,
                 nwp_out_dim      = nwp_out_dim,
                 nwp_heads        = nwp_heads_v,
+                k_ecmwf          = next_n_ecmwf_trial if nwp_nodes else 0,
+                ecmwf_feat_dim   = E2_trial,
+                ecmwf_out_dim    = ecmwf_out_dim,
                 M                = M_meas_only,
                 topk_graph       = topk_graph_trial,
             ).to(device)

@@ -51,7 +51,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from scipy.spatial import cKDTree
 from torch import Tensor
 
 
@@ -59,12 +58,22 @@ from torch import Tensor
 # Batch dataclass
 # ---------------------------------------------------------------------------
 
+# Kantenfeatures je NWP->Station-Kante: normierte Distanz, sin/cos Azimut,
+# normierte Hoehendifferenz. Modelle lesen die Breite ueber HomoSampler.nwp_edge_dim.
+NWP_EDGE_DIM = 4
+
+
 @dataclass
 class HomoBatch:
     x:            Tensor  # (N_sub, T_total, M+I2)
     static:       Tensor  # (N_sub, 6)
     target_mask:  Tensor  # (N_sub,) bool — True = target station
     ground_truth: Tensor  # (N_target, F_h)
+    # (N_sub*k, 4) in der Reihenfolge [Station 0 Punkt 0..k-1, Station 1 …],
+    # passend zum edge_index, das HomoNWPAttentionLayer aufbaut. None, wenn die
+    # Quelle nicht als Knotentyp gefuehrt wird (k = 0).
+    nwp_edge_attr:   Tensor | None = None
+    ecmwf_edge_attr: Tensor | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +131,8 @@ class HomoSampler:
         k_ecmwf: int = 0,
         aggregate_nwp: bool = True,
         topo_feats: dict[str, np.ndarray] | None = None,
+        icond2_alts: np.ndarray | None = None,          # (N_grid_i2,) m ue. NN
+        ecmwf_alts: np.ndarray | None = None,           # (N_grid_e2,) m ue. NN
     ) -> None:
         self.meas      = meas_scaled            # (T, N, M)
         self.nwp_runs  = grid_icond2_scaled     # (R, n_leads, N_grid_i2, I2)
@@ -145,12 +156,17 @@ class HomoSampler:
         self.I2 = grid_icond2_scaled.shape[3]
         self.E2 = grid_ecmwf_scaled.shape[2] if grid_ecmwf_scaled is not None else 0
 
-        self._init_nwp_knn(lats, lons, icond2_coords)
+        self._nwp_knn_idx, self._nwp_knn_w, self._nwp_edge_attr = self._init_grid_knn(
+            lats, lons, alts, icond2_coords, icond2_alts, k_nwp,
+        )
         if grid_ecmwf_scaled is not None and k_ecmwf > 0 and ecmwf_coords is not None:
-            self._init_ecmwf_knn(lats, lons, ecmwf_coords)
+            self._ecmwf_knn_idx, self._ecmwf_knn_w, self._ecmwf_edge_attr = self._init_grid_knn(
+                lats, lons, alts, ecmwf_coords, ecmwf_alts, k_ecmwf,
+            )
         else:
-            self._ecmwf_knn_idx = np.empty((len(lats), 0), dtype=np.int32)
-            self._ecmwf_knn_w   = np.empty((len(lats), 0), dtype=np.float32)
+            self._ecmwf_knn_idx  = np.empty((len(lats), 0), dtype=np.int32)
+            self._ecmwf_knn_w    = np.empty((len(lats), 0), dtype=np.float32)
+            self._ecmwf_edge_attr = np.empty((len(lats), 0, 4), dtype=np.float32)
         self._topo_feats = topo_feats or {}
         self._init_static(lats, lons, alts)
 
@@ -174,49 +190,57 @@ class HomoSampler:
     # Initialisation
     # ------------------------------------------------------------------
 
-    def _init_nwp_knn(
+    def _init_grid_knn(
         self,
         lats: np.ndarray,
         lons: np.ndarray,
-        icond2_coords: np.ndarray,
-    ) -> None:
-        """Precompute k nearest ICON-D2 grid-point indices and inv-dist weights."""
-        k = min(self.k_nwp, len(icond2_coords))
-        tree = cKDTree(icond2_coords)
-        station_ll = np.stack([lats, lons], axis=1)
-        dists, idxs = tree.query(station_ll, k=k)
-        if k == 1:
-            dists = dists[:, np.newaxis]
-            idxs  = idxs[:, np.newaxis]
+        alts: np.ndarray,
+        grid_coords: np.ndarray,
+        grid_alts: np.ndarray | None,
+        k_req: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """k naechste Gitterpunkte je Station: Indizes, IDW-Gewichte, Kantenfeatures.
 
-        eps = 1e-6
-        raw_w   = 1.0 / np.maximum(dists, eps)
+        Distanzen geodaetisch (WGS-84), wie im Datenlader und im
+        HeterogeneousGraphBuilder. Vorher stand hier ein ``cKDTree`` auf rohen
+        Grad-Koordinaten, also euklidisch im Gradraum: bei 51 N sind 1 deg
+        Laenge ~70 km und 1 deg Breite ~111 km, womit bei ICON-D2-Maschenweite
+        von ~2.2 km die Rangfolge der k naechsten Punkte regelmaessig kippt.
+        Die IDW-Gewichte hingen an denselben verzerrten Distanzen.
+
+        Kantenfeatures (N, k, 4): normierte Distanz, sin/cos des Azimuts
+        Station->Gitterpunkt und normierte Hoehendifferenz. Ohne sie ist die
+        bipartite GATv2 permutationsaequivariant ueber die k Punkte und kann
+        den naechsten nicht vom k-ten Gitterpunkt unterscheiden.
+        """
+        from .stgnn.utils.spatial import bearing_deg, geodesic_km, geodesic_knn
+
+        k = min(k_req, len(grid_coords))
+        station_ll = np.stack([lats, lons], axis=1)
+        dists_km, idxs = geodesic_knn(grid_coords, station_ll, k=k)   # (N, k) je
+
+        eps     = 1e-6
+        raw_w   = 1.0 / np.maximum(dists_km, eps)
         weights = raw_w / raw_w.sum(axis=1, keepdims=True)
 
-        self._nwp_knn_idx = idxs.astype(np.int32)    # (N, k_nwp)
-        self._nwp_knn_w   = weights.astype(np.float32)
+        g_lat = grid_coords[idxs, 0]                                  # (N, k)
+        g_lon = grid_coords[idxs, 1]
+        s_lat = np.repeat(lats[:, None], k, axis=1)
+        s_lon = np.repeat(lons[:, None], k, axis=1)
+        dist_km = geodesic_km(s_lat, s_lon, g_lat, g_lon)
+        az_rad  = np.deg2rad(bearing_deg(s_lat, s_lon, g_lat, g_lon))
+        dist_norm = dist_km / max(float(dist_km.max()), 1e-8)
 
-    def _init_ecmwf_knn(
-        self,
-        lats: np.ndarray,
-        lons: np.ndarray,
-        ecmwf_coords: np.ndarray,
-    ) -> None:
-        """Precompute k nearest ECMWF grid-point indices and inv-dist weights."""
-        k = min(self.k_ecmwf, len(ecmwf_coords))
-        tree = cKDTree(ecmwf_coords)
-        station_ll = np.stack([lats, lons], axis=1)
-        dists, idxs = tree.query(station_ll, k=k)
-        if k == 1:
-            dists = dists[:, np.newaxis]
-            idxs  = idxs[:, np.newaxis]
+        if grid_alts is None:
+            alt_diff = np.zeros_like(dist_norm)
+        else:
+            alt_diff = (grid_alts[idxs] - alts[:, None]) / 500.0
+            alt_diff = np.clip(alt_diff, -3.0, 3.0)
 
-        eps = 1e-6
-        raw_w   = 1.0 / np.maximum(dists, eps)
-        weights = raw_w / raw_w.sum(axis=1, keepdims=True)
-
-        self._ecmwf_knn_idx = idxs.astype(np.int32)    # (N, k_ecmwf)
-        self._ecmwf_knn_w   = weights.astype(np.float32)
+        edge_attr = np.stack(
+            [dist_norm, np.sin(az_rad), np.cos(az_rad), alt_diff], axis=-1
+        ).astype(np.float32)                                          # (N, k, 4)
+        return idxs.astype(np.int32), weights.astype(np.float32), edge_attr
 
     def _init_static(
         self,
@@ -237,8 +261,8 @@ class HomoSampler:
         alt_std    = max(float(train_alts.std()), 1.0)
         self._alt_norm = ((alts - alt_mean) / alt_std).astype(np.float32)
 
-        # Station-to-station coordinates (radians) for next_n_neighbors selection
-        self._station_coords_rad = np.stack([lat_r, lon_r], axis=1).astype(np.float64)
+        # Stationskoordinaten in Grad fuer die geodaetische Nachbarauswahl
+        self._station_coords_deg = np.stack([lats, lons], axis=1).astype(np.float64)
 
         # Topographic features (already transformed and train-only z-scored in
         # load_topo_station_features_dict, except aspect_sin/aspect_cos which
@@ -391,12 +415,43 @@ class HomoSampler:
         gt_sub = gt_raw[:, sub_indices]                     # (F_h, N_sub)
         gt_target = gt_sub[:, target_mask_np].T             # (N_target, F_h)
 
+        # Kantenfeatures in edge_index-Reihenfolge (Station-major, dann Punkt j)
+        def _edges(attr: np.ndarray) -> Tensor | None:
+            if attr.shape[1] == 0:
+                return None
+            sub = attr[sub_indices]                      # (N_sub, k, 4)
+            return torch.from_numpy(
+                np.ascontiguousarray(sub.reshape(-1, sub.shape[2]))
+            )
+
         return HomoBatch(
             x            = torch.from_numpy(x),
             static       = torch.from_numpy(static),
             target_mask  = torch.from_numpy(target_mask_np),
             ground_truth = torch.from_numpy(gt_target.copy().astype(np.float32)),
+            nwp_edge_attr   = _edges(self._nwp_edge_attr),
+            ecmwf_edge_attr = _edges(self._ecmwf_edge_attr),
         )
+
+    def _nearest_stations(
+        self,
+        target_global: list[int],
+        candidate_global: list[int],
+        k: int,
+    ) -> list[int]:
+        """Die k Kandidatenstationen mit der kleinsten geodaetischen Distanz zu
+        irgendeiner Zielstation. Ersetzt den frueheren cKDTree auf
+        Radianten-Koordinaten (euklidisch und damit richtungsabhaengig verzerrt).
+        """
+        if k >= len(candidate_global):
+            return list(candidate_global)
+        from .stgnn.utils.spatial import pairwise_geodesic_km
+        d = pairwise_geodesic_km(
+            self._station_coords_deg[candidate_global],
+            self._station_coords_deg[target_global],
+        )                                            # (n_cand, n_tgt)
+        order = np.argsort(d.min(axis=1))
+        return [candidate_global[i] for i in order[:k]]
 
     # ------------------------------------------------------------------
     # Public interface
@@ -418,12 +473,8 @@ class HomoSampler:
             # Deterministic: pick spatially nearest candidates to the target group
             tgt_global  = [self.train_idx[i] for i in target_local]
             cand_global = [self.train_idx[i] for i in nbr_local]
-            tgt_coords  = self._station_coords_rad[tgt_global]   # (n_tgt, 2)
-            cand_coords = self._station_coords_rad[cand_global]  # (n_cand, 2)
-            tgt_tree    = cKDTree(tgt_coords)
-            min_dists, _ = tgt_tree.query(cand_coords, k=1)      # min dist to any target
-            order       = np.argsort(min_dists)
-            keep        = {cand_global[i] for i in order[:self.next_n_neighbors]}
+            keep        = set(self._nearest_stations(
+                tgt_global, cand_global, self.next_n_neighbors))
             nbr_local   = [i for i in nbr_local if self.train_idx[i] in keep]
         elif self.max_nbr < len(nbr_local):
             nbr_local = random.sample(nbr_local, self.max_nbr)
@@ -434,26 +485,39 @@ class HomoSampler:
 
         return self._make_batch(r_curr, r_hist, t_run_abs, sub_indices, target_mask_np)
 
+    def _val_layout(self) -> tuple[list[int], np.ndarray]:
+        """Knotenmenge und Zielmaske der Validierung.
+
+        Die Nachbarn werden mit derselben Regel gewaehlt wie im Training
+        (``next_n_neighbors`` raeumlich naechste Trainingsstationen zur
+        Zielgruppe) — vorher gingen hier immer *alle* Trainingsstationen ein.
+        Damit sah MTGNN/WaveNet im Training einen Graphen von ~51-91 Knoten und
+        in der Validierung einen von 153, was bei gelernter, zeilennormierter
+        Adjazenz mit festem ``topk_graph`` nicht dasselbe Modell ist. DCRNN
+        macht es in ``TrainingSampler.sample_val`` bereits so.
+        """
+        nbr = list(self.train_idx)
+        if self.next_n_neighbors is not None and self.next_n_neighbors < len(nbr):
+            nbr = self._nearest_stations(self.val_idx, nbr, self.next_n_neighbors)
+        all_global = nbr + self.val_idx
+        target_mask_np = np.zeros(len(all_global), dtype=bool)
+        target_mask_np[len(nbr):] = True
+        return all_global, target_mask_np
+
     def iter_val(self):
         """Iterate over all validation run pairs deterministically.
 
-        For each pair: all train stations act as neighbours, all val stations
-        are targets (full LOO evaluation).  Yields HomoBatch.
+        Alle Val-Stationen sind in jedem Batch gleichzeitig Ziel (kein LOO);
+        Nachbarn nach ``_val_layout``.  Yields HomoBatch.
         """
-        N_nbr = len(self.train_idx)
-        all_global = self.train_idx + self.val_idx
-        target_mask_np = np.zeros(len(all_global), dtype=bool)
-        target_mask_np[N_nbr:] = True
+        all_global, target_mask_np = self._val_layout()
 
         for r_curr, r_hist, t_run_abs in self.val_pairs:
             yield self._make_batch(r_curr, r_hist, t_run_abs, all_global, target_mask_np)
 
     def iter_val_meta(self):
         """Like iter_val() but also yields (r_curr, t_run_abs) for each pair."""
-        N_nbr = len(self.train_idx)
-        all_global = self.train_idx + self.val_idx
-        target_mask_np = np.zeros(len(all_global), dtype=bool)
-        target_mask_np[N_nbr:] = True
+        all_global, target_mask_np = self._val_layout()
 
         for r_curr, r_hist, t_run_abs in self.val_pairs:
             yield (
@@ -524,7 +588,11 @@ def evaluate_homo_model(
         if target_mask.sum() == 0:
             continue
 
-        pred = model(x, static, target_mask)   # (N_val, F_h) scaled
+        pred = model(
+            x, static, target_mask,
+            nwp_edge_attr=None if batch.nwp_edge_attr is None else batch.nwp_edge_attr.to(device),
+            ecmwf_edge_attr=None if batch.ecmwf_edge_attr is None else batch.ecmwf_edge_attr.to(device),
+        )   # (N_val, F_h) scaled
 
         pred_phys = pred.cpu().numpy() * target_scale + target_mean    # (N_val, F_h)
         gt_phys   = batch.ground_truth.numpy() * target_scale + target_mean  # (N_val, F_h)
@@ -538,7 +606,7 @@ def evaluate_homo_model(
         pers_vals = meas_raw[t_run_abs - 1, sampler.val_idx, target_feat_idx]  # (N_val,)
         pers_fc   = np.repeat(pers_vals[:, np.newaxis], F_h, axis=1).astype(np.float32)
 
-        run_ts = timestamps[t_run_abs] if timestamps is not None else None
+        run_ts = timestamps[t_run_abs - 1] if timestamps is not None else None
         for i in range(N_val):
             preds_acc[i].append(pred_phys[i])
             gts_acc[i].append(gt_phys[i])

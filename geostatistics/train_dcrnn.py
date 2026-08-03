@@ -920,7 +920,11 @@ def main() -> None:
         t_run = run_times[r_curr]
         if t_run not in ts_lookup.index:
             skipped += 1; continue
-        t_run_abs = int(ts_lookup[t_run])
+        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
+        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
+        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
+        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
+        t_run_abs = int(ts_lookup[t_run]) + 1
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1; continue
 
@@ -971,19 +975,25 @@ def main() -> None:
     # k-nearest grid indices for nwp_nodes=False
     # ------------------------------------------------------------------
     _cfg_nwp_nodes = dcrnn_cfg.get("nwp_nodes", True)
-    if _cfg_nwp_nodes:
-        station_k_nearest_grid = None
-    else:
-        from sklearn.neighbors import BallTree as _BallTree
-        _k = model_cfg.graph.next_n_icond2_grid_points
-        _bt = _BallTree(np.radians(icond2_coords), metric="haversine")
-        station_k_nearest_grid = _bt.query(
-            np.radians(station_coords), k=_k, return_distance=False,
-        ).astype(np.int64)  # (N_stations, k)
+    station_k_nearest_grid  = None
+    station_k_nearest_ecmwf = None
+    if not _cfg_nwp_nodes:
+        from geostatistics.stgnn.utils.spatial import geodesic_knn
+        _k  = model_cfg.graph.next_n_icond2_grid_points
+        _ke = model_cfg.graph.next_n_ecmwf_grid_points
+        _, station_k_nearest_grid = geodesic_knn(icond2_coords, station_coords, k=_k)
+        station_k_nearest_grid = station_k_nearest_grid.astype(np.int64)
         logger.info(
-            "nwp_nodes=False — station_k_nearest_grid: %s  (k=%d)",
+            "nwp_nodes=False — station_k_nearest_grid: %s  (k=%d, geodaetisch)",
             station_k_nearest_grid.shape, _k,
         )
+        if _ke > 0 and len(ecmwf_coords) > 0:
+            _, station_k_nearest_ecmwf = geodesic_knn(ecmwf_coords, station_coords, k=_ke)
+            station_k_nearest_ecmwf = station_k_nearest_ecmwf.astype(np.int64)
+            logger.info(
+                "nwp_nodes=False — station_k_nearest_ecmwf: %s  (k=%d, geodaetisch)",
+                station_k_nearest_ecmwf.shape, _ke,
+            )
 
     # ------------------------------------------------------------------
     # Graph  (shared builder and sampler from stgnn)
@@ -1065,6 +1075,7 @@ def main() -> None:
         interpol_meas=interpol_meas_scaled,
         grid_icond2_uv_runs=grid_icond2_uv_runs,
         station_k_nearest_grid=station_k_nearest_grid,
+        station_k_nearest_ecmwf=station_k_nearest_ecmwf,
     )
 
     if writer is not None:

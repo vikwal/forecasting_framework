@@ -49,7 +49,7 @@ wavenet:
   target_col: 'wind_speed'
   n_workers: 8
   icond2_run_hours: [6,9,12,15]
-  station_node_features: [slope, aspect_sin, aspect_cos, tpi5, tpi75, tdi, z0, dist_coast]
+  station_node_features: all
   topo_features_path: '/mnt/lambda1/nvme1/topo_features'
 
   # NWP aggregation
@@ -96,7 +96,7 @@ wavenet:
   hpo:
     cv_mode: spatial
     spatial_folds: 'configs/spatial_folds.yaml'
-    trials: 1000
+    trials: 150
     studies_path: studies/
     tensorboard_monitoring: true
     pruner: median

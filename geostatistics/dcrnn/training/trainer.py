@@ -303,6 +303,7 @@ class DCRNNTrainer:
         interpol_meas: "np.ndarray | None" = None,           # (T, N) Kriging lag, pre-scaled; None = disabled
         grid_icond2_uv_runs: "np.ndarray | None" = None,    # (R, 48, N_grid, 2) raw u/v for direction_to_adj
         station_k_nearest_grid: "np.ndarray | None" = None, # (N_stations, k) k nearest grid indices for nwp_nodes=False
+        station_k_nearest_ecmwf: "np.ndarray | None" = None, # (N_stations, k_e) k nearest ECMWF indices for nwp_nodes=False
         verbose: bool = True,
     ) -> dict:
         """Identical signature to InductiveTrainer.fit() for drop-in use."""
@@ -329,6 +330,7 @@ class DCRNNTrainer:
                 interpol_meas=interpol_meas,
                 grid_icond2_uv_runs=grid_icond2_uv_runs,
                 station_k_nearest_grid=station_k_nearest_grid,
+                station_k_nearest_ecmwf=station_k_nearest_ecmwf,
             )
 
         def _val_sample(r_curr, r_hist, t_run_abs) -> SampleBatch:
@@ -343,6 +345,7 @@ class DCRNNTrainer:
                 interpol_meas=interpol_meas,
                 grid_icond2_uv_runs=grid_icond2_uv_runs,
                 station_k_nearest_grid=station_k_nearest_grid,
+                station_k_nearest_ecmwf=station_k_nearest_ecmwf,
             )
 
         for epoch in range(1, tc.max_epochs + 1):

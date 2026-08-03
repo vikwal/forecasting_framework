@@ -187,7 +187,14 @@ class DCRNNConfig:
             weight_decay=d.get("weight_decay", 1e-5),
             scheduler=d.get("scheduler", "plateau"),
             max_epochs=d["max_epochs"],
-            batch_size=d.get("grad_accum", 4),
+            # "grad_accum" ist der kanonische Schluessel, "batch_size" der
+            # aeltere Name derselben Groesse (DCRNNTrainer batcht echt, es
+            # wird nichts akkumuliert). Beide muessen gelesen werden: die
+            # Base-Config tunte "batch_size" per HPO, hier kam aber nur
+            # "grad_accum" an — der Parameter war wirkungslos und jeder
+            # Base-Trial lief mit dem Default 4, also ~369 statt ~38
+            # Optimizer-Schritten pro Epoche.
+            batch_size=d.get("grad_accum", d.get("batch_size", 4)),
             gradient_clip=d.get("gradient_clip", 1.0),
             patience=d["patience"],
             checkpoint_path=checkpoint_path,

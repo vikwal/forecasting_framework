@@ -48,50 +48,63 @@ data:
 
 
 dcrnn:
-  # Input features
-  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m']
+  # BASE-Arm. Erzeugt aus config_wind_dcrnn.yaml; einziger inhaltlicher
+  # Unterschied ist nwp_nodes: false (plus die dadurch inerten GATv2-Parameter).
+  # Input features — full list; icond2_feature_mode / ecmwf_feature_mode controls which are used
+  # absolute: only wind_speed_* | components: only u_*/v_* | both: all features
+  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m'] # 'wind_speed_38m'
   ecmwf_features:  ['u_wind10m', 'v_wind10m', 'wind_speed_10m']
-  icond2_feature_mode: absolute   # absolute | components | both
-  ecmwf_feature_mode:  absolute   # absolute | components | both
-  measurement_features: ['wind_speed', 'wind_direction']
+  icond2_feature_mode: dir_in_deg   # absolute | components | both | dir_in_deg
+  ecmwf_feature_mode:  dir_in_deg   # absolute | components | both | dir_in_deg
+  measurement_features: ['wind_speed', 'wind_direction'] # 'wind_direction'
   target_col: 'wind_speed'
   n_workers: 16
   n_ahead_prefetch: 8
   prefetch_workers: 2
   handle_nans: break
-  interpolate_history: false
+  interpolate_history: false    # true: append
   direction_to_adj: false
 
   # Graph
-  next_n_icond2: 1              # k NWP grid points concatenated into station.x; HPO varies 1-4
-  next_n_ecmwf: 1               # ECMWF grid points concatenated into station.x
+  next_n_icond2: 6
+  next_n_ecmwf: 4
   station_connectivity: delaunay
   use_altitude_diff: true
   use_direction_features: true
   use_distance_features: true
   edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
   topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  # Alle neun Topo-Features als absolute Knotenfeatures. Ohne diesen
+  # Schluessel bekam DCRNN gar keine (parse_station_node_features hat
+  # keinen edge_features-Fallback) und MTGNN/WaveNet nur die acht aus
+  # edge_features — die Retrain-Configs setzen aber 'all', womit die HPO
+  # ein schmaleres Modell getunt hat als der Retrain baut.
+  station_node_features: all
   icond2_run_hours: [6,9,12,15]
 
   # Time windows
   history_length: 48
   forecast_horizon: 48
-  temporal_encoding: gru
+  temporal_encoding: gru        # sampler output format for DCRNN
 
-  # DCRNN architecture (nwp_nodes=false: no GATv2 over NWP nodes, k*I2 features in station.x)
-  nwp_nodes: false
+  # DCRNN architecture
   hidden: 64
   num_layers: 1
-  K_hop: 1
-  nwp_out_dim: 64    # unused when nwp_nodes=false
-  nwp_heads: 4       # unused when nwp_nodes=false
+  K_hop: 2
+  nwp_nodes: false    # BASE-Arm: k naechste Gitterpunkte in station.x konkateniert, keine GATv2
+  nwp_out_dim: 64    # output dim of NWP attention layer; must be divisible by nwp_heads
+  nwp_heads: 4        # GATv2 attention heads for NWP → station
   dropout: 0.1
-  teacher_forcing_ratio: 0.3
+  teacher_forcing_ratio: 0.3   # starts here, decays to 0 per schedule below
+  tf_schedule: linear           # "linear" (default) | "inv_sigmoid" (paper Appendix E)
+  tf_tau: 3000                  # τ for inv_sigmoid schedule (paper default)
+  edge_weight_sigma: 0.2        # σ for Gaussian edge kernel: exp(-d²/σ²) (paper Appendix E.1)
 
   # Station subgraph sampling
   min_target_stations: 1
   max_target_stations: 10
   next_n_neighbors: 90
+  hist_wind_available: false    # true = historical measurements kept for target nodes (ablation)
 
   # Training
   loss_fn: mse
@@ -99,41 +112,46 @@ dcrnn:
   horizon_decay: 0.85
   lr: 3.0e-4
   weight_decay: 1.0e-3
-  batch_size: 64
-  max_epochs: 50
-  patience: 10
+  grad_accum: 64
+  max_epochs: 200
+  patience: 15
   gradient_clip: 1.0
   scheduler: plateau
 
   # ---------------------------------------------------------------------------
   # HPO bounds — read by hpo_dcrnn.py
-  # nwp_nodes=false: no GATv2 → nwp_heads and nwp_out_per_head are not applicable.
-  # next_n_icond2 controls how many NWP grid points are concatenated into station.x.
+  # Each param entry has a "type" key:
+  #   categorical : choices list
+  #   int         : low / high (+ optional step)
+  #   float       : low / high (+ optional log: true for log-uniform sampling)
+  # All other dcrnn params not listed here keep their fixed values above.
   # ---------------------------------------------------------------------------
   hpo:
     cv_mode: spatial
     spatial_folds: 'configs/spatial_folds.yaml'
-    trials: 1000
+    trials: 150
     studies_path: studies/
     tensorboard_monitoring: true
     pruner: median
-    pruner_n_startup_trials: 20
+    pruner_n_startup_trials: 20   # trials before pruner activates
     pruner_n_warmup_steps: 1
     n_folds: 3
-    n_val_stations: null
+    n_val_stations: null            # use first N stations from val_files as HPO val set
+    # max training epochs per trial (usually shorter than the final run)
     max_epochs_per_trial: 100
     patience_per_trial: 10
 
     params:
-      next_n_icond2:
-        type: int
-        low: 1
-        high: 4
-
+      # DCGRU hidden dimension (no divisibility constraint)
       next_n_ecmwf:
         type: int
         low: 0
         high: 4
+
+      next_n_icond2:
+        type: int
+        low: 1
+        high: 7
 
       hidden:
         type: int
@@ -148,7 +166,9 @@ dcrnn:
       K_hop:
         type: int
         low: 1
-        high: 2
+        high: 3
+
+      # nwp_heads / nwp_out_per_head entfallen: ohne GATv2 sind sie wirkungslos.
 
       dropout:
         type: float
@@ -172,9 +192,9 @@ dcrnn:
         high: 1.0e-4
         log: true
 
-      batch_size:
+      grad_accum:
         type: int
-        low: 4
+        low: 1
         high: 64
 
       horizon_decay:
@@ -184,13 +204,21 @@ dcrnn:
 
       next_n_neighbors:
         type: int
-        low: 60
-        high: 120
+        low: 50
+        high: 90
 
       gradient_clip:
         type: float
         low: 0.5
         high: 5.0
+
+      icond2_feature_mode:
+        type: categorical
+        choices: [absolute, dir_in_deg]
+
+      ecmwf_feature_mode:
+        type: categorical
+        choices: [absolute, dir_in_deg]
 
 
 cache:
@@ -199,4 +227,4 @@ cache:
 
 output:
   path: 'results/geostatistics'
-  prefix: 'spatial_interp'
+  prefix: 'spatial_interp'   # prepended to all output filenames

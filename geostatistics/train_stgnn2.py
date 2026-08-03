@@ -885,7 +885,11 @@ def _load_elevations_from_table(
     db_url: str,
     table: str,
     coords: np.ndarray,          # (N, 2) [lat, lon]
-    tol: float = 0.02,
+    # 0.02 deg entspricht einer vollen ICON-D2-Masche (~2 km): damit erbte ein
+    # nicht eingetragener Gitterpunkt still die Hoehe der Nachbarzelle, im
+    # Bergland ein Fehler von mehreren hundert Metern. 0.005 laesst nur echte
+    # Rundungsabweichungen durch, alles andere geht in den SRTM-Fallback.
+    tol: float = 0.005,
 ) -> np.ndarray:
     """
     Read the ``elevation`` column from a grid-point table and match to *coords*.
@@ -925,6 +929,7 @@ def _load_elevations_from_table(
     db_lons = df["lon"].values
     db_elev = df["elevation"].fillna(0).values.astype(np.float32)
 
+    unmatched: list[int] = []
     for i, (lat, lon) in enumerate(coords):
         dists = np.sqrt((db_lats - lat) ** 2 + (db_lons - lon) ** 2)
         j = int(np.argmin(dists))
@@ -932,12 +937,100 @@ def _load_elevations_from_table(
             alts[i] = db_elev[j]
         else:
             n_missing += 1
+            unmatched.append(i)
 
     if n_missing:
         logger.warning(
-            "%s: %d / %d nodes had no match within %.3f° — using 0 m",
+            "%s: %d / %d nodes had no match within %.3f° — falling back to SRTM",
             table, n_missing, len(coords), tol,
         )
+        alts = _fill_missing_elevations_from_srtm(alts, coords, unmatched)
+    return alts
+
+
+# Cache fuer die SRTM-Nachschlaege, damit nicht bei jedem Lauf erneut Kacheln
+# geladen werden. Key ist auf 5 Nachkommastellen gerundetes (lat, lon).
+_SRTM_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "nwp_grid_elevations_srtm.csv"
+
+
+def _fill_missing_elevations_from_srtm(
+    alts: np.ndarray,
+    coords: np.ndarray,
+    unmatched: list[int],
+) -> np.ndarray:
+    """Hoehen fuer Gitterpunkte nachschlagen, die nicht in der DB-Tabelle stehen.
+
+    Die Tabellen ``icon_d2_grid_points`` / ``ecmwf_grid_points`` wurden fuer
+    einen frueheren, kleineren Stations- und k-Zuschnitt befuellt. Der aktuelle
+    Pool zieht Gitterpunkte, die dort nie eingetragen wurden — vorher bekamen
+    die still 0 m, was ueber ``altitude_diff`` in jede NWP->Station-Kante und in
+    ``icond2_static`` einging. Es sind keine Wasserpunkte: SRTM liefert fuer sie
+    regulaere Landhoehen.
+
+    Ohne SRTM-Paket oder Netzzugang bleibt es bei 0 m, dann aber mit einer
+    Warnung, die den Umfang beziffert.
+    """
+    if not unmatched:
+        return alts
+
+    cached: dict[tuple[float, float], float] = {}
+    if _SRTM_CACHE_PATH.exists():
+        try:
+            cdf = pd.read_csv(_SRTM_CACHE_PATH)
+            cached = {
+                (round(float(a), 5), round(float(b), 5)): float(c)
+                for a, b, c in zip(cdf["lat"], cdf["lon"], cdf["elevation"])
+            }
+        except Exception as exc:                      # pragma: no cover - defensiv
+            logger.warning("SRTM-Cache %s unlesbar (%s) — wird neu aufgebaut", _SRTM_CACHE_PATH, exc)
+
+    still_open = [i for i in unmatched
+                  if (round(float(coords[i][0]), 5), round(float(coords[i][1]), 5)) not in cached]
+
+    srtm_data = None
+    if still_open:
+        try:
+            import srtm  # type: ignore[import-untyped]
+            srtm_data = srtm.get_data()
+        except Exception as exc:
+            logger.warning(
+                "SRTM nicht verfuegbar (%s) — %d Gitterpunkte behalten 0 m. "
+                "Abhilfe: pip install srtm.py, oder populate_nwp_elevations.py "
+                "fuer den aktuellen Gitterpunkt-Satz laufen lassen.",
+                exc, len(still_open),
+            )
+
+    n_new, n_fail = 0, 0
+    for i in unmatched:
+        lat, lon = float(coords[i][0]), float(coords[i][1])
+        key = (round(lat, 5), round(lon, 5))
+        if key in cached:
+            alts[i] = cached[key]
+            continue
+        if srtm_data is None:
+            n_fail += 1
+            continue
+        val = srtm_data.get_elevation(lat, lon)
+        if val is None:
+            n_fail += 1
+            continue
+        alts[i] = float(val)
+        cached[key] = float(val)
+        n_new += 1
+
+    if n_new:
+        try:
+            _SRTM_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                [{"lat": k[0], "lon": k[1], "elevation": v} for k, v in sorted(cached.items())]
+            ).to_csv(_SRTM_CACHE_PATH, index=False)
+        except Exception as exc:                      # pragma: no cover - defensiv
+            logger.warning("SRTM-Cache konnte nicht geschrieben werden (%s)", exc)
+
+    logger.info(
+        "SRTM-Fallback: %d Gitterpunkte aufgeloest (%d neu, %d aus Cache), %d ohne Hoehe (0 m)",
+        len(unmatched) - n_fail, n_new, len(unmatched) - n_fail - n_new, n_fail,
+    )
     return alts
 
 
@@ -1228,8 +1321,11 @@ def main() -> None:
         if t_run not in ts_lookup.index:
             skipped += 1
             continue
-        t_run_abs = int(ts_lookup[t_run])
-
+        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
+        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
+        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
+        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
+        t_run_abs = int(ts_lookup[t_run]) + 1
         # Need H steps of history and F_h steps of GT in measurement array
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1

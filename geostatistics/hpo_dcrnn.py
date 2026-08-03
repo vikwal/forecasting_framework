@@ -200,7 +200,11 @@ def _build_run_pairs(
         if t_run not in ts_lookup.index:
             skipped += 1
             continue
-        t_run_abs = int(ts_lookup[t_run])
+        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
+        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
+        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
+        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
+        t_run_abs = int(ts_lookup[t_run]) + 1
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1
             continue
@@ -788,19 +792,41 @@ def main() -> None:
     # explicit NWP graph nodes. station_k_nearest_grid stores the k nearest grid
     # point indices per station (shape N_stations × max_next_n_icond2).
     # Per trial, only the first trial_k columns are used.
+    # ECMWF laeuft symmetrisch dazu ueber station_k_nearest_ecmwf. Vorher gab es
+    # das nicht: station_ecmwf_nwp enthaelt nur den EINEN naechsten Gitterpunkt
+    # (train_stgnn2.load_ecmwf_parquet_at_stations_and_grid), womit next_n_ecmwf
+    # in diesem Arm ein reiner An/Aus-Schalter war und 1..4 identische Modelle
+    # ergaben — waehrend der nwp_nodes=True-Arm bis zu 4 Punkte als Knoten sieht.
+    #
+    # Beide Nachbarschaften geodaetisch (WGS-84), wie der Datenlader und der
+    # HeterogeneousGraphBuilder. Haversine bzw. euklidisch in Grad kippt bei
+    # ~2 km Maschenweite regelmaessig die Rangfolge (1 deg Laenge ~ 70 km,
+    # 1 deg Breite ~ 111 km bei 51 N).
     _cfg_nwp_nodes = dcrnn_cfg.get("nwp_nodes", True)
     if _cfg_nwp_nodes:
-        station_k_nearest_grid = None
+        station_k_nearest_grid  = None
+        station_k_nearest_ecmwf = None
     else:
-        from sklearn.neighbors import BallTree as _BallTree
-        _bt = _BallTree(np.radians(icond2_coords), metric="haversine")
-        station_k_nearest_grid = _bt.query(
-            np.radians(station_coords), k=max_next_n_icond2, return_distance=False,
-        ).astype(np.int64)  # (N_stations, max_next_n_icond2)
+        from geostatistics.stgnn.utils.spatial import geodesic_knn
+        _, station_k_nearest_grid = geodesic_knn(
+            icond2_coords, station_coords, k=max_next_n_icond2,
+        )
+        station_k_nearest_grid = station_k_nearest_grid.astype(np.int64)
         logger.info(
-            "nwp_nodes=False — station_k_nearest_grid: %s  (k_max=%d)",
+            "nwp_nodes=False — station_k_nearest_grid: %s  (k_max=%d, geodaetisch)",
             station_k_nearest_grid.shape, max_next_n_icond2,
         )
+        if max_next_n_ecmwf > 0 and len(ecmwf_coords) > 0:
+            _, station_k_nearest_ecmwf = geodesic_knn(
+                ecmwf_coords, station_coords, k=max_next_n_ecmwf,
+            )
+            station_k_nearest_ecmwf = station_k_nearest_ecmwf.astype(np.int64)
+            logger.info(
+                "nwp_nodes=False — station_k_nearest_ecmwf: %s  (k_max=%d, geodaetisch)",
+                station_k_nearest_ecmwf.shape, max_next_n_ecmwf,
+            )
+        else:
+            station_k_nearest_ecmwf = None
 
     # ── Exit early if --preprocess-only ───────────────────────────────────────
     if args.preprocess_only:
@@ -958,7 +984,7 @@ def main() -> None:
         """
         tr, va = [], []
         for r_curr, r_hist, t_run_abs in all_run_pairs:
-            t = timestamps[t_run_abs]
+            t = timestamps[t_run_abs - 1]   # Laufzeit, nicht erster Prognoseschritt
             if t < val_start:
                 tr.append((r_curr, r_hist, t_run_abs))
             elif t < val_end:
@@ -1173,7 +1199,8 @@ def main() -> None:
             else:
                 fold_interpol_meas = None
 
-            _trial_k = model_cfg.graph.next_n_icond2_grid_points
+            _trial_k  = model_cfg.graph.next_n_icond2_grid_points
+            _trial_ke = model_cfg.graph.next_n_ecmwf_grid_points
             fold_data = dict(
                 station_meas=meas_scaled,
                 station_nearest_grid=station_nearest_grid,
@@ -1190,6 +1217,10 @@ def main() -> None:
                 station_k_nearest_grid=(
                     station_k_nearest_grid[:, :_trial_k]
                     if station_k_nearest_grid is not None else None
+                ),
+                station_k_nearest_ecmwf=(
+                    station_k_nearest_ecmwf[:, :_trial_ke]
+                    if (station_k_nearest_ecmwf is not None and _trial_ke > 0) else None
                 ),
             )
 

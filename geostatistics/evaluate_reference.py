@@ -157,7 +157,7 @@ def evaluate_nwp_baselines(
     e2_recs  = []
 
     for r_curr, _r_hist, t_run_abs in val_run_pairs:
-        run_ts = timestamps[t_run_abs]
+        run_ts = timestamps[t_run_abs - 1]
 
         # Ground truth: (N_val, F_h)
         gt_phys = meas_raw[t_run_abs : t_run_abs + F_h, val_indices, target_feat_idx].T
@@ -171,8 +171,8 @@ def evaluate_nwp_baselines(
         pers_fc   = np.repeat(pers_vals[:, None], F_h, axis=1).astype(np.float32)
 
         # ECMWF nearest grid point: time-indexed, future window [t+1 .. t+F_h]
-        if has_ecmwf and t_run_abs + F_h + 1 <= grid_ecmwf_runs.shape[0]:
-            e2_slice = grid_ecmwf_runs[t_run_abs + 1 : t_run_abs + F_h + 1, :, ecmwf_ws_feat_idx]
+        if has_ecmwf and t_run_abs + F_h <= grid_ecmwf_runs.shape[0]:
+            e2_slice = grid_ecmwf_runs[t_run_abs : t_run_abs + F_h, :, ecmwf_ws_feat_idx]
             e2_fc    = e2_slice[:, nearest_e2].T.astype(np.float32)         # (N_val, F_h)
         else:
             e2_fc = None
@@ -399,7 +399,11 @@ def main() -> None:
             continue
         if t_run not in ts_lookup.index:
             continue
-        t_run_abs = int(ts_lookup[t_run])
+        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
+        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
+        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
+        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
+        t_run_abs = int(ts_lookup[t_run]) + 1
         if t_run_abs < H or t_run_abs + F_h > T:
             continue
         t_hist_target = t_run - pd.Timedelta(hours=H * freq_h)

@@ -55,6 +55,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from geostatistics.shared.nwp_gat import HomoNWPAttentionLayer
+from geostatistics.homo_sampler import NWP_EDGE_DIM
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,9 @@ class GraphWaveNetModel(nn.Module):
         k_nwp: int = 4,
         nwp_out_dim: int = 32,
         nwp_heads: int = 4,
+        k_ecmwf: int = 0,
+        ecmwf_feat_dim: int = 0,
+        ecmwf_out_dim: int = 32,
         M: int = 0,
         predefined_adj: bool = False,
         adj_sigma: float = 0.2,
@@ -228,6 +232,9 @@ class GraphWaveNetModel(nn.Module):
         self.M         = M
         self.k_nwp     = k_nwp
         self.nwp_feat_dim = nwp_feat_dim
+        self.k_ecmwf      = k_ecmwf
+        self.ecmwf_feat_dim = ecmwf_feat_dim
+        self.ecmwf_attn   = None
         self.predefined_adj = predefined_adj
         self.adj_sigma      = adj_sigma
         self.adj_threshold  = adj_threshold
@@ -239,8 +246,18 @@ class GraphWaveNetModel(nn.Module):
                 nwp_feat_dim=nwp_feat_dim,
                 nwp_out_dim=nwp_out_dim,
                 heads=nwp_heads,
+                edge_dim=NWP_EDGE_DIM,
             )
             self.nwp_i2_channels = k_nwp * nwp_feat_dim  # slice boundary in x
+            # ECMWF als zweiter Knotentyp, eigene Attention und eigene Kanten —
+            # sonst haette nwp_nodes hier eine andere Bedeutung als beim DCRNN.
+            if k_ecmwf > 0 and ecmwf_feat_dim > 0:
+                self.ecmwf_attn = HomoNWPAttentionLayer(
+                    nwp_feat_dim=ecmwf_feat_dim,
+                    nwp_out_dim=ecmwf_out_dim,
+                    heads=nwp_heads,
+                    edge_dim=NWP_EDGE_DIM,
+                )
         # Broadcast widening is added here rather than by the caller so the two
         # can never disagree.
         proj_in = in_channels + (topo_dim if self.broadcast_topo else 0)
@@ -395,6 +412,8 @@ class GraphWaveNetModel(nn.Module):
         x: Tensor,
         static: Tensor,
         target_mask: Tensor,
+        nwp_edge_attr: Tensor | None = None,
+        ecmwf_edge_attr: Tensor | None = None,
     ) -> Tensor:
         """
         Parameters
@@ -423,6 +442,12 @@ class GraphWaveNetModel(nn.Module):
 
         # NWP aggregation via GATv2 when nwp_nodes=True (B=1 guaranteed by HomoSampler)
         if self.nwp_nodes:
+            if nwp_edge_attr is None:
+                raise ValueError(
+                    "nwp_nodes=True braucht nwp_edge_attr (Distanz/Azimut/Hoehe je "
+                    "NWP->Station-Kante). Ohne diese ist die Zero-Query-Attention "
+                    "permutationsaequivariant ueber die k Gitterpunkte."
+                )
             i2_end = self.M + self.nwp_i2_channels
             meas   = x[..., :self.M]         # (B, N, T, M)
             nwp_i2 = x[..., self.M:i2_end]  # (B, N, T, k*I2)
@@ -431,9 +456,19 @@ class GraphWaveNetModel(nn.Module):
             nwp_t = nwp_i2.reshape(B, N, T, self.k_nwp, self.nwp_feat_dim)  # (B,N,T,k,I2)
             nwp_t = nwp_t.permute(0, 2, 1, 3, 4)                            # (B,T,N,k,I2)
             nwp_t = nwp_t.reshape(B, T, N * self.k_nwp, self.nwp_feat_dim)  # (B,T,N*k,I2)
-            nwp_agg = self.nwp_attn.forward_sequence(nwp_t[0], N, self.k_nwp)  # (T,N,d)
+            nwp_agg = self.nwp_attn.forward_sequence(
+                nwp_t[0], N, self.k_nwp, edge_attr=nwp_edge_attr)           # (T,N,d)
             nwp_agg = nwp_agg.permute(1, 0, 2).unsqueeze(0)                 # (1,N,T,d)
-            x = torch.cat([meas, nwp_agg, ecmwf], dim=-1)                   # (B,N,T,M+d+E)
+            if self.ecmwf_attn is not None:
+                if ecmwf_edge_attr is None:
+                    raise ValueError("k_ecmwf>0 braucht ecmwf_edge_attr")
+                e_t = ecmwf.reshape(B, N, T, self.k_ecmwf, self.ecmwf_feat_dim)
+                e_t = e_t.permute(0, 2, 1, 3, 4).reshape(
+                    B, T, N * self.k_ecmwf, self.ecmwf_feat_dim)
+                ecmwf = self.ecmwf_attn.forward_sequence(
+                    e_t[0], N, self.k_ecmwf, edge_attr=ecmwf_edge_attr)
+                ecmwf = ecmwf.permute(1, 0, 2).unsqueeze(0)                 # (1,N,T,d_e)
+            x = torch.cat([meas, nwp_agg, ecmwf], dim=-1)                   # (B,N,T,M+d+d_e)
 
         # Topographic node features as extra input channels, constant along T.
         # Appended after the NWP re-assembly above so its slice boundaries stay
