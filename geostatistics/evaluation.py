@@ -74,6 +74,7 @@ def build_eval_batch(
     H_fore: int,
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
     hist_wind_available: bool = False,
+    neighbour_meas_available: bool = True,   # ablation B/C: False → no station has measurements
     station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
     station_k_nearest_ecmwf: np.ndarray | None = None, # (N_all, k_e) — k nearest ECMWF, nwp_nodes=False
 ) -> tuple:
@@ -122,8 +123,13 @@ def build_eval_batch(
         e2_full = e2_full.transpose(1, 0, 2)                     # (N_all, 96, E2)
 
     meas_hist = station_meas_scaled[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
-    if not hist_wind_available:
-        meas_hist[:, N_obs:, :] = 0.0
+    # Order matters: ablation B subsumes the IGNNK zeroing and must come first,
+    # otherwise only the target stations would lose their measurements. Same rule
+    # as in TrainingSampler.sample_train / sample_val.
+    if not neighbour_meas_available:
+        meas_hist[:, :, :] = 0.0                # ablation B/C: nobody has measurements
+    elif not hist_wind_available:
+        meas_hist[:, N_obs:, :] = 0.0           # IGNNK masking (variant A)
 
     if interpol_meas is not None:
         rk_slice = interpol_meas[t_hist_abs:t_run_abs, :][:, all_global, np.newaxis]
@@ -179,6 +185,7 @@ def evaluate(
     test_run_pairs: list[tuple[int, int, int]],
     interpol_meas: np.ndarray | None = None,  # (T, N_all) Kriging lag, pre-scaled
     hist_wind_available: bool = False,
+    neighbour_meas_available: bool = True,   # ablation B/C: False → no station has measurements
     timestamps: "pd.DatetimeIndex | None" = None,
     station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
     station_k_nearest_ecmwf: np.ndarray | None = None, # (N_all, k_e) — k nearest ECMWF, nwp_nodes=False
@@ -221,6 +228,7 @@ def evaluate(
         H_fore=H_fore,
         interpol_meas=interpol_meas,
         hist_wind_available=hist_wind_available,
+        neighbour_meas_available=neighbour_meas_available,
     )
 
     def _nwp_ref(gidx: int, r_curr: int) -> np.ndarray:

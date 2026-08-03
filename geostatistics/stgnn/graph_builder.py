@@ -163,6 +163,45 @@ class HeterogeneousGraphBuilder:
         edge_index : (2, 2E) long tensor — both directions included
         edge_attr  : (2E, F) float32 tensor
         """
+        if self.cfg.station_connectivity == "none":
+            # Ablation C: no station↔station message passing at all.
+            #
+            # An empty edge set is provably safe in DiffConv (dcgru_cell.py):
+            #   * out = self.lins[0](x) is an unconditional k=0 self-transform,
+            #     so there is always a path that does not touch any edge;
+            #   * out_deg.clamp(min=1e-8) removes the division by zero when no
+            #     edge writes into out_deg;
+            #   * propagate() over zero edges returns a zero tensor, so every
+            #     k >= 1 term contributes lins[k](0).
+            # The DCGRU therefore degenerates to a plain GRU with a linear input
+            # transform, which is exactly the intent of variant C.
+            #
+            # The edge-feature width is *probed* rather than hard-coded so it
+            # tracks use_distance/use_direction/use_altitude_diff **and** the
+            # topographic edge columns — with the campaign's edge_features list
+            # that is 1 + 2 + 1 + 8 = 12, not the 4 a flags-only count gives.
+            _topo_names = self.cfg.topo_feature_names if topo_node_feats else None
+            _zero_idx = np.zeros(1, dtype=np.int64)
+            probe = edge_features(
+                src_coords=coords[:1],
+                dst_coords=coords[:1],
+                src_alt=(altitudes[:1] if self.cfg.use_altitude_diff else None),
+                dst_alt=(altitudes[:1] if self.cfg.use_altitude_diff else None),
+                max_dist_km=1.0,
+                use_distance=self.cfg.use_distance_features,
+                use_direction=self.cfg.use_direction_features,
+                use_altitude_diff=self.cfg.use_altitude_diff,
+                topo_node_feats=topo_node_feats,
+                topo_feature_names=_topo_names,
+                src_idx=_zero_idx,
+                dst_idx=_zero_idx,
+            )
+            n_feat = int(probe.shape[1])
+            return (
+                torch.zeros((2, 0), dtype=torch.long),
+                torch.zeros((0, n_feat), dtype=torch.float32),
+            )
+
         if self.cfg.station_connectivity == "delaunay":
             undirected = delaunay_edges(coords)          # (E, 2) i < j
         elif self.cfg.station_connectivity == "knn":

@@ -236,6 +236,60 @@ JOBS: list[Job] = [
         raw_out_name= "mtgnn_wind_mtgnn_nwp_hist_fold2",
     ),
 
+    # ==========================================================================
+    # ── DCRNN-Ablationen ──────────────────────────────────────────────────────
+    # B = DCRNN_NOMEAS  (neighbour_meas_available: false)
+    # C = DCRNN_NOGRAPH (zusaetzlich station_connectivity: "none")
+    # Beide leiten sich aus dem DCRNN_GRID/NWP-Arm (Variante A) ab; A−B misst den
+    # Wert der Nachbar-Messungen, B−C den des Geometrie-/NWP-Kontextkanals.
+    # ==========================================================================
+
+    # ── DCRNN NOMEAS (Variante B) ────────────────────────────────────────────
+    Job(
+        group       = "DCRNN_NOMEAS",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_nomeas_fold1_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_nomeas_fold1.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_nomeas_fold0",
+    ),
+    Job(
+        group       = "DCRNN_NOMEAS",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_nomeas_fold2_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_nomeas_fold2.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_nomeas_fold1",
+    ),
+    Job(
+        group       = "DCRNN_NOMEAS",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_nomeas_fold3_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_nomeas_fold3.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_nomeas_fold2",
+    ),
+
+    # ── DCRNN NOGRAPH (Variante C) ───────────────────────────────────────────
+    Job(
+        group       = "DCRNN_NOGRAPH",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_nograph_fold1_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_nograph_fold1.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_nograph_fold0",
+    ),
+    Job(
+        group       = "DCRNN_NOGRAPH",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_nograph_fold2_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_nograph_fold2.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_nograph_fold1",
+    ),
+    Job(
+        group       = "DCRNN_NOGRAPH",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_nograph_fold3_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_nograph_fold3.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_nograph_fold2",
+    ),
+
 ]
 
 # ---------------------------------------------------------------------------

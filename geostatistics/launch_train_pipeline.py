@@ -135,6 +135,34 @@ GROUPS: list[Group] = [
         ],
     ),
 
+    # ── Ablationen des DCRNN-NWP-Arms (Variante A) ─────────────────────────
+    # B = keine Nachbar-Messungen, C = zusaetzlich kein Stationsgraph.
+    # Bewusst ans Ende gehaengt, damit die Reihenfolge der laufenden Kampagne
+    # unveraendert bleibt; im Normalfall gezielt per --groups starten.
+    # Studienaufloesung: train_dcrnn.py leitet den Optuna-Studiennamen aus dem
+    # Config-Stem ohne _fold<N> ab, also
+    #   config_wind_dcrnn_nomeas_fold1.yaml → cl_m-dcrnn_out-48_freq-1h_wind_dcrnn_nomeas
+    # Jede Variante braucht daher ihre eigene HPO auf der Basis-Config.
+    Group(
+        name   = "DCRNN_NOMEAS",
+        script = "train_dcrnn",
+        folds  = [
+            FoldJob("configs/dcrnn/config_wind_dcrnn_nomeas_fold1.yaml", "fold1"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_nomeas_fold2.yaml", "fold2"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_nomeas_fold3.yaml", "fold3"),
+        ],
+    ),
+
+    Group(
+        name   = "DCRNN_NOGRAPH",
+        script = "train_dcrnn",
+        folds  = [
+            FoldJob("configs/dcrnn/config_wind_dcrnn_nograph_fold1.yaml", "fold1"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_nograph_fold2.yaml", "fold2"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_nograph_fold3.yaml", "fold3"),
+        ],
+    ),
+
 ]
 # ---------------------------------------------------------------------------
 # ▲▲▲ ENDE KONFIGURATION ▲▲▲

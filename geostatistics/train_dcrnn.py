@@ -115,6 +115,7 @@ from geostatistics.stgnn import HeterogeneousGraphBuilder
 from geostatistics.stgnn.training.sampler import TrainingSampler
 from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.evaluation import evaluate as run_evaluation, find_ws_feat_idx
+from geostatistics.ablations.guard import check_ablation_flags
 
 logging.basicConfig(
     level=logging.INFO,
@@ -399,6 +400,13 @@ def main() -> None:
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     logger.addHandler(fh)
     logging.getLogger("geostatistics").addHandler(fh)
+
+    # ------------------------------------------------------------------
+    # Ablation variant banner + hard guard against the Kriging-lag trap.
+    # Runs after the HPO override (so it reports the values actually used) and
+    # after the file handler is attached (so every log file records its variant).
+    # ------------------------------------------------------------------
+    check_ablation_flags(dcrnn_cfg, logger)
 
     # ------------------------------------------------------------------
     # Station IDs
@@ -1027,6 +1035,7 @@ def main() -> None:
         target_feat_idx=target_feat_idx,
         station_coords=station_coords,
         hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
+        neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
     )
 
     # ------------------------------------------------------------------
@@ -1118,6 +1127,7 @@ def main() -> None:
             test_run_pairs=val_run_pairs,
             interpol_meas=interpol_meas_scaled,
             hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
+            neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
         )
         cols = ["mae", "rmse", "r2", "skill", "skill_nwp"]
         tbl  = eval_df.set_index("station_id")[cols]

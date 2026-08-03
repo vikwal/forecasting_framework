@@ -58,6 +58,7 @@ from geostatistics.stgnn import HeterogeneousGraphBuilder
 from geostatistics.stgnn.training.sampler import TrainingSampler
 from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.evaluation import evaluate, find_ws_feat_idx
+from geostatistics.ablations.guard import check_ablation_flags
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +189,11 @@ def main() -> None:
         dcrnn_cfg.update(study.best_params)
         if "nwp_heads" in dcrnn_cfg and "nwp_out_per_head" in dcrnn_cfg:
             dcrnn_cfg["nwp_out_dim"] = dcrnn_cfg.pop("nwp_out_per_head") * dcrnn_cfg["nwp_heads"]
+
+    # ── Ablation variant banner + Kriging-lag guard ──────────────────────
+    # Same check as in train_dcrnn.py, so an eval run cannot silently
+    # reintroduce the channel that variant B is defined to exclude.
+    check_ablation_flags(dcrnn_cfg, logger)
 
     # ── Feature config (including resolve_feature_mode) ──────────────────
     icond2_features_all = dcrnn_cfg.get("icond2_features") or []
@@ -468,6 +474,7 @@ def main() -> None:
         station_k_nearest_grid=station_k_nearest_grid,
         station_k_nearest_ecmwf=station_k_nearest_ecmwf,
         hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
+        neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
     )
 
     # ── Save results ─────────────────────────────────────────────────────

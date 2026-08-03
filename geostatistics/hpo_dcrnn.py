@@ -87,6 +87,7 @@ from geostatistics.stgnn.training.sampler import TrainingSampler
 from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.stgnn.config import parse_station_node_features
 from geostatistics.stgnn.utils.topo_features import load_topo_station_features
+from geostatistics.ablations.guard import check_ablation_flags
 
 import pandas as pd
 import pyproj
@@ -282,6 +283,13 @@ def main() -> None:
     logger.info("=" * 70)
     logger.info("HPO DCRNN — config: %s  study: %s", args.config, study_name)
     logger.info("=" * 70)
+
+    # Ablation variant banner + Kriging-lag guard. The ablation variants get
+    # their own HPO study (see docs/implementation_plan_ablations.md §6), so the
+    # HPO path is a first-class entry point for B and C and must not be able to
+    # smuggle the Kriging channel back in either. None of these keys is in the
+    # search space, so the values logged here hold for every trial.
+    check_ablation_flags(dcrnn_cfg, logger)
 
     hpo_cfg  = dcrnn_cfg.get("hpo", {})
 
@@ -1147,6 +1155,7 @@ def main() -> None:
             target_feat_idx=target_feat_idx,
             station_coords=station_coords,
             hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
+            neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
         )
 
         fold_losses: list[float] = []

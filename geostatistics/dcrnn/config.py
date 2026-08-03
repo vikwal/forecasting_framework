@@ -100,6 +100,16 @@ class DCRNNConfig:
     # out for target nodes, giving the model an external prior at inference time.
     interpolate_history: bool = False
 
+    # Ablation B / C: when False the sampler zeroes the measurement channels of
+    # EVERY station, not just the target nodes, so the station graph carries only
+    # NWP features and statics. target_mask semantics are untouched, so A and the
+    # ablation variants are scored at exactly the same nodes.
+    # Must not be combined with interpolate_history=True — the Kriging lag channel
+    # is appended *after* the zeroing and would smuggle neighbour measurements back
+    # in on a path that bypasses the graph entirely (asserted in train_dcrnn.py,
+    # get_test_results_dcrnn.py and hpo_dcrnn.py).
+    neighbour_meas_available: bool = True
+
     # NWP injection bypass: when False, nwp_out_dim is forced to 0 so the
     # NWPAttentionLayer is never constructed / called.  Station.x still carries
     # the nearest-grid NWP features put there by the sampler, so the model has
@@ -215,6 +225,8 @@ class DCRNNConfig:
             )
 
         interpolate_history = d.get("interpolate_history", False)
+        # Default True preserves variant A exactly.
+        neighbour_meas_available = d.get("neighbour_meas_available", True)
 
         direction_to_adj = d.get("direction_to_adj", False)
         # Support both raw degrees ("wind_direction") and sin/cos encoding ("sin_wind_direction")
@@ -250,6 +262,7 @@ class DCRNNConfig:
             target_feat_idx=measurement_features.index(target_col),
             station_meas_features=len(measurement_features) + (1 if interpolate_history else 0),
             interpolate_history=interpolate_history,
+            neighbour_meas_available=neighbour_meas_available,
             icond2_features_per_step=len(icond2_features),
             ecmwf_features_per_step=len(ecmwf_features) if d.get("next_n_ecmwf", 4) > 0 else 0,
             station_static_features=4 + len(node_feat_names),
