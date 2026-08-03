@@ -1126,6 +1126,12 @@ def main() -> None:
             all_ids=all_ids,
             test_run_pairs=val_run_pairs,
             interpol_meas=interpol_meas_scaled,
+            # Without these two the base arm (nwp_nodes: false) would evaluate
+            # against a station.x carrying only the single nearest grid point,
+            # while the model was trained on k*I2 + k_e*E2 channels — the B1 fix
+            # from round 1 would be inert on this path (review round 2, R1).
+            station_k_nearest_grid=station_k_nearest_grid,
+            station_k_nearest_ecmwf=station_k_nearest_ecmwf,
             hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
             neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
         )

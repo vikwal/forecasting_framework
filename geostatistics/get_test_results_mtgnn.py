@@ -51,7 +51,7 @@ from geostatistics.train_stgnn2 import (
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding
 from geostatistics.homo_sampler import HomoSampler, evaluate_homo_model
 from geostatistics.mtgnn import MTGNNModel
-from geostatistics.stgnn.config import parse_edge_features
+from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features
 from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.stgnn.utils.topo_features import load_topo_station_features_dict
 
@@ -113,6 +113,14 @@ def main() -> None:
         help=(
             "Final-evaluation mode: train_ids = files + val_files, "
             "val_ids = test_files. Must match --test-mode used in train_mtgnn.py."
+        ),
+    )
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Topographic node features on the station nodes, overriding the config's "
+            "station_node_features key. Must match what train_mtgnn.py was given, "
+            "otherwise static_dim differs and the checkpoint will not load."
         ),
     )
     args = parser.parse_args()
@@ -262,7 +270,16 @@ def main() -> None:
     # ── Topographic node features ────────────────────────────────────────────
     # Must mirror train_mtgnn.py exactly: they widen the static tensor, so a
     # checkpoint trained with them cannot be loaded into a static_dim=6 model.
-    _, _, _, topo_feature_names = parse_edge_features(mcfg)
+    # Same condition as train_mtgnn.py:467 — --station-node-features or the
+    # config's own station_node_features key wins, and only configs that set
+    # neither fall back to the topo names in edge_features. Taking the names
+    # from parse_edge_features unconditionally gave eval 8 features against
+    # training's 9 for config_wind_mtgnn.yaml (static_dim 14 vs 15, elev_std
+    # missing) — review round 2, K2.
+    if args.station_node_features is not None or "station_node_features" in mcfg:
+        topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
+    else:
+        _, _, _, topo_feature_names = parse_edge_features(mcfg)
     topo_feats: dict[str, np.ndarray] = {}
     if topo_feature_names:
         topo_features_path = mcfg.get("topo_features_path")

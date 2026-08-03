@@ -92,6 +92,7 @@ from geostatistics.train_stgnn2 import (
     apply_interpol_imputation,
     load_knn_imputation,
     apply_knn_imputation,
+    require_nwp_elevation_env,
 )
 from geostatistics.train_mtgnn import (
     _train_epoch,
@@ -351,6 +352,14 @@ def main() -> None:
     if not hpo_cfg:
         print("ERROR: No 'hpo' block found under 'mtgnn' in config.")
         sys.exit(1)
+
+    # NWP node elevations come from the database and feed the altitude-difference
+    # column of the NWP edge attributes. A worker started without WEATHER_DB_URL
+    # used to continue with no elevations at all; fail here, before the shared
+    # GNNCache directory is touched. Review round 2, K3.
+    require_nwp_elevation_env(
+        need_icond2=True, context="hpo_mtgnn.py, NWP edge altitude difference",
+    )
 
     freq     = data_cfg.get("freq", "1h")
     _fmap    = {"1h": 1.0, "1H": 1.0, "30min": 0.5, "30T": 0.5, "15min": 0.25, "15T": 0.25}
@@ -689,9 +698,12 @@ def main() -> None:
         logger.info("NWP-Knotenhoehen geladen (ICON-D2: %s, ECMWF: %s)",
                     "ja", "ja" if ecmwf_alts is not None else "nein")
     else:
-        logger.warning(
-            "WEATHER_DB_URL nicht gesetzt — NWP-Kantenattribute ohne Hoehendifferenz "
-            "(Distanz und Azimut bleiben erhalten)."
+        # Unreachable: require_nwp_elevation_env() in main() already aborted the
+        # process. Kept as a backstop so no future edit can reintroduce the
+        # silent fallback to missing NWP node elevations (K3).
+        raise RuntimeError(
+            "WEATHER_DB_URL not set — refusing to build NWP edge attributes "
+            "without the altitude difference."
         )
 
     # ── Topographic node features ───────────────────────────────────────────

@@ -276,7 +276,13 @@ def main() -> None:
     # Must mirror train_wavenet.py exactly: these widen the static tensor and,
     # with --broadcast-topo, input_proj — a mismatch means the checkpoint fails
     # to load (or worse, loads a differently scaled feature into the same slot).
-    if args.station_node_features is not None:
+    # Same condition as train_wavenet.py:452 — --station-node-features or the
+    # config's own station_node_features key wins, and only configs that set
+    # neither fall back to the topo names in edge_features. Without the second
+    # clause an unflagged eval run on config_wind_wavenet.yaml fell through to
+    # parse_edge_features, which lists no topo names there: eval got 0 features
+    # against training's 9 (static_dim 6 vs 15) — review round 2, K2.
+    if args.station_node_features is not None or "station_node_features" in mcfg:
         topo_feature_names = parse_station_node_features(mcfg, args.station_node_features)
     else:
         _, _, _, topo_feature_names = parse_edge_features(mcfg)

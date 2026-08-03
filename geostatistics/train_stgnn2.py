@@ -1128,6 +1128,50 @@ def load_nwp_elevations(
     return icond2_alts, ecmwf_alts
 
 
+class MissingNWPElevationEnvError(RuntimeError):
+    """Raised when a run that needs NWP node elevations has no database URL."""
+
+
+def require_nwp_elevation_env(
+    *,
+    need_icond2: bool,
+    need_ecmwf: bool = False,
+    context: str = "",
+) -> None:
+    """
+    Abort the process unless the database URLs needed for NWP node elevations
+    are present in the environment.
+
+    Why this is fatal rather than a warning
+    ---------------------------------------
+    ``ssh host '…'`` starts a non-interactive shell, and ``~/.bashrc`` returns
+    before its ``export`` lines. A worker launched that way has **no**
+    ``WEATHER_DB_URL`` and used to fall back to ``NWP altitudes = 0`` with only
+    a log warning. Because ``icond2_alts`` / ``ecmwf_alts`` and the derived
+    ``*_static_scaled`` arrays are stored in the *shared* GNNCache, such a worker
+    writes the zeros into the cache and every later cache HIT hands them back —
+    on 2026-08-03 this silently undid the B4 elevation fix for about 15 minutes
+    (``logs/hpo_dcrnn_wind_dcrnn_base_r1.log``, 16:10 and 16:19).
+
+    Call this **before** any cache directory is written, so a misconfigured
+    worker dies without leaving anything behind.
+    """
+    missing: list[str] = []
+    if need_icond2 and not os.environ.get("WEATHER_DB_URL"):
+        missing.append("WEATHER_DB_URL")
+    if need_ecmwf and not os.environ.get("ECMWF_WIND_SL_URL"):
+        missing.append("ECMWF_WIND_SL_URL")
+    if not missing:
+        return
+    raise MissingNWPElevationEnvError(
+        f"{' and '.join(missing)} not set{f' ({context})' if context else ''}. "
+        "NWP node elevations would silently be 0 m and, once written to the "
+        "shared GNNCache, would be handed to every later cache HIT. Export the "
+        "variable(s) before starting the worker — a non-interactive shell does "
+        "not read the export lines of ~/.bashrc."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------

@@ -76,6 +76,7 @@ from geostatistics.train_stgnn2 import (
     apply_interpol_imputation,
     load_knn_imputation,
     apply_knn_imputation,
+    require_nwp_elevation_env,
 )
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.dcrnn.training import DCRNNTrainer
@@ -290,6 +291,17 @@ def main() -> None:
     # smuggle the Kriging channel back in either. None of these keys is in the
     # search space, so the values logged here hold for every trial.
     check_ablation_flags(dcrnn_cfg, logger)
+
+    # NWP node elevations come from the database; a worker started without
+    # WEATHER_DB_URL used to continue with 0 m and write those zeros into the
+    # *shared* GNNCache (icond2_alts / ecmwf_alts / *_static_scaled all live in
+    # the derived part, so a later HIT hands them back). Fail here — before the
+    # cache directory is touched — instead of after the damage is done.
+    # Review round 2, K3.
+    require_nwp_elevation_env(
+        need_icond2=bool(dcrnn_cfg.get("use_altitude_diff", False)),
+        context="hpo_dcrnn.py, dcrnn.use_altitude_diff: true",
+    )
 
     hpo_cfg  = dcrnn_cfg.get("hpo", {})
 
@@ -626,8 +638,14 @@ def main() -> None:
                     weather_db_url, "icon_d2_grid_points", icond2_coords
                 ) + 10.0
             else:
-                logger.warning("DB URLs not set — NWP altitudes = 0")
-                icond2_alts = np.zeros(N_igrid, dtype=np.float32)
+                # Unreachable: require_nwp_elevation_env() above already aborted
+                # the process when use_altitude_diff is set and WEATHER_DB_URL is
+                # missing. Kept as a backstop so no future edit can reintroduce
+                # the silent 0 m fallback on the cache-write path (K3).
+                raise RuntimeError(
+                    "WEATHER_DB_URL not set — refusing to write NWP altitudes = 0 "
+                    "into the shared GNNCache."
+                )
         else:
             icond2_alts = np.zeros(N_igrid, dtype=np.float32)
 

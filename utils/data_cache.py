@@ -861,6 +861,14 @@ class GNNCache:
         from pathlib import Path
         return self.cache_dir / key
 
+    def _lock_path(self, key: str):
+        """Lock file for *key*, deliberately **outside** the key directory.
+
+        Keeping it out of ``{key}/`` means the cache directory contains nothing
+        but the payload, and a reader that lists the directory never sees it.
+        """
+        return self.cache_dir / f".{key}.write.lock"
+
     def exists(self, key: str) -> bool:
         """Return True only if the cache is fully written (derived.pkl present)."""
         return (self._dir(key) / "derived.pkl").exists()
@@ -876,23 +884,97 @@ class GNNCache:
         """
         Persist arrays as .npy (one file each) and everything else as derived.pkl.
 
+        Concurrency contract
+        --------------------
+        Several HPO workers MISS the same key at the same time and every one of
+        them calls ``save``, while other workers already hold ``mmap`` views of
+        the very files being written (``grid_icond2_runs.npy`` is 2.7 GB). The
+        previous implementation wrote straight to the destination paths with no
+        lock, so a reader could observe a half-written array. Three properties
+        are enforced here:
+
+        1. **Mutual exclusion.** An ``fcntl.flock`` on ``.{key}.write.lock``
+           (next to, not inside, the cache directory) serialises writers.
+        2. **Double check.** Once the lock is held, a cache that another worker
+           completed in the meantime is left alone — this is what would have
+           prevented the 2026-08-03 incident in which a worker without
+           ``WEATHER_DB_URL`` overwrote a good cache with 0 m NWP elevations.
+        3. **Atomic publication.** Every file is written to
+           ``{name}.tmp.<pid>`` inside the cache directory and then moved into
+           place with ``os.replace``, which is atomic on POSIX. ``derived.pkl``
+           goes last, so ``exists()`` only becomes true once the payload is
+           complete. Readers that already hold an ``mmap`` keep the old inode
+           and are unaffected; new readers see either the old or the new file,
+           never a truncated one.
+
+        Existing cache directories are never renamed, moved or deleted — a
+        directory-level ``os.replace`` would fail on a non-empty target anyway,
+        and the running campaign reads from exactly these directories.
+
         Parameters
         ----------
         key     : cache key returned by ``make_key``
         arrays  : dict with keys from ``ARRAY_NAMES``
         derived : dict with small objects (scalers, coords, pairs, timestamps …)
         """
+        import fcntl
         import pickle
+
         p = self._dir(key)
         p.mkdir(parents=True, exist_ok=True)
+        lock_path = self._lock_path(key)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-        for name, arr in arrays.items():
-            out = p / f"{name}.npy"
-            self.logger.info("GNNCache — saving %s %s …", name, arr.shape)
-            np.save(out, arr)
+        with open(lock_path, "w") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                if self.exists(key):
+                    # Another worker finished this key while we were loading the
+                    # raw data. The key is a content hash of the config, so its
+                    # payload is by construction the same — rewriting it would
+                    # only put a complete cache at risk.
+                    self.logger.warning(
+                        "GNNCache — %s already complete (written by another "
+                        "process); skipping the write.", p,
+                    )
+                    return
 
-        with open(p / "derived.pkl", "wb") as fh:
-            pickle.dump(derived, fh, protocol=4)
+                tmp_paths: list = []
+                try:
+                    for name, arr in arrays.items():
+                        final = p / f"{name}.npy"
+                        tmp = p / f"{name}.npy.tmp.{os.getpid()}"
+                        tmp_paths.append(tmp)
+                        self.logger.info(
+                            "GNNCache — saving %s %s …", name, arr.shape
+                        )
+                        # np.save appends '.npy' to a path that lacks it, so
+                        # hand it an open file object instead of the path.
+                        with open(tmp, "wb") as fh:
+                            np.save(fh, arr)
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                        os.replace(tmp, final)
+                        tmp_paths.remove(tmp)
+
+                    # derived.pkl last: exists() keys on it, so the cache only
+                    # becomes visible once every array is in place.
+                    tmp = p / f"derived.pkl.tmp.{os.getpid()}"
+                    tmp_paths.append(tmp)
+                    with open(tmp, "wb") as fh:
+                        pickle.dump(derived, fh, protocol=4)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp, p / "derived.pkl")
+                    tmp_paths.remove(tmp)
+                finally:
+                    for leftover in tmp_paths:
+                        try:
+                            os.unlink(leftover)
+                        except OSError:
+                            pass
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
         self.logger.info("GNNCache — written to %s", p)
 

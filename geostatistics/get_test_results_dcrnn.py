@@ -55,8 +55,10 @@ from geostatistics.train_stgnn2 import (
 from geostatistics.train_dcrnn import resolve_feature_mode, encode_circular_measurements, apply_dir_encoding
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.stgnn import HeterogeneousGraphBuilder
+from geostatistics.stgnn.config import parse_station_node_features
 from geostatistics.stgnn.training.sampler import TrainingSampler
 from geostatistics.stgnn.utils.normalization import StandardScaler
+from geostatistics.stgnn.utils.topo_features import load_topo_station_features
 from geostatistics.evaluation import evaluate, find_ws_feat_idx
 from geostatistics.ablations.guard import check_ablation_flags
 
@@ -139,6 +141,16 @@ def main() -> None:
             "val_ids = test_files (50). Must match the --test-mode used in train_dcrnn.py."
         ),
     )
+    parser.add_argument(
+        "--station-node-features", default=None, metavar="NAMES",
+        help=(
+            "Absolute topographic node features on the station nodes, overriding the "
+            "config's station_node_features key. 'all' for every feature in "
+            "TOPO_FEATURE_ORDER, or a comma-separated subset. Must match what "
+            "train_dcrnn.py was given, otherwise station.static is narrower than the "
+            "checkpoint's station_static_features and the forward pass fails."
+        ),
+    )
     args = parser.parse_args()
 
     # ── Resolve model file ──────────────────────────────────────────────
@@ -211,7 +223,12 @@ def main() -> None:
     
     H_hist = dcrnn_cfg.get("history_length", 48)
     H_fore = dcrnn_cfg.get("forecast_horizon", 48)
-    
+    # Kriging lag channel — mirrors train_dcrnn.py:517. With interpolate_history
+    # the model is built with station_meas_features = M + 1, so the eval batch has
+    # to carry the same extra channel; without this the eval path silently fed M
+    # channels into an (M+1)-wide model (review round 2, R2).
+    interpolate_history = dcrnn_cfg.get("interpolate_history", False)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Device: %s", device)
 
@@ -243,6 +260,7 @@ def main() -> None:
     T = len(timestamps)
 
     # Imputation (if paths present)
+    rk_pred = None   # kept for the optional Kriging lag feature below
     interpol_path = data_cfg.get("interpol_path")
     if interpol_path:
         rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)
@@ -365,6 +383,23 @@ def main() -> None:
     meas_scaler.fit(meas_raw[:split_t, :N_train].reshape(-1, M_meas))
     meas_scaled = meas_scaler.transform(meas_raw.reshape(-1, M_meas)).reshape(T, len(all_ids), M_meas)
 
+    # Kriging lag feature — literal mirror of train_dcrnn.py:814-826, including
+    # the scaling with the target column's mean/std and the NaN→0 fill.
+    interpol_meas_scaled = None
+    if interpolate_history:
+        if rk_pred is None:
+            raise ValueError(
+                "dcrnn.interpolate_history: true requires data.interpol_path to be set "
+                "and the Kriging parquet files to be present."
+            )
+        tidx = measurement_cols.index(target_col)
+        rk_s = (rk_pred - meas_scaler.mean_[tidx]) / (meas_scaler.std_[tidx] + meas_scaler.eps)
+        interpol_meas_scaled = np.nan_to_num(rk_s, nan=0.0).astype(np.float32)
+        logger.info(
+            "Kriging lag feature (interpolate_history=True): shape=%s, NaN→0 filled",
+            interpol_meas_scaled.shape,
+        )
+
     train_r_mask = run_times < split_time
     i2_scaler = StandardScaler()
     i2_scaler.fit(grid_icond2_runs_raw[train_r_mask].reshape(-1, len(icond2_features)))
@@ -379,6 +414,36 @@ def main() -> None:
     raw_static  = np.stack([lats, lons, alts], axis=1).astype(np.float32)
     stat_scaler.fit(raw_static[:N_train])
     station_static_scaled = stat_scaler.transform(raw_static)
+
+    # Absolute topographic node features, appended after lat/lon/alt — literal
+    # mirror of train_dcrnn.py:868-899. Without this block station.static stayed
+    # 3 columns wide while DCRNNConfig.from_yaml resolved station_node_features
+    # ('all' in every campaign config) to station_static_features = 4 + 9 = 13,
+    # and the forward pass died with
+    #   "mat1 and mat2 shapes cannot be multiplied (60x135 and 144x64)"
+    # (review round 2, K1). The sampler appends the type indicator last, so
+    # columns 0-2 keep their meaning.
+    _node_feat_names = parse_station_node_features(dcrnn_cfg, args.station_node_features)
+    if _node_feat_names:
+        _topo_path = dcrnn_cfg.get("topo_features_path")
+        if not _topo_path:
+            raise ValueError(
+                "station_node_features is set but 'topo_features_path' is missing "
+                "from the dcrnn config section."
+            )
+        # n_train=N_train: the z-score is fitted on the fold's train stations
+        # only, exactly as in train_dcrnn.py. Fitting on all_ids would normalise
+        # the topography of the held-out stations with their own statistics.
+        _topo_cols, _ = load_topo_station_features(
+            _topo_path, all_ids, _node_feat_names, n_train=N_train,
+        )
+        station_static_scaled = np.concatenate(
+            [station_static_scaled, _topo_cols], axis=1,
+        ).astype(np.float32)
+        logger.info(
+            "Station static features: 3 geo + %d topo (+1 type indicator from sampler) → %d",
+            _topo_cols.shape[1], station_static_scaled.shape[1] + 1,
+        )
 
     icond2_static_scaled = StandardScaler().fit_transform(np.concatenate([icond2_coords, icond2_alts[:, None]], axis=1)).astype(np.float32)
     ecmwf_static_scaled = StandardScaler().fit_transform(np.concatenate([ecmwf_coords, ecmwf_alts[:, None]], axis=1)).astype(np.float32)
@@ -418,7 +483,8 @@ def main() -> None:
     model_cfg = DCRNNConfig.from_yaml(
         dcrnn_cfg, icond2_features=icond2_features, ecmwf_features=ecmwf_features,
         measurement_features=measurement_cols, target_col=target_col,
-        n_train=N_train, n_val=N_val, checkpoint_path=str(model_path)
+        n_train=N_train, n_val=N_val, checkpoint_path=str(model_path),
+        station_node_features=args.station_node_features,
     )
     builder = HeterogeneousGraphBuilder(model_cfg.graph)
     base_graph = builder.build(
@@ -473,6 +539,7 @@ def main() -> None:
         timestamps=timestamps,
         station_k_nearest_grid=station_k_nearest_grid,
         station_k_nearest_ecmwf=station_k_nearest_ecmwf,
+        interpol_meas=interpol_meas_scaled,
         hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
         neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
     )
