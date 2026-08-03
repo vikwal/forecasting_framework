@@ -276,6 +276,7 @@ wavenet:
       hidden:
         high: 128
         low: 32
+        step: 4
         type: int
       horizon_decay:
         high: 0.99
@@ -310,6 +311,11 @@ wavenet:
       next_n_neighbors:
         high: 90
         low: 50
+        type: int
+      nwp_out_dim:
+        high: 128
+        low: 16
+        step: 4
         type: int
       weight_decay:
         high: 0.001

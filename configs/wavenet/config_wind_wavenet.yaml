@@ -122,6 +122,7 @@ wavenet:
         type: int
         low: 32
         high: 128
+        step: 4
 
       n_blocks:
         type: int
