@@ -11,7 +11,7 @@ None of the checks below needs data files or a GPU; the whole suite runs on CPU
 in a few seconds.
 
     cd ~/Work/forecasting_framework
-    ./frcst/bin/python -m geostatistics.ablations.verify
+    ./frcst/bin/python -m archiv.ablations_verification.verify
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from geostatistics.ablations.fixture import build_fixture          # noqa: E402
+from archiv.ablations_verification.fixture import build_fixture          # noqa: E402
 from geostatistics.ablations.guard import (                        # noqa: E402
     AblationConfigError, check_ablation_flags,
 )
@@ -544,7 +544,7 @@ def check_7_configs(cfg_dir: str) -> None:
 
             # parse through the production config parser
             try:
-                from geostatistics.ablations.fixture import build_fixture as _bf
+                from archiv.ablations_verification.fixture import build_fixture as _bf
                 fx = _bf(str(dst), seed=SEED, n_stations=20,
                          n_grid_lat=6, n_grid_lon=6, n_ecmwf_lat=4, n_ecmwf_lon=4)
                 n_edges = int(fx.base_graph["station", "near", "station"].edge_index.shape[1])

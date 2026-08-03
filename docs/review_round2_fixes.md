@@ -1,4 +1,4 @@
-# Review Runde 2 — Behebung der Befunde K1–K4, R1 und R2
+# Review Runde 2 — Behebung der Befunde K1–K4, R1, R2 und R5
 
 *Stand 2026-08-03, ausgeführt auf `l2` (`w-lambdablade2`), Branch
 `fix/mtgnn-topo-static-dim`, Basis-Commit `9a0f3b6`, Ergebnis-Commit `7eeb42f`.
@@ -29,11 +29,11 @@ verbraucht. Beleg in §6.
 Gesamtergebnis der Verifikation:
 
 ```
-geostatistics/ablations/verify_review2.py         34 passed, 0 failed
-geostatistics/ablations/verify_review2_env.py      6 passed, 0 failed
-geostatistics/ablations/verify_review2_cache.py   VERDICT: PASS
-geostatistics/ablations/verify.py                 79 passed, 0 failed
-geostatistics/ablations/batch_fingerprint.py      IDENTICAL — 28 tensor fingerprints
+archiv/ablations_verification/verify_review2.py         34 passed, 0 failed
+archiv/ablations_verification/verify_review2_env.py      6 passed, 0 failed
+archiv/ablations_verification/verify_review2_cache.py   VERDICT: PASS
+archiv/ablations_verification/verify.py                 79 passed, 0 failed
+archiv/ablations_verification/batch_fingerprint.py      IDENTICAL — 28 tensor fingerprints
 ```
 
 auf **allen drei Hosts** (`l2`, `l1`, `ws`).
@@ -243,7 +243,7 @@ Die Ablations-Assertion aus Runde 1 bleibt wirksam: bei
 
 ### 3.1 K1 — der Test, der den Befund gefunden hat
 
-`geostatistics/ablations/verify_review2.py`, Abschnitt K1. Er baut die Fixture
+`archiv/ablations_verification/verify_review2.py`, Abschnitt K1. Er baut die Fixture
 aus der echten `config_wind_dcrnn.yaml`, stellt den Statik-Aufbau des alten
 Eval-Skripts nach und führt einen echten `DCRNN`-Forward über
 `evaluation.build_eval_batch` aus.
@@ -287,7 +287,7 @@ nach dem Fix aufgehoben.
 
 ### 3.3 K3 — Abbruch vor jeder Cache-Berührung
 
-`geostatistics/ablations/verify_review2_env.py` patcht `GNNCache.__init__` so,
+`archiv/ablations_verification/verify_review2_env.py` patcht `GNNCache.__init__` so,
 dass es eine Sentinel-Ausnahme wirft. `GNNCache` ist in allen drei `main()` das
 Erste, was das Cache-Verzeichnis anfasst. „REACHED_CACHE" heißt also: die
 Prüfung hat den Lauf durchgelassen und es ist noch nichts geschrieben.
@@ -323,7 +323,7 @@ laufenden Worker haben das Modul längst geladen.
 
 ### 3.4 K4 — paralleles Schreiben und Lesen
 
-`geostatistics/ablations/verify_review2_cache.py`, auf **Wegwerf**-Verzeichnissen
+`archiv/ablations_verification/verify_review2_cache.py`, auf **Wegwerf**-Verzeichnissen
 `/tmp/k4cache_old` und `/tmp/k4cache_new`. 4 schreibende und 6 lesende Prozesse
 auf denselben Schlüssel, je 48 MB + 24 MB, 10 s Lesefenster.
 
@@ -629,9 +629,9 @@ verfallen:
 
 | Datei | Zweck |
 |---|---|
-| `geostatistics/ablations/verify_review2.py` | K1-Reproduktion mit echtem DCRNN-Forward, K2-`static_dim`-Gegenüberstellung, AST-Checks für K1–K4, R1, R2 — 34 Checks |
-| `geostatistics/ablations/verify_review2_env.py` | K3, 6 Checks über die drei echten HPO-Einstiegspunkte |
-| `geostatistics/ablations/verify_review2_cache.py` | K4, Nebenläufigkeitstest gegen die alte **und** die neue `save()`, auf Wegwerf-Verzeichnissen |
+| `archiv/ablations_verification/verify_review2.py` | K1-Reproduktion mit echtem DCRNN-Forward, K2-`static_dim`-Gegenüberstellung, AST-Checks für K1–K4, R1, R2 — 34 Checks |
+| `archiv/ablations_verification/verify_review2_env.py` | K3, 6 Checks über die drei echten HPO-Einstiegspunkte |
+| `archiv/ablations_verification/verify_review2_cache.py` | K4, Nebenläufigkeitstest gegen die alte **und** die neue `save()`, auf Wegwerf-Verzeichnissen |
 
 ### Reproduktion
 
@@ -640,16 +640,118 @@ ssh l2
 cd ~/Work/forecasting_framework && source frcst/bin/activate
 
 # Runde-2-Belege
-CUDA_VISIBLE_DEVICES="" nice -n 19 python -m geostatistics.ablations.verify_review2
-CUDA_VISIBLE_DEVICES="" nice -n 19 python -m geostatistics.ablations.verify_review2_env
-CUDA_VISIBLE_DEVICES="" nice -n 19 python -m geostatistics.ablations.verify_review2_cache /tmp/k4cache
+CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.verify_review2
+CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.verify_review2_env
+CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.verify_review2_cache /tmp/k4cache
 
 # Ablations-Suite und Fingerabdruck aus Runde 1 (unverändert)
-CUDA_VISIBLE_DEVICES="" nice -n 19 python -m geostatistics.ablations.verify
-CUDA_VISIBLE_DEVICES="" nice -n 19 python -m geostatistics.ablations.batch_fingerprint \
-    --out /tmp/fp_after.json --compare /tmp/fp_before.json
+CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.verify
+CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.batch_fingerprint \
+    --out /tmp/fp_after.json --compare archiv/ablations_verification/fp_before_674a043.json
 ```
 
 Alle fünf laufen auf der CPU, ohne GPU und ohne Optuna. `verify_review2_cache.py`
 legt ausschließlich `/tmp/k4cache_old` und `/tmp/k4cache_new` an und räumt sie
 am Ende weg; `data_cache/gnns` wird nie angefasst.
+
+---
+
+## 9. R5 — Suchraum-Asymmetrie MTGNN vs. WaveNet (Commit `f5234d7`)
+
+*Nachgetragen am 2026-08-03, nach den Fixes aus Abschnitt 2. Dieser Befund kam aus
+demselben Review (`docs/review_round2_findings.md`, R5), wurde aber getrennt behandelt,
+weil er als einziger einen Neustart laufender Studien erforderte.*
+
+### 9.1 Der Befund
+
+Der Modellvergleich MTGNN gegen WaveNet war über zwei geteilte Suchachsen verzerrt:
+
+| Achse | MTGNN | WaveNet (vorher) | Wirkung |
+|---|---|---|---|
+| `nwp_out_dim` | getunt, 16…128 step 4 | **statisch 32** | MTGNN durfte eine Achse optimieren, die WaveNet nicht bekam. Betrifft nur den nwp-Arm — bei `nwp_nodes: false` ist der Parameter inert |
+| `hidden` | 32…128 **step 4** → 25 Werte | 32…128 **ohne step** → 97 Werte | Gleiches Trial-Budget auf einem 4× feineren Gitter benachteiligt **WaveNet**. Betrifft beide Arme |
+
+Die erste Asymmetrie begünstigt MTGNN, die zweite benachteiligt WaveNet — sie heben
+sich nicht auf, sondern wirken beide in dieselbe Richtung.
+
+### 9.2 Was geändert wurde
+
+`configs/wavenet/config_wind_wavenet_nwp.yaml`
+- `hpo.params.nwp_out_dim: {type: int, low: 16, high: 128, step: 4}` — zeichengleich zu
+  `config_wind_mtgnn_nwp.yaml`. `step: 4` ab `low: 16` garantiert wie dort die
+  Teilbarkeit durch `nwp_heads: 4`.
+- `hpo.params.hidden` bekommt `step: 4`.
+
+`configs/wavenet/config_wind_wavenet.yaml`
+- `hpo.params.hidden` bekommt `step: 4`.
+- **Kein** `nwp_out_dim`: bei `nwp_nodes: false` inert, und `config_wind_mtgnn.yaml` hat
+  ihn aus demselben Grund auch nicht. Dieselbe Logik wie beim Pinning der inerten
+  Parameter in Ablations-Variante C.
+
+Insgesamt 7 Zeilen in 2 Dateien. Vorher geprüft, dass kein A1-Muster entsteht:
+`sample_hyperparameters` sampelt generisch alles aus `hpo.params`, und
+`hpo_wavenet.py:962` liest `trial_cfg.get("nwp_out_dim", ...)` — zeichengleich zu
+`hpo_mtgnn.py:979`. Der neue Eintrag ist also wirksam und nicht bloß Dekoration.
+
+### 9.3 Verifikation
+
+```
+mtgnn_nwp      n_params= 19 trials=150
+wavenet_nwp    n_params= 18 trials=150
+mtgnn_base     n_params= 18 trials=150
+wavenet_base   n_params= 17 trials=150
+
+--- mtgnn_nwp vs wavenet_nwp ---
+  nur mtgnn_nwp:   ['beta', 'n_layers', 'topk_graph']   (nur Architektur? True)
+  nur wavenet_nwp: ['kernel_size', 'n_blocks']          (nur Architektur? True)
+  geteilte Achsen mit abweichender Spec: KEINE
+
+--- mtgnn_base vs wavenet_base ---
+  nur mtgnn_base:   ['beta', 'n_layers', 'topk_graph']  (nur Architektur? True)
+  nur wavenet_base: ['kernel_size', 'n_blocks']         (nur Architektur? True)
+  geteilte Achsen mit abweichender Spec: KEINE
+
+mtgnn_nwp      nwp_heads=4  nwp_out_dim 16..128 step 4  -> alle durch 4 teilbar: True  (29 Werte)
+wavenet_nwp    nwp_heads=4  nwp_out_dim 16..128 step 4  -> alle durch 4 teilbar: True  (29 Werte)
+mtgnn_nwp / wavenet_nwp / mtgnn_base / wavenet_base:  hidden 32..128 step 4 -> je 25 Werte
+```
+
+Die verbleibenden Unterschiede sind ausschließlich architekturspezifisch: MTGNNs
+Graph-Learning-Modul (`beta`, `n_layers`, `topk_graph`) gegen WaveNets dilatierte
+Faltungen (`kernel_size`, `n_blocks`). Diese Parameter haben im jeweils anderen Modell
+keine Entsprechung.
+
+Live-Beleg aus Trial 0 der neuen nwp-Studie:
+
+```
+Trial 0 — hyperparameters: {'K_hop': 2, ..., 'hidden': 72, ..., 'nwp_out_dim': 76, ...}
+```
+
+`nwp_out_dim = 76` wird tatsächlich gesampelt und ist durch `nwp_heads = 4` teilbar;
+`hidden = 72` liegt auf dem Step-4-Gitter. Die base-Studie hat korrekt **kein**
+`nwp_out_dim` in den Trial-Parametern.
+
+### 9.4 Studien-Neustart
+
+Beide WaveNet-Studien mussten von Null neu, weil Optuna innerhalb einer Studie keine
+zwei verschiedenen Verteilungen für denselben Parameternamen führen kann.
+
+| Schritt | Beleg |
+|---|---|
+| Snapshot **vor** dem Löschen | `archiv/hpo_wavenet_asym/studies_snapshot_2026-08-03_wavenet.json` (nicht versioniert), 7782 Bytes, 4 + 3 Trials inkl. `intermediate_values` |
+| Gestoppte Worker | l2 `hpo_wavenet_{base,nwp}_r1` (GPU 3), l1 `hpo_wavenet_{base,nwp}_r2` (GPU 6/7) |
+| Gelöschte Studien | `cl_m-wavenet_out-48_freq-1h_wind_wavenet` {FAIL 1, COMPLETE 1, RUNNING 2}, `..._wind_wavenet_nwp` {COMPLETE 1, RUNNING 2} |
+| Neu gestartet | 4 von 4 über `/tmp/launch_hpo.sh`, alle mit gesetztem `WEATHER_DB_URL` verifiziert |
+
+Verlust: zwei COMPLETE-Trials (val 2.0600 bzw. 1.7791).
+
+**Die sechs DCRNN- und MTGNN-Studien wurden nicht angefasst.** Nachweis: vor und nach
+dem Eingriff liefen zwölf Worker durchgehend (je drei Prozesse pro Studie auf l2 und
+l1), und die FAIL-Zahlen der übrigen Studien blieben unverändert.
+
+### 9.5 Was für das Paper festzuhalten ist
+
+Nach dieser Änderung ist der Modellvergleich MTGNN gegen WaveNet über **alle geteilten
+Hyperparameter-Achsen symmetrisch**, bei gleichem Trial-Budget (150) und gleichem
+Pruner. Verbleibende Unterschiede im Suchraum sind rein architekturbedingt und lassen
+sich nicht angleichen, ohne eines der beiden Modelle zu verändern.

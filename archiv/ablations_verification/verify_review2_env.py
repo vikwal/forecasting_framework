@@ -20,7 +20,7 @@ Each case runs in its own subprocess because ``main()`` mutates global state.
 Run from the repository root::
 
     CUDA_VISIBLE_DEVICES="" nice -n 19 \
-        python -m geostatistics.ablations.verify_review2_env
+        python -m archiv.ablations_verification.verify_review2_env
 """
 from __future__ import annotations
 

@@ -128,9 +128,9 @@ bleibt) und je drei Jobs in `launch_eval_pipeline.py`.
 | Datei | Zweck |
 |---|---|
 | `geostatistics/ablations/guard.py` | Bannerzeile + harte Assertion (§1.3) |
-| `geostatistics/ablations/fixture.py` | deterministische Test-Fixture: echte Config, echte Stations-IDs/Koordinaten/Höhen aus `data/stations_master.csv`, echte Topo-Features, echter Graph-Builder und Sampler; nur die Messwert- und NWP-**Werte** sind geseedet synthetisch |
-| `geostatistics/ablations/batch_fingerprint.py` | Plan §4.1 — SHA-256-Fingerabdruck aller Sampler-Tensoren, vor und nach der Änderung lauffähig |
-| `geostatistics/ablations/verify.py` | Plan §4.2–§4.6 plus Config-Prüfung, 79 Checks |
+| `archiv/ablations_verification/fixture.py` | deterministische Test-Fixture: echte Config, echte Stations-IDs/Koordinaten/Höhen aus `data/stations_master.csv`, echte Topo-Features, echter Graph-Builder und Sampler; nur die Messwert- und NWP-**Werte** sind geseedet synthetisch |
+| `archiv/ablations_verification/batch_fingerprint.py` | Plan §4.1 — SHA-256-Fingerabdruck aller Sampler-Tensoren, vor und nach der Änderung lauffähig |
+| `archiv/ablations_verification/verify.py` | Plan §4.2–§4.6 plus Config-Prüfung, 79 Checks |
 | `geostatistics/ablations/gen_variant_configs.py` | Config-Generator |
 
 Damit liegen die früher in `/tmp` verstreuten Skripte (Plan §10) im Repository.
@@ -531,14 +531,14 @@ ssh l2
 cd ~/Work/forecasting_framework && source frcst/bin/activate
 
 # Plan §4.1 — vor und nach einer Codeänderung, Vergleich bitgenau
-CUDA_VISIBLE_DEVICES="" python -m geostatistics.ablations.batch_fingerprint \
+CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.batch_fingerprint \
     --out /tmp/fp_before.json
 #   … Änderung …
-CUDA_VISIBLE_DEVICES="" python -m geostatistics.ablations.batch_fingerprint \
-    --out /tmp/fp_after.json --compare /tmp/fp_before.json
+CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.batch_fingerprint \
+    --out /tmp/fp_after.json --compare archiv/ablations_verification/fp_before_674a043.json
 
 # Plan §4.2 … §4.6 plus Config-Checks, 79 Checks, ~40 s, keine Daten, keine GPU
-CUDA_VISIBLE_DEVICES="" python -m geostatistics.ablations.verify
+CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.verify
 
 # Configs neu erzeugen (idempotent mit --force)
 python -m geostatistics.ablations.gen_variant_configs --variant nomeas  --trials 60 --force

@@ -8,10 +8,10 @@ tensor buffers) of every tensor the sampler produces.
 
 Run it once **before** the ablation patch and once **after**:
 
-    ./frcst/bin/python -m geostatistics.ablations.batch_fingerprint \\
+    ./frcst/bin/python -m archiv.ablations_verification.batch_fingerprint \\
         --out /tmp/fp_before.json
     # … apply the patch …
-    ./frcst/bin/python -m geostatistics.ablations.batch_fingerprint \\
+    ./frcst/bin/python -m archiv.ablations_verification.batch_fingerprint \\
         --out /tmp/fp_after.json --compare /tmp/fp_before.json
 
 The script deliberately uses **no** ablation-specific API, so it is byte-for-byte
@@ -32,7 +32,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from geostatistics.ablations.fixture import build_fixture  # noqa: E402
+from archiv.ablations_verification.fixture import build_fixture  # noqa: E402
 
 
 def _hash(t: torch.Tensor) -> dict:

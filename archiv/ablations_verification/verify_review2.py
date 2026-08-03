@@ -28,7 +28,7 @@ import yaml
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
-from geostatistics.ablations.fixture import build_fixture
+from archiv.ablations_verification.fixture import build_fixture
 from geostatistics.dcrnn import DCRNN, DCRNNConfig
 from geostatistics.evaluation import build_eval_batch
 from geostatistics.stgnn.config import parse_edge_features, parse_station_node_features

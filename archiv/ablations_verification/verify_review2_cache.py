@@ -17,7 +17,7 @@ verbatim from git) and once against the fixed one.
 Run from anywhere (uses a throwaway directory, default /tmp/k4cache)::
 
     CUDA_VISIBLE_DEVICES="" nice -n 19 \
-        python -m geostatistics.ablations.verify_review2_cache [<cache_root>]
+        python -m archiv.ablations_verification.verify_review2_cache [<cache_root>]
 """
 from __future__ import annotations
 
