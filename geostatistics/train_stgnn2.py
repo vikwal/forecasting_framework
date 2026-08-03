@@ -939,12 +939,22 @@ def _load_elevations_from_table(
             n_missing += 1
             unmatched.append(i)
 
-    if n_missing:
+    # Exakte Nullen aus der Tabelle mitpruefen: populate_nwp_elevations.py setzt
+    # 0 m, wenn SRTM beim Befuellen keine Abdeckung hatte. Ueber See ist 0 m
+    # richtig, in den Alpen ist es eine Void — und beides steht als dieselbe 0
+    # in der Spalte. Die Gegenprobe unterscheidet die Faelle: SRTM liefert ueber
+    # Wasser eine echte 0 und in einer Void None.
+    _unmatched = set(unmatched)
+    zero_from_table = [i for i in range(len(coords)) if i not in _unmatched and alts[i] == 0.0]
+    suspect = sorted(_unmatched | set(zero_from_table))
+
+    if suspect:
         logger.warning(
-            "%s: %d / %d nodes had no match within %.3f° — falling back to SRTM",
-            table, n_missing, len(coords), tol,
+            "%s: %d / %d Knoten ohne Treffer innerhalb %.3f°, zusaetzlich %d mit "
+            "exakt 0 m aus der Tabelle — beides gegen SRTM pruefen",
+            table, n_missing, len(coords), tol, len(zero_from_table),
         )
-        alts = _fill_missing_elevations_from_srtm(alts, coords, unmatched)
+        alts = _fill_missing_elevations_from_srtm(alts, coords, suspect)
     return alts
 
 
@@ -1001,6 +1011,7 @@ def _fill_missing_elevations_from_srtm(
             )
 
     n_new, n_fail = 0, 0
+    voids: list[int] = []
     for i in unmatched:
         lat, lon = float(coords[i][0]), float(coords[i][1])
         key = (round(lat, 5), round(lon, 5))
@@ -1009,14 +1020,24 @@ def _fill_missing_elevations_from_srtm(
             continue
         if srtm_data is None:
             n_fail += 1
+            voids.append(i)
             continue
         val = srtm_data.get_elevation(lat, lon)
         if val is None:
+            # SRTM-Void, nicht Meeresspiegel: ueber Wasser liefert SRTM eine
+            # echte 0, None heisst fehlende Kachel bzw. Radarschatten. Das
+            # trifft vor allem Steilgelaende (Karwendel, ~47.4 N / 11.0 E) —
+            # also genau die Punkte, an denen die Hoehendifferenz zur Station
+            # am meisten aussagt. 0 m waere dort um 1-2 km daneben.
             n_fail += 1
+            voids.append(i)
             continue
         alts[i] = float(val)
         cached[key] = float(val)
         n_new += 1
+
+    if voids:
+        alts = _fill_voids_from_neighbours(alts, coords, voids)
 
     if n_new:
         try:
@@ -1028,8 +1049,50 @@ def _fill_missing_elevations_from_srtm(
             logger.warning("SRTM-Cache konnte nicht geschrieben werden (%s)", exc)
 
     logger.info(
-        "SRTM-Fallback: %d Gitterpunkte aufgeloest (%d neu, %d aus Cache), %d ohne Hoehe (0 m)",
+        "SRTM-Fallback: %d Gitterpunkte aufgeloest (%d neu, %d aus Cache), %d Voids ueber Nachbarn gefuellt",
         len(unmatched) - n_fail, n_new, len(unmatched) - n_fail - n_new, n_fail,
+    )
+    return alts
+
+
+def _fill_voids_from_neighbours(
+    alts: np.ndarray,
+    coords: np.ndarray,
+    voids: list[int],
+    k: int = 8,
+) -> np.ndarray:
+    """SRTM-Voids aus den k naechsten aufgeloesten Gitterpunkten schaetzen.
+
+    Bei ~2.2 km Maschenweite liegen die Nachbarn im selben Talzug; ein
+    inverse-distanzgewichtetes Mittel ist dort um Groessenordnungen besser als
+    die 0 m, die vorher stehen blieben. Gibt es keine aufgeloesten Nachbarn,
+    bleibt es bei 0 m — dann aber mit Warnung.
+    """
+    from .stgnn.utils.spatial import pairwise_geodesic_km
+
+    void_set = set(voids)
+    # Nur Punkte mit echter Hoehe als Stuetzstellen — eine benachbarte
+    # Meeresspiegel-0 wuerde einen Alpenpunkt nach unten ziehen.
+    resolved = [i for i in range(len(coords)) if i not in void_set and alts[i] > 0.0]
+    if not resolved:
+        logger.warning(
+            "%d SRTM-Void(s) ohne aufgeloeste Nachbarn — bleiben bei 0 m", len(voids)
+        )
+        return alts
+
+    res_idx = np.asarray(resolved)
+    d = pairwise_geodesic_km(coords[voids], coords[res_idx])       # (n_void, n_res)
+    kk = min(k, d.shape[1])
+    nn = np.argpartition(d, kk - 1, axis=1)[:, :kk]
+    for row, i in enumerate(voids):
+        sel = nn[row]
+        w = 1.0 / np.maximum(d[row, sel], 1e-6)
+        alts[i] = float(np.sum(w * alts[res_idx[sel]]) / np.sum(w))
+    logger.warning(
+        "%d SRTM-Void(s) aus den %d naechsten Gitterpunkten interpoliert "
+        "(Hoehen %.0f..%.0f m) — betrifft typischerweise Steilgelaende, wo SRTM "
+        "Radarschatten hat, nicht Wasser (dort liefert SRTM eine echte 0).",
+        len(voids), kk, float(alts[voids].min()), float(alts[voids].max()),
     )
     return alts
 
