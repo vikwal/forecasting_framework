@@ -149,11 +149,22 @@ ist deshalb auf beiden Seiten der Änderung byteweise identisch lauffähig. Es
 zieht mit festem Seed (`random`, `numpy`, `torch` je auf 4711) einen Trainings-
 und einen Validierungs-Batch und hasht jeden Tensor.
 
-| | |
-|---|---|
-| Lauf 1 | **vor** dem Patch, Arbeitsbaum auf `674a043`, sauber |
-| Lauf 2 | **nach** dem vollständigen Patch |
-| Ergebnis | **`IDENTICAL — 28 tensor fingerprints match bit for bit across 14 + 14 tensors.`** |
+| Lauf | Zeitpunkt / Host | Ergebnis gegen die Referenz |
+|---|---|---|
+| Referenz | **vor** dem Patch, `l2`, Arbeitsbaum auf `674a043`, sauber | — |
+| 1 | nach dem vollständigen Patch, `l2` | **IDENTICAL** |
+| 2 | nach der Config-Generierung, `l2` | **IDENTICAL** |
+| 3 | nach dem Rollout, `l2` | **IDENTICAL** |
+| 4 | nach dem Pinnen der inerten Parameter, `l2` | **IDENTICAL** |
+| 5 | Endstand, `l1` (mit Pfad-Rewrites) | **IDENTICAL** |
+| 6 | Endstand, `ws` | **IDENTICAL** |
+
+> `IDENTICAL — 28 tensor fingerprints match bit for bit across 14 + 14 tensors.`
+
+Die Läufe 5 und 6 vergleichen gegen **dieselbe** vor dem Patch auf `l2` erzeugte
+Referenzdatei. Damit ist nicht nur belegt, dass Variante A unverändert ist,
+sondern auch, dass alle drei Hosts bitgleich samplen — auf `l1` trotz der 79+8
+Pfad-Rewrites in `configs/`.
 
 Verglichene Tensoren je Batch (14): `station.x`, `station.static`, `icond2.x`,
 `icond2.static`, `ecmwf.x`, `ecmwf.static`, `edge_index` und `edge_attr` für
@@ -498,8 +509,13 @@ erben die `/mnt/lambda1/nvme1/`-Pfade aus ihren A-Quellen und werden daher
 ebenfalls umgeschrieben.
 
 Die Verifikationssuite wurde auf **allen drei Hosts** ausgeführt, jeweils
-**79 passed, 0 failed**. Auf `l1` bestätigt sie zusätzlich, dass die
-Pfad-Rewrites die Varianten-Configs nicht beschädigt haben.
+**79 passed, 0 failed**, dazu auf jedem Host der §4.1-Fingerabdruck gegen die
+vor dem Patch erzeugte Referenz: **IDENTICAL**. Auf `l1` bestätigt das
+zusätzlich, dass die Pfad-Rewrites die Varianten-Configs nicht beschädigt haben.
+
+Auf `l1` liegt eine unbeteiligte, nicht versionierte Datei `data_cache.py`
+(28.07., älter als diese Arbeit). Sie taucht in `git status` als `??` auf, nicht
+im `git diff`, und wurde nicht angefasst.
 
 Aufgeräumt: die veralteten Backups `geostatistics/stgnn/graph_builder.py.bak_ablation`
 und `geostatistics/stgnn/training/sampler.py.bak_ablation` (30.07.) auf `l1`
