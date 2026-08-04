@@ -505,7 +505,7 @@ Budgets voll sind, sind eher Wochen als Tage zu erwarten.
 | **N1** | Der Geo-Statik-Scaler wird im Retrain auf allen 153 Stationen gefittet, in `get_test_results_dcrnn.py` aber auf `raw_static[:N_train]`. Ein Fold-Modell sieht bei der Evaluation andere Mittelwerte für lat/lon/alt als beim Training. **Potenziell ergebnisrelevant.** | vor der Auswertung |
 | **R3** | Die zugesagten Szenarien `excl_val` / `incl_val` existieren im Code nicht — nur in den Notebooks als Default-Spalte | vor der Auswertung |
 | **R4** | WaveNet hat weder Retrain- noch Eval-Gruppe im Launcher; zwei Studien haben keinen Verbraucher | vor dem Retrain |
-| **R6** | Die drei Falsifikationen zu `story_positioning` Contribution (iv) sind im DCRNN-Pfad **gar nicht** implementiert; die QRF- und MOS-Baselines zu (i) fehlen | vor dem Schreiben |
+| **R6** | **Teil B (Baselines):** QRF und MOS fehlen — seit dem Contribution-Umbau vom 2026-08-04 **Voraussetzung** von Contribution (i), nicht Kosmetik. Prompt liegt vor: `docs/prompt_baselines_implementation.md`. **Teil A (Falsifikationen zur alten Contribution (iv)):** (a) und (c) bewusst gestrichen, (b) `next_n_ecmwf: 0` als billige Zugabe im selben Prompt | vor der Auswertung |
 | N2–N4 | latent: `--broadcast-topo` fehlt im MTGNN-Eval; `ECMWF_WIND_SL_URL` ungeprüft; `train_stgnn2.py` warnt statt abzubrechen | — |
 | §4.7 | Der Eval-Pfad ist **nie end-to-end gelaufen**; Backward-Pass, Trainer-Loop und Checkpoint-Roundtrip von Variante B sind ungeprüft | zusammen mit einem Kurzlauf von B |
 
