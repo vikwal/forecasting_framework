@@ -3,6 +3,7 @@ Data caching utilities für efficient multi-GPU training.
 Implements memory-mapped loading to avoid duplicating preprocessed data across processes.
 """
 import os
+import copy
 import pickle
 import hashlib
 import logging
@@ -87,6 +88,22 @@ class DataCache:
                 'kfolds': config['hpo'].get('kfolds', None)
             }
         }
+
+        # cv_mode='spatial' (create_or_load_preprocessed_data_spatial): station ROLES
+        # rotate per fold instead of being fixed for the whole study, and the val window
+        # is a fixed [val_start, test_start) instead of the temporal n_splits+1 chunking.
+        # 'files'/'val_files' above already differ per spatial fold (different station
+        # sets) and already differ from any temporal config in practice, so this key is
+        # redundant for actually distinguishing entries — it exists purely as an explicit
+        # guard so a spatial and a temporal config could never collide on hash even in a
+        # hypothetical edge case where their station lists coincided. Only added when
+        # cv_mode is truly 'spatial' (a key absent from every existing temporal config),
+        # so every existing temporal-mode hash_data dict — and therefore every existing
+        # cache_id — is unchanged bit-for-bit.
+        cv_mode = str(config.get('hpo', {}).get('cv_mode', 'temporal')).lower()
+        if cv_mode == 'spatial':
+            hash_data['cv_mode'] = 'spatial'
+            hash_data['val_start'] = config['data'].get('val_start')
 
         # Convert to string and hash
         hash_string = str(sorted(hash_data.items()))
@@ -401,9 +418,18 @@ class LazyFoldLoader:
             return info
 
 
-def _fit_global_scaler_x(dfs, config, logger):
+def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
     """
     Fit ONE StandardScaler over the training rows of ALL training stations.
+
+    Args:
+        fit_until: Optional cutoff (anything pd.Timestamp() accepts) used INSTEAD of
+            config['data']['test_start'] as the train/not-train boundary passed to
+            split_data(). Additive, defaults to None (= old behaviour, cutoff at
+            test_start unchanged). Used by create_or_load_preprocessed_data_spatial for
+            cv_mode='spatial': there the scaler must be fit only on data strictly before
+            data.val_start (the fold's val chunk starts there), not before test_start —
+            otherwise the val chunk would leak into the very scaler used to transform it.
 
     Mirrors train_cl.py:326-370 and the GNN pipelines' `meas_scaler`
     (geostatistics/train_dcrnn.py:750), which likewise fit a single scaler across all
@@ -461,17 +487,17 @@ def _fit_global_scaler_x(dfs, config, logger):
         # Mirror prepare_data_for_tft's split exactly, including the backwards
         # extension of test_start for NWP data (preprocessing.py:3657-3666) — otherwise
         # the scaler would be fitted on rows that end up in the test split.
-        test_start = config['data'].get('test_start', None)
-        test_start = pd.Timestamp(test_start) if test_start is not None else None
+        cutoff = fit_until if fit_until is not None else config['data'].get('test_start', None)
+        cutoff = pd.Timestamp(cutoff) if cutoff is not None else None
         is_nwp = isinstance(df.index, pd.MultiIndex) and 'starttime' in df.index.names
-        if is_nwp and test_start is not None:
-            test_start = test_start - pd.Timedelta(hours=history_length)
+        if is_nwp and cutoff is not None:
+            cutoff = cutoff - pd.Timedelta(hours=history_length)
 
         df_train, _ = preprocessing.split_data(
             data=df,
             train_frac=config['data']['train_frac'],
             train_start=pd.Timestamp(config['data'].get('train_start', None)),
-            test_start=test_start,
+            test_start=cutoff,
             test_end=pd.Timestamp(config['data'].get('test_end', None)),
             t_0=t_0,
         )
@@ -662,7 +688,8 @@ def create_or_load_preprocessed_data(config: Dict,
                                    features: Dict,
                                    model_name: str = None,
                                    force_reprocess: bool = False,
-                                   use_cache: bool = True) -> Tuple[LazyFoldLoader, str]:
+                                   use_cache: bool = True,
+                                   cache_dir: str = None) -> Tuple[LazyFoldLoader, str]:
     """
     Create or load preprocessed data with caching.
 
@@ -690,7 +717,7 @@ def create_or_load_preprocessed_data(config: Dict,
         logger.info(f"Processed {len(lazy_loader)} folds without caching")
         return lazy_loader, "no_cache"
 
-    cache = DataCache()
+    cache = DataCache(cache_dir or DEFAULT_CACHE_DIR)
 
     # Check if data is already cached
     is_cached, cache_id = cache.is_cached(config, features, model_name)
@@ -783,6 +810,246 @@ def create_or_load_preprocessed_data(config: Dict,
         logger.info(f"Created and cached {len(lazy_loader)} folds")
 
         return lazy_loader, cache_id
+
+
+# ---------------------------------------------------------------------------
+# Spatial-CV sibling of create_or_load_preprocessed_data() — additive, does not
+# touch DataCache, _fit_global_scaler_x's old call sites, _replace_val_with_val_files,
+# or create_or_load_preprocessed_data itself, so cv_mode='temporal' (every existing
+# config) is untouched. Mirrors geostatistics/hpo_dcrnn.py's cv_mode='spatial' handling:
+# same time window in every fold (train < data.val_start, val in
+# [val_start, test_start)), rotating station ROLES instead of a fixed files/val_files
+# split. Unlike the GNN pipeline (raw tensors cached once for the whole 153-station
+# pool, role applied per-epoch at near-zero cost), the TFT pipeline bakes both feature
+# scaling AND next_n_stations neighbour selection into each station's prepared arrays
+# at preprocessing time — both are role-dependent under cv_mode='spatial' (a station's
+# role, and therefore its legal neighbour pool, differs across the 3 folds), so they
+# cannot be computed once and reused unmodified across folds the way the raw NWP/
+# measurement loading could be. This function therefore does its own preprocessing
+# pass per fold (own DataCache entry, own scaler, own neighbour-restricted station
+# data) rather than sharing one pool-wide cache entry across all 3 folds. See the
+# implementation report for why this is the deliberate, documented trade-off (keeps
+# fold correctness exact; costs ~3x the preprocessing I/O of the temporal path across
+# the whole spatial study, paid once, cached from then on).
+# ---------------------------------------------------------------------------
+
+def _spatial_fold_time_mask(idx, since=None, until=None):
+    """Boolean mask for a per-sample DatetimeIndex-like `idx` inside [since, until)."""
+    ts = pd.DatetimeIndex(pd.to_datetime(idx))
+    if ts.tz is None:
+        ts = ts.tz_localize('UTC')
+    mask = np.ones(len(ts), dtype=bool)
+    if since is not None:
+        mask &= ts >= since
+    if until is not None:
+        mask &= ts < until
+    return mask
+
+
+def _split_prepared_by_time(prepared_data, since=None, until=None):
+    """Slice one station's prepared_data['X_train']/y_train to samples whose timestamp
+    (index_train) falls in [since, until). Returns (X, y) or None if nothing remains.
+
+    Additive helper for create_or_load_preprocessed_data_spatial: unlike
+    _replace_val_with_val_files' n_splits+1 chunking (temporal mode, rotating time
+    window over a FIXED station split), spatial CV uses one fixed [val_start,
+    test_start) cut on a ROTATING station split, so no chunk-index bookkeeping is
+    needed here — just a timestamp mask per station.
+    """
+    X = prepared_data.get('X_train')
+    y = prepared_data.get('y_train')
+    idx = prepared_data.get('index_train')
+    if X is None or y is None or len(y) == 0:
+        return None
+    if idx is None or len(idx) != len(y):
+        raise ValueError(
+            "create_or_load_preprocessed_data_spatial: 'index_train' missing or "
+            f"misaligned with y_train (index={None if idx is None else len(idx)}, "
+            f"y={len(y)}). Cannot build a time-window fold split without per-sample "
+            "timestamps."
+        )
+    mask = _spatial_fold_time_mask(idx, since=since, until=until)
+    if not mask.any():
+        return None
+    if isinstance(X, dict):
+        X_f = {k: v[mask] for k, v in X.items()}
+    else:
+        X_f = X[mask]
+    return X_f, y[mask]
+
+
+def _concat_fold_split(splits):
+    """Concatenate a list of per-station (X, y) splits (skipping empty ones) into one
+    (X, y) pair, dict-valued X included. Returns None if every split was empty."""
+    splits = [s for s in splits if s is not None]
+    if not splits:
+        return None
+    Xs, ys = zip(*splits)
+    if isinstance(Xs[0], dict):
+        X_cat = {k: np.concatenate([x[k] for x in Xs], axis=0) for k in Xs[0]}
+    else:
+        X_cat = np.concatenate(Xs, axis=0)
+    return X_cat, np.concatenate(ys, axis=0)
+
+
+def _build_spatial_fold_data(fold_config: Dict, features: Dict, logger) -> Tuple[List[Dict], List]:
+    """Preprocess ONE spatial-CV fold: fold_config['data']['files']/['val_files'] give
+    the fold's train-role / target-role station IDs (rotate per fold; caller's
+    responsibility — see create_or_load_preprocessed_data_spatial). Returns
+    (prepared_datasets, combined_kfolds) with exactly one fold, ready for
+    DataCache.save_preprocessed_data.
+    """
+    freq = fold_config['data']['freq']
+    data_dir = fold_config['data']['path']
+    train_ids = list(fold_config['data'].get('files', []))
+    val_ids = list(fold_config['data'].get('val_files', []))
+
+    val_start = pd.Timestamp(fold_config['data']['val_start'], tz='UTC')
+    test_start_raw = fold_config['data'].get('test_start')
+    test_start = pd.Timestamp(test_start_raw, tz='UTC') if test_start_raw else None
+
+    # Train-role stations: neighbours restricted to this fold's OTHER train-role
+    # stations only — same restriction create_or_load_preprocessed_data already
+    # applies to its (fixed, whole-study) 'files' stations; here 'files' just rotates
+    # per fold instead of being fixed for the whole study.
+    fold_config['data']['neighbor_pool'] = list(train_ids)
+    logger.info("Spatial fold: neighbour pool for %d training stations: %d candidates "
+                "(train-role only)", len(train_ids), len(fold_config['data']['neighbor_pool']))
+    train_dfs = preprocessing.get_data(data_dir=data_dir, config=fold_config, freq=freq,
+                                        features=features, files_key='files')
+
+    # Per-fold scaler: fit ONLY on this fold's train-role stations and ONLY on data
+    # strictly before val_start (not test_start) — the fold's val chunk starts at
+    # val_start, so anything from val_start onward must stay unseen by the scaler.
+    fold_config['scaler_x'] = _fit_global_scaler_x(train_dfs, fold_config, logger, fit_until=val_start)
+
+    if 'name' not in fold_config['model']:
+        fold_config['model']['name'] = 'temp_for_preprocessing'
+
+    prepared_train = []
+    for key, df in train_dfs.items():
+        prepared_data, _ = preprocessing.pipeline(
+            data=df, config=fold_config, known_cols=features['known'],
+            observed_cols=features['observed'], static_cols=features['static'],
+            target_col=fold_config['data']['target_col'])
+        if prepared_data is not None:
+            prepared_train.append(prepared_data)
+
+    # Target-role stations of this fold: neighbours restricted to train-role stations
+    # ONLY — not other target-role stations of this fold. Mirrors the GNN sampler
+    # (geostatistics/stgnn/training/sampler.py::sample_val(), Z.313-317: a validation
+    # target's spatial neighbours are drawn exclusively from training stations). This
+    # is the one deliberate behavioural difference from _replace_val_with_val_files,
+    # whose val stations pool files+val_files — safe there only because temporal folds
+    # never change WHICH stations are held out, so "other val stations" are always the
+    # same fixed val_files set, never a rotating target set.
+    fold_config['data']['neighbor_pool'] = list(train_ids)
+    logger.info("Spatial fold: neighbour pool for %d target stations: %d candidates "
+                "(train-role only, NOT other target stations)", len(val_ids),
+                len(fold_config['data']['neighbor_pool']))
+    val_dfs = preprocessing.get_data(data_dir=data_dir, config=fold_config, freq=freq,
+                                      features=features, files_key='val_files')
+
+    prepared_val = []
+    for key, df in val_dfs.items():
+        prepared_data, _ = preprocessing.pipeline(
+            data=df, config=fold_config, known_cols=features['known'],
+            observed_cols=features['observed'], static_cols=features['static'],
+            target_col=fold_config['data']['target_col'])
+        if prepared_data is not None:
+            prepared_val.append(prepared_data)
+
+    train_splits = [_split_prepared_by_time(p, until=val_start) for p in prepared_train]
+    val_splits = [_split_prepared_by_time(p, since=val_start, until=test_start) for p in prepared_val]
+
+    train_pair = _concat_fold_split(train_splits)
+    val_pair = _concat_fold_split(val_splits)
+    if train_pair is None or val_pair is None:
+        raise ValueError(
+            "create_or_load_preprocessed_data_spatial: fold produced an empty train or "
+            "val split (train_pair is None: %s, val_pair is None: %s) — check "
+            "data.val_start/test_start against the stations' available data range." %
+            (train_pair is None, val_pair is None)
+        )
+
+    logger.info(
+        "Spatial fold assembled: %d train samples (< %s) / %d val samples (%s .. %s)",
+        len(train_pair[1]), val_start.date(), len(val_pair[1]), val_start.date(),
+        test_start.date() if test_start is not None else 'end of data',
+    )
+
+    combined_kfolds = [(train_pair, val_pair)]
+    return prepared_train + prepared_val, combined_kfolds
+
+
+def create_or_load_preprocessed_data_spatial(config: Dict,
+                                              features: Dict,
+                                              model_name: str = None,
+                                              force_reprocess: bool = False,
+                                              use_cache: bool = True,
+                                              cache_dir: str = None) -> Tuple[LazyFoldLoader, str]:
+    """cv_mode='spatial' sibling of create_or_load_preprocessed_data() for ONE fold.
+
+    Reads the fold's station roles straight from config['data']['files'] (train-role)
+    / config['data']['val_files'] (target-role) — exactly like the temporal path — so
+    callers (HPO fold loop, single-fold retrain, test-set eval) all agree on the same
+    fold as long as they pass the same files/val_files, with no separate fold-index
+    bookkeeping needed. hpo_tft_bc.py's spatial fold loop builds a fresh config copy
+    per fold (from geostatistics/spatial_cv.SpatialFold); train_cl_tft_bc.py /
+    get_test_results_tft_bc.py instead read a fold-specific config file
+    (config_wind_tft_sp_*_foldN.yaml) whose files/val_files are already that fold's
+    station split — both paths converge here unmodified, which is what keeps the
+    per-fold scaler used at eval identical to the one used at training (the failure
+    mode flagged as GNN review finding N1: a fold's retrain and its evaluation must
+    fit/recover literally the same scaler).
+
+    Requires config['data']['val_start'] (fixed Train/Val time boundary — see module
+    docstring above for why the window is fixed while roles rotate). Always returns a
+    LazyFoldLoader with exactly one fold (train, val), so callers that already assert
+    `len(lazy_fold_loader) == 1` (train_cl_tft_bc.py) need no change.
+    """
+    logger = logging.getLogger(__name__)
+
+    if not config['data'].get('val_start'):
+        raise ValueError(
+            "cv_mode='spatial' requires data.val_start (fixed Train/Val time boundary, "
+            "matching the GNN spatial-CV configs) — none set in this config."
+        )
+    if config.get('hpo', {}).get('min_train_date'):
+        logger.warning(
+            "cv_mode='spatial': hpo.min_train_date=%s is ignored — the fold's time "
+            "window is fixed by data.val_start/data.test_start instead.",
+            config['hpo']['min_train_date'],
+        )
+    if config.get('hpo', {}).get('val_split') not in (None, 1):
+        logger.warning(
+            "cv_mode='spatial': hpo.val_split=%s is ignored — there is exactly one "
+            "fixed val window per fold, no chunk selection.",
+            config['hpo'].get('val_split'),
+        )
+
+    if not use_cache:
+        logger.info("Caching disabled, processing spatial fold directly")
+        fold_config = copy.deepcopy(config)
+        prepared_datasets, combined_kfolds = _build_spatial_fold_data(fold_config, features, logger)
+        return LazyFoldLoader(combined_kfolds), "no_cache"
+
+    cache = DataCache(cache_dir or DEFAULT_CACHE_DIR)
+    fold_config = copy.deepcopy(config)
+    is_cached, cache_id = cache.is_cached(fold_config, features, model_name)
+
+    if is_cached and not force_reprocess:
+        logger.info(f"Spatial fold: found cached data (ID: {cache_id}), loading from cache")
+        _, combined_kfolds, _ = cache.load_preprocessed_data(cache_id)
+        if combined_kfolds is not None:
+            return LazyFoldLoader(combined_kfolds), cache_id
+        logger.warning("Spatial fold: no k-folds found in cache, need to reprocess")
+
+    logger.info("Preprocessing spatial fold and saving to cache...")
+    prepared_datasets, combined_kfolds = _build_spatial_fold_data(fold_config, features, logger)
+    cache_id = cache.save_preprocessed_data(fold_config, features, prepared_datasets, combined_kfolds, model_name)
+    logger.info(f"Created and cached spatial fold (ID: {cache_id})")
+    return LazyFoldLoader(combined_kfolds), cache_id
 
 
 # ---------------------------------------------------------------------------

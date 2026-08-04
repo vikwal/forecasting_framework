@@ -61,6 +61,9 @@ def main() -> None:
                          help="Stem for data/test_results/<name>.csv and data/raw_preds/<name>_raw.parquet "
                               "(e.g. 'tft_wind_tft_base_fold1' or 'tft_wind_tft_base_test_fold0'). "
                               "Defaults to model_tag if omitted.")
+    parser.add_argument('--cache-dir', type=str, default=None,
+                        help='Directory for preprocessed-data cache entries (defaults to '
+                             'utils.data_cache.DEFAULT_CACHE_DIR; set on hosts without that mount)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
@@ -148,7 +151,25 @@ def main() -> None:
                                          + list(hash_config['data'].get('val_files', [])))
         hash_config['data']['val_files'] = []
 
-    cache = data_cache.DataCache()
+    # cv_mode='spatial': train_cl_tft_bc.py computed its cache_id from the config
+    # exactly as given (data.files/data.val_files already ARE that fold's train-role/
+    # target-role split, read straight from config_wind_tft_sp_*_foldN.yaml — see
+    # create_or_load_preprocessed_data_spatial's docstring). No test_mode-style
+    # files/val_files rewrite happened there, so none must happen here either — hashing
+    # anything other than `config` unmodified would recompute a DIFFERENT cache_id than
+    # training used and silently recover the wrong (or no) scaler, exactly the N1-style
+    # mismatch this function's docstring above already guards against for temporal mode.
+    cv_mode = str(config.get('hpo', {}).get('cv_mode', 'temporal')).lower()
+    if cv_mode == 'spatial':
+        if metadata.get('test_mode'):
+            raise RuntimeError(
+                "Model metadata has test_mode=True but cv_mode='spatial' — "
+                "train_cl_tft_bc.py refuses that combination, so this should be "
+                "unreachable. Refusing to guess the training cache_id."
+            )
+        hash_config = copy.deepcopy(config)
+
+    cache = data_cache.DataCache(args.cache_dir or data_cache.DEFAULT_CACHE_DIR)
     train_cache_id = cache._get_config_hash(hash_config, features, model_name=args.model_tag)
     train_cache_paths = cache.get_cache_paths(train_cache_id)
     if not os.path.exists(train_cache_paths['metadata']):

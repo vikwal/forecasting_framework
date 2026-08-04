@@ -44,6 +44,9 @@ def main() -> None:
     parser.add_argument('--no-cache', action='store_true')
     parser.add_argument('--gpu', type=int, default=None)
     parser.add_argument('--max-cache-gb', type=float, default=150.0)
+    parser.add_argument('--cache-dir', type=str, default=None,
+                        help='Directory for preprocessed-data cache entries (defaults to '
+                             'utils.data_cache.DEFAULT_CACHE_DIR; set on hosts without that mount)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
@@ -120,18 +123,56 @@ def main() -> None:
         device = f'cuda:{args.gpu}'
     logger.info(f"Using device: {device}")
 
-    lazy_fold_loader, cache_id = data_cache.create_or_load_preprocessed_data(
-        config=config,
-        features=features,
-        model_name=model_tag,
-        force_reprocess=False,
-        use_cache=use_cache,
-    )
+    # cv_mode='spatial' (see utils/data_cache.py::create_or_load_preprocessed_data_spatial):
+    # a fold-specific config (config_wind_tft_sp_*_foldN.yaml) already carries that
+    # fold's train-role/target-role station split verbatim in data.files/data.val_files
+    # (populated from configs/spatial_folds.yaml when the config was written) — so
+    # unlike hpo_tft_bc.py's HPO loop, this script does NOT need to import
+    # geostatistics.spatial_cv or re-derive the fold at all, it just has to call the
+    # matching data_cache function. This is deliberate: get_test_results_tft_bc.py must
+    # recover the SAME cache_id (and therefore the same fitted scaler_x) this call
+    # produces, and the surest way to guarantee that is for both scripts to do the
+    # exact same thing with the config they were handed, with no divergent
+    # re-derivation logic that could drift apart (the GNN-side review finding N1 this
+    # task was asked not to repeat).
+    cv_mode = str(config.get('hpo', {}).get('cv_mode', 'temporal')).lower()
+    if cv_mode == 'spatial':
+        if args.test_mode:
+            raise ValueError(
+                "--test-mode is not supported with cv_mode='spatial': it merges "
+                "val_files into files for a final full-network retrain, which has no "
+                "defined meaning for a fold-specific spatial split. Use a temporal "
+                "config for the final full-network model."
+            )
+        logger.info(
+            f"cv_mode='spatial': using data.files/data.val_files from {args.config}.yaml "
+            f"as-is ({len(config['data'].get('files', []))} train / "
+            f"{len(config['data'].get('val_files', []))} target stations), fixed time "
+            f"window (train < {config['data'].get('val_start')}, val >= that)."
+        )
+        lazy_fold_loader, cache_id = data_cache.create_or_load_preprocessed_data_spatial(
+            cache_dir=args.cache_dir,
+            config=config,
+            features=features,
+            model_name=model_tag,
+            force_reprocess=False,
+            use_cache=use_cache,
+        )
+    else:
+        lazy_fold_loader, cache_id = data_cache.create_or_load_preprocessed_data(
+            cache_dir=args.cache_dir,
+            config=config,
+            features=features,
+            model_name=model_tag,
+            force_reprocess=False,
+            use_cache=use_cache,
+        )
     logger.info(f"Using data with cache ID: {cache_id}, {len(lazy_fold_loader)} fold(s)")
     if len(lazy_fold_loader) != 1:
         raise ValueError(
-            f"Expected exactly 1 fold for final training (set hpo.kfolds: 1 in the config), "
-            f"got {len(lazy_fold_loader)}."
+            f"Expected exactly 1 fold for final training (set hpo.kfolds: 1 in the config "
+            f"for cv_mode='temporal'; cv_mode='spatial' always produces exactly 1 fold "
+            f"per fold-specific config), got {len(lazy_fold_loader)}."
         )
 
     train, val = lazy_fold_loader[0]

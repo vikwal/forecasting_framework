@@ -2,9 +2,19 @@
 # own station history INCLUDED in `observed_features`, in addition to
 # neighbor-station context (next_n_stations) + ICON-D2/ECMWF known covariates
 # + static topo features.
-# Station splits / test window copied verbatim from
-# configs/dcrnn/config_wind_dcrnn_nwp_hist_new.yaml so folds & held-out stations
-# are directly comparable to the DCRNN/MTGNN benchmarks.
+#
+# CV COMPARABILITY NOTE (as of the cv_mode='spatial' work, see
+# config_wind_tft_sp_hist.yaml): this config's station split/CV is TEMPORAL — a
+# FIXED 103/50 train/val station split (files/val_files below), with only the
+# time window rotating across hpo.kfolds=3 folds (utils/data_cache.py::
+# _replace_val_with_val_files). Since commit a65285c ("new GNN HPO") switched
+# DCRNN/MTGNN/WaveNet to a SPATIAL 3-fold CV (rotating target stations, fixed
+# time window; configs/spatial_folds.yaml, geostatistics/spatial_cv.py), the
+# CV axis here is NO LONGER the same as the graph models', and results from
+# this study are NOT directly comparable to them — despite files/val_files
+# below happening to be the union of DCRNN/MTGNN's old fixed split. Use
+# config_wind_tft_sp_hist.yaml (cv_mode: spatial) for a benchmark that is
+# actually comparable to the current DCRNN/MTGNN/WaveNet studies.
 data:
   path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
   raw_station_source: True

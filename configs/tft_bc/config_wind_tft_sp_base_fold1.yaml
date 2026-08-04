@@ -1,0 +1,455 @@
+# TFT non-GNN benchmark, SPATIAL-CV variant — "base" (no own station history,
+# only next_n_stations neighbour context + ICON-D2/ECMWF known covariates +
+# static topo features).
+#
+# cv_mode: spatial (hpo.cv_mode below) — same CV AXIS as the DCRNN/MTGNN/WaveNet
+# studies (geostatistics/hpo_dcrnn.py, configs/spatial_folds.yaml): 3 folds with
+# an IDENTICAL time window in every fold (train < data.val_start, val in
+# [data.val_start, data.test_start)), and ROTATING TARGET (station) sets
+# instead of a fixed files/val_files split. This supersedes
+# config_wind_tft_base.yaml (temporal CV, no longer comparable to the graph
+# models — see the note there) as the actual non-GNN benchmark counterpart.
+#
+# data.files / data.val_files below are IGNORED by hpo_tft_bc.py in cv_mode=
+# spatial (it loads the full 153-station pool from hpo.spatial_folds and
+# rotates train/val roles itself, logging exactly what it ignores) — they are
+# kept here at their old (temporal) values purely as a harmless fallback/
+# documentation default, in case this file is ever pointed at with
+# cv_mode=temporal by mistake.
+#
+# Retrain path (train_cl_tft_bc.py / get_test_results_tft_bc.py): use
+# config_wind_tft_sp_base_fold{1,2,3}.yaml instead — those carry ONE fold's
+# actual train-role/target-role station split in files/val_files directly
+# (read as-is, no spatial_cv import needed there). IMPORTANT: "_foldN" here
+# means STATION fold N (which 102 stations train / which 51 are targets), NOT
+# a time-window fold like the old _foldN convention on the temporal side —
+# the time window is identical across all 3 spatial folds.
+#
+# HPO search space (12 params under hpo:) copied verbatim from
+# config_wind_tft_base.yaml so the two studies stay comparable to each other
+# on everything except the CV axis.
+
+# THIS FILE: STATION fold 1 — 102 train-role / 51 target-role stations, taken verbatim
+# from configs/spatial_folds.yaml's spatial_fold1 (files/val_files below ARE the actual
+# split, not a placeholder — train_cl_tft_bc.py / get_test_results_tft_bc.py
+# read them as-is, no spatial_cv import needed there).
+data:
+  path: /mnt/lambda1/nvme1/synthetic/raw/wind
+  raw_station_source: true
+  files:
+  - 00183
+  - 00282
+  - 00591
+  - 00596
+  - '00656'
+  - 00691
+  - 00856
+  - 00963
+  - '01001'
+  - 01078
+  - '01200'
+  - '01270'
+  - 01358
+  - '01420'
+  - '01443'
+  - 01468
+  - '01503'
+  - '01544'
+  - 01580
+  - 01587
+  - '01605'
+  - 01639
+  - 01684
+  - 01694
+  - '01757'
+  - 01759
+  - '01766'
+  - 01869
+  - '02014'
+  - '02115'
+  - '02171'
+  - '02261'
+  - 02483
+  - 02485
+  - 02497
+  - '02712'
+  - 02856
+  - 02907
+  - 02932
+  - 02961
+  - 02985
+  - 03028
+  - 03086
+  - 03093
+  - 03098
+  - '03126'
+  - 03158
+  - '03167'
+  - '03244'
+  - '03366'
+  - '03376'
+  - '03631'
+  - 03668
+  - '03730'
+  - '03761'
+  - 03811
+  - 03925
+  - '04036'
+  - 04094
+  - '04104'
+  - '04271'
+  - 04280
+  - 04393
+  - '04464'
+  - '04625'
+  - '04745'
+  - 04887
+  - 04911
+  - 04931
+  - 05029
+  - '05100'
+  - 05109
+  - 05349
+  - '05404'
+  - 05490
+  - 05538
+  - 05629
+  - '05705'
+  - 05779
+  - 05792
+  - 05797
+  - 05800
+  - 05825
+  - 05871
+  - 05930
+  - 06197
+  - '06314'
+  - '07341'
+  - '07351'
+  - '07367'
+  - 07368
+  - 07369
+  - '07370'
+  - '07374'
+  - 07389
+  - 07393
+  - '07412'
+  - '13674'
+  - '13965'
+  - '15000'
+  - '15207'
+  - '19171'
+  val_files:
+  - '00161'
+  - '00164'
+  - '00232'
+  - 00298
+  - '00303'
+  - '00433'
+  - '00460'
+  - '00662'
+  - '00701'
+  - '00704'
+  - 00853
+  - 00880
+  - 01048
+  - '01357'
+  - '01550'
+  - 01691
+  - 01886
+  - 01975
+  - '02023'
+  - '02044'
+  - '02252'
+  - 02559
+  - 02597
+  - 02638
+  - '02667'
+  - 02794
+  - 02812
+  - '03015'
+  - '03032'
+  - 03196
+  - '03231'
+  - 03287
+  - '03321'
+  - 03379
+  - '03402'
+  - '03513'
+  - 03821
+  - '04371'
+  - '04466'
+  - '04642'
+  - '05142'
+  - 05397
+  - '05426'
+  - 05480
+  - '05516'
+  - 05856
+  - 06159
+  - '06163'
+  - '06344'
+  - 07396
+  - '15813'
+  test_files:
+  - 00096
+  - '00427'
+  - '00603'
+  - '05371'
+  - 00840
+  - 00867
+  - 00891
+  - 00953
+  - '01262'
+  - '01303'
+  - 05906
+  - '01612'
+  - 01803
+  - 01832
+  - 02290
+  - 02429
+  - '02564'
+  - '02601'
+  - '07410'
+  - 02878
+  - 02925
+  - 02928
+  - '03166'
+  - 03268
+  - '03362'
+  - '03660'
+  - 03897
+  - 03946
+  - 03987
+  - '04024'
+  - '04032'
+  - 00198
+  - 04039
+  - '04177'
+  - '04336'
+  - '13711'
+  - '04501'
+  - 04928
+  - 05158
+  - '05347'
+  - '01346'
+  - '05440'
+  - '05546'
+  - 07394
+  - 07395
+  - '07403'
+  - '15444'
+  - '19207'
+  - '00722'
+  - '00342'
+  power_curves_path: /mnt/nas/synthetic/wind/power_curves
+  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
+  ecmwf_path: /mnt/lambda1/nvme1/ecmwf/parquet
+  stations_master: data/stations_master.csv
+  freq: 1h
+  train_frac: 1
+  val_frac: 0.25
+  test_start: '2025-08-01'
+  test_end: '2025-10-31'
+  retrain_interval: 1
+  eval_interval: 1
+  target_col: wind_speed
+  scale_x: true
+  scale_y: true
+  use_pca: false
+  pca_components: 3
+  lag_in_col: false
+  n_neighbors: 5
+  val_start: '2024-08-01'
+params:
+  known_features:
+  - wind_speed_h10
+  - wind_speed_h38
+  - ecmwf_wind_speed_h10
+  observed_features:
+  - wind_speed_next
+  static_features:
+  - altitude
+  - latitude
+  - longitude
+  - elevation
+  - slope
+  - aspect_sin
+  - aspect_cos
+  - tpi5
+  - tpi75
+  - tdi
+  - elev_std
+  - z0
+  - dist_coast
+  aggregate_nwp_layers: weighted_mean
+  get_density: false
+  turbines_per_park: 1
+  random_seed: 42
+  next_n_grid_points: 4
+  next_n_grid_ecmwf: 4
+  next_n_stations: 5
+  topo_features_path: /mnt/lambda1/nvme1/topo_features
+  nwp_models:
+  - icon-d2
+  - ecmwf
+  ecmwf_features:
+  - u_wind10m
+  - v_wind10m
+  aggregate_grid_points: false
+  get_next_grid_points_method: geodesic_next
+  extrapolate: null
+model:
+  name: tft
+  fl: false
+  num_workers: 8
+  epochs: 60
+  output_dim: 48
+  lookback: 48
+  horizon: 48
+  step_size: 3
+  batch_size: 128
+  lr: 0.0003
+  weight_decay: 1.0e-05
+  optimizer: adam
+  loss: mse
+  metrics:
+  - mae
+  - rmse
+  - r^2
+  tft:
+    n_heads: 4
+    hidden_dim: 64
+    dropout: 0.1
+    rnn_type: lstm
+    n_lstm_layers: 1
+    static_embedding_dim: 32
+    quantiles:
+    - 0.5
+    clipnorm: 5
+  callbacks: false
+  shuffle: true
+  force_retrain: true
+  early_stopping:
+    enabled: true
+    patience: 15
+    min_delta: 0.0001
+    monitor: val_rmse
+    mode: min
+    restore_best_weights: true
+  parallelize: false
+  lookup_hpo: true
+  verbose: 1
+hpo:
+  studies_path: null
+  objectives:
+  - metric: val_rmse
+    direction: minimize
+  trials: 1000
+  kfolds: 1
+  min_train_date: null
+  val_split: null
+  pruning:
+    use_median_pruner: true
+    n_startup_trials: 20
+    n_warmup_steps: 1
+    interval_steps: 1
+    disable_pruning: false
+  batch_size:
+  - 32
+  - 256
+  epochs:
+  - 1
+  - 100
+  learning_rate:
+  - 1.0e-06
+  - 0.0005
+  weight_decay:
+  - 1.0e-07
+  - 0.001
+  n_layers:
+  - 1
+  - 4
+  n_cnn_layers:
+  - 1
+  - 10
+  n_rnn_layers:
+  - 1
+  - 7
+  attention_heads:
+  - 1
+  - 64
+  cnn:
+    filters:
+    - 16
+    - 128
+    kernel_size:
+    - 2
+    - 5
+    increase_filters: false
+  rnn:
+    units:
+    - 16
+    - 100
+    dropout:
+    - 0.0
+    - 0.8
+  fnn:
+    units:
+    - 32
+    - 256
+  fl:
+    strategy: fedavg
+    personalize: false
+    n_rounds:
+    - 1
+    - 20
+    server_lr:
+    - 0.0001
+    - 0.1
+    beta_1:
+    - 0
+    - 1
+    beta_2:
+    - 0
+    - 1
+    tau:
+    - 0.0001
+    - 0.1
+  tft:
+    n_heads:
+    - 1
+    - 8
+    hidden_dim:
+    - 32
+    - 128
+    dropout:
+    - 0.0
+    - 0.5
+    n_lstm_layers:
+    - 1
+    - 3
+    static_embedding_dim:
+    - 8
+    - 64
+    clipnorm:
+    - 0.5
+    - 10.0
+  next_n_grid_points:
+  - 1
+  - 7
+  next_n_grid_ecmwf:
+  - 0
+  - 4
+  next_n_stations:
+  - 0
+  - 8
+  cv_mode: spatial
+  spatial_folds: configs/spatial_folds.yaml
+eval:
+  results_path: results/tft_bc
+  eval_on_all_test_data: true
+  retrain_interval: 0
+  t_0: 12
+fl:
+  strategy: fedavg
