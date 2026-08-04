@@ -65,9 +65,35 @@ Correction als Forecasting**.
    (Wu et al. 2021): pro Trainingsbeispiel wird eine zufällige Teilmenge von Stationen
    als Ziel maskiert, die übrigen dienen als reale Nachbarn mit echten Messungen.
 
-> **Der Reviewer-kritische Punkt:** Das Review hat gezeigt, dass von diesen drei
-> Ansprüchen nur der **induktive** trägt; zu (1) und (2) gibt es Vorarbeiten. Die
-> belastbare Erzählung steht in `story_positioning.md`, nicht hier.
+> **Wichtige Einordnung — diese drei Ansprüche halten so nicht.** Die
+> Literatur-Einordnung in `story_positioning.md` §1.5–1.6 (196 + 62 gesichtete
+> Arbeiten, drei Suchkampagnen) hat sie einzeln widerlegt:
+>
+> - **(1) ist tot.** `zang2025dstg`, `jiang2023buaa` und `li2025tfdgcn` wenden DCRNN
+>   bzw. MTGNN bereits auf Wind an. `li2025tfdgcn` belegt von dritter Seite, dass
+>   beide die *akzeptierten starken Baselines* dieser Literatur sind — was der
+>   bessere Verwendungszweck für sie ist.
+> - **(2) ist tot.** `low2026spatialsupport` (Juli 2026) modelliert jeden räumlichen
+>   Trägertyp als eigene Knotenschicht in einem heterogenen Graphen **und**
+>   kombiniert das mit induktivem Node-Masking; dazu `yang2025offgrid` v1 für
+>   Gitterknoten. Urteil dort: nicht als eigenständige architektonische Novelty
+>   beanspruchen.
+> - **(3) trägt nur verengt.** Tot sind auch „first inductive post-processing"
+>   (`baran2024clustering` formuliert das Problem wörtlich, für dieselbe Variable
+>   und eines der beiden NWP-Systeme), „first *learned* inductive post-processor"
+>   (`cho2023downscaling`, `hou2026spatiotemporal`) und „first random node masking
+>   in meteorology" (`li2023ssin`).
+>
+> Was trägt, ist die **Kombination**: In der Tabelle in §1.6 ist diese Studie die
+> einzige Zeile mit lead-time-aufgelöstem, konvektionsauflösendem Forecast **und**
+> Windgeschwindigkeit — und die einzige, die live Nachbarmessungen liest *und*
+> einen Forecast konsumiert. Der größte unbesetzte Raum ist laut §1.6 die
+> systematische Frage, **wie weit die räumliche Generalisierung reicht**.
+>
+> **Die belastbare Erzählung steht in `story_positioning.md` §4, nicht hier.** Sie
+> ist bewusst ohne jedes „first to use X" formuliert und gibt zu jeder Contribution
+> ein Falsifikationsexperiment an. Achtung: Befund **R6** besagt, dass diese
+> Experimente im Code noch fehlen (siehe Abschnitt 9).
 
 ---
 
