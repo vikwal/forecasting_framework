@@ -485,20 +485,45 @@ class HomoSampler:
 
         return self._make_batch(r_curr, r_hist, t_run_abs, sub_indices, target_mask_np)
 
+    def _nearest_stations_per_target(
+        self,
+        target_global: list[int],
+        candidate_global: list[int],
+        k: int,
+    ) -> list[int]:
+        """Vereinigung der je Ziel k naechsten Kandidaten.
+
+        Anders als ``_nearest_stations`` teilen sich die Ziele das Budget nicht:
+        jedes bekommt seine eigenen k naechsten Nachbarn.
+        """
+        if k >= len(candidate_global):
+            return list(candidate_global)
+        from .stgnn.utils.spatial import pairwise_geodesic_km
+        cand = np.asarray(candidate_global)
+        d = pairwise_geodesic_km(
+            self._station_coords_deg[cand],
+            self._station_coords_deg[np.asarray(target_global)],
+        )                                            # (n_cand, n_tgt)
+        keep: set[int] = set()
+        for col in range(d.shape[1]):
+            keep.update(cand[np.argsort(d[:, col])[:k]].tolist())
+        return sorted(keep)
+
     def _val_layout(self) -> tuple[list[int], np.ndarray]:
         """Knotenmenge und Zielmaske der Validierung.
 
-        Die Nachbarn werden mit derselben Regel gewaehlt wie im Training
-        (``next_n_neighbors`` raeumlich naechste Trainingsstationen zur
-        Zielgruppe) — vorher gingen hier immer *alle* Trainingsstationen ein.
-        Damit sah MTGNN/WaveNet im Training einen Graphen von ~51-91 Knoten und
-        in der Validierung einen von 153, was bei gelernter, zeilennormierter
-        Adjazenz mit festem ``topk_graph`` nicht dasselbe Modell ist. DCRNN
-        macht es in ``TrainingSampler.sample_val`` bereits so.
+        Die Nachbarn werden **je Ziel** gewaehlt und vereinigt, nicht fuer die
+        Zielgruppe als Ganzes. Die Gruppenregel bedeutet in beiden Phasen etwas
+        anderes: im Training bedient das Budget 1-10 dicht beieinanderliegende
+        Ziele, in der Validierung 51 ueber ganz Deutschland verteilte. Jedes
+        Val-Ziel bekam so duenneren lokalen Kontext, als ein Trainingsziel je
+        gesehen hat. ``TrainingSampler.select_val_neighbours`` macht es fuer
+        DCRNN genauso.
         """
         nbr = list(self.train_idx)
         if self.next_n_neighbors is not None and self.next_n_neighbors < len(nbr):
-            nbr = self._nearest_stations(self.val_idx, nbr, self.next_n_neighbors)
+            nbr = self._nearest_stations_per_target(
+                self.val_idx, nbr, self.next_n_neighbors)
         all_global = nbr + self.val_idx
         target_mask_np = np.zeros(len(all_global), dtype=bool)
         target_mask_np[len(nbr):] = True

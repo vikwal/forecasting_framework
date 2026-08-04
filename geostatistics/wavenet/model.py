@@ -361,6 +361,7 @@ class GraphWaveNetModel(nn.Module):
         static: Tensor,
         sigma: float,
         threshold: float,
+        target_mask: Tensor | None = None,
     ) -> Tensor:
         """Row-normalised predefined adjacency from a thresholded Gaussian kernel.
 
@@ -382,15 +383,46 @@ class GraphWaveNetModel(nn.Module):
         dist_norm, _ = cls._pairwise_geo(static)
         w = torch.exp(-((dist_norm / sigma) ** 2))
         w = w * (w >= threshold).to(w.dtype)
+        if target_mask is not None and bool(target_mask.any()):
+            # Same reasoning as _mask_target_pairs, but this matrix is weights
+            # rather than logits: zero before row-normalising, keep the diagonal.
+            tm = target_mask.to(w.device).view(-1)
+            tt = tm.view(-1, 1) & tm.view(1, -1)
+            tt = tt & ~torch.eye(w.shape[0], dtype=torch.bool, device=w.device)
+            w = w * (~tt).to(w.dtype)
         return w / w.sum(dim=1, keepdim=True).clamp(min=1e-8)
 
-    def _build_adjacency(self, static: Tensor) -> Tensor:
+    @staticmethod
+    def _mask_target_pairs(a: Tensor, target_mask: Tensor | None) -> Tensor:
+        """Set target → target entries to -inf, keeping every self-loop.
+
+        The adaptive adjacency is dense over the batch's nodes, so a validation
+        batch — 51 targets among ~141 nodes — would let each target draw a large
+        share of its attention from other targets, while a training batch with
+        1-10 targets barely can. Those co-targets are absent when a single new
+        site is served at inference. Masking before the softmax redistributes the
+        weight onto real neighbours instead of merely zeroing it afterwards.
+
+        The diagonal is exempt: unlike MTGNN there is no separate ``+I`` step, so
+        a masked diagonal would strip the target's self-loop.
+        """
+        if target_mask is None or not bool(target_mask.any()):
+            return a
+        tm = target_mask.to(a.device).view(-1)
+        tt = tm.view(-1, 1) & tm.view(1, -1)
+        tt = tt & ~torch.eye(a.shape[0], dtype=torch.bool, device=a.device)
+        return a.masked_fill(tt, float("-inf"))
+
+    def _build_adjacency(
+        self, static: Tensor, target_mask: Tensor | None = None,
+    ) -> Tensor:
         """Inductive adaptive adjacency with pairwise edge features.
 
         A_adp = softmax(ReLU(E1 · E2ᵀ + edge_bias))  where
         E1 = tanh(α · W1 · emb),  E2 = tanh(α · W2 · emb)
 
-        static : (N, S)
+        static      : (N, S)
+        target_mask : (N,) bool — True = target station. None disables masking.
         returns: (N, N) row-normalised soft adjacency
         """
         emb = self.emb_mlp(static)                             # (N, d_emb)
@@ -401,6 +433,7 @@ class GraphWaveNetModel(nn.Module):
         edge_bias = self.edge_fc(ef).squeeze(-1)               # (N, N)
 
         A = F.relu(E1 @ E2.T + edge_bias)
+        A = self._mask_target_pairs(A, target_mask)
         return F.softmax(A, dim=1)                             # (N, N)
 
     # ------------------------------------------------------------------
@@ -433,10 +466,14 @@ class GraphWaveNetModel(nn.Module):
         else:
             static_single = static[0]
 
-        # Adaptive adjacency (built once per forward)
-        a_adp = self._build_adjacency(static_single)   # (N, N)
+        # Adaptive adjacency (built once per forward). The node set is identical
+        # across the batch, so the first N entries of target_mask describe it
+        # whichever layout the caller used.
+        tm_single = target_mask if target_mask.shape[0] == N else target_mask[:N]
+        a_adp = self._build_adjacency(static_single, tm_single)   # (N, N)
         a_pre = (
-            self._predefined_adjacency(static_single, self.adj_sigma, self.adj_threshold)
+            self._predefined_adjacency(
+                static_single, self.adj_sigma, self.adj_threshold, tm_single)
             if self.predefined_adj else None
         )                                              # (N, N) or None
 

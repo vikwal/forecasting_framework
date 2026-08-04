@@ -166,6 +166,18 @@ dcrnn:
         low: 1
         high: 3
 
+      # Reichweite des Stationsgraphen: W = exp(-(d/d_max)^2 / sigma^2), d_max =
+      # 333 km (laengste Delaunay-Kante im Pool). Der bisherige Festwert 0.2 stammt
+      # aus dem DCRNN-Traffic-Paper (Appendix E.1) und ist fuer ein deutsches
+      # Stationsnetz durch nichts begruendet: bei 0.2 traegt eine 150-km-Kante das
+      # Gewicht 0.006, bei 0.4 dagegen 0.28. Der Parameter entscheidet also, wie
+      # viel vom Graphen die Diffusion ueberhaupt sieht — besonders seit der
+      # Fold-Triangulation die langen Kanten zurueckgeholt hat.
+      edge_weight_sigma:
+        type: float
+        low: 0.1
+        high: 0.6
+
       # NWP attention heads — sampled first; nwp_out_dim is then forced to be
       # a multiple of nwp_heads via nwp_out_per_head (see hpo_dcrnn.py)
       nwp_heads:

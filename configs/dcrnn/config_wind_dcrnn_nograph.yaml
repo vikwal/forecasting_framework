@@ -171,6 +171,8 @@ dcrnn:
 
       # K_hop entfaellt: ohne station<->station Kanten wirkungslos (Permutationstest: max|dpred| = 0.0).
 
+      # edge_weight_sigma entfaellt: ohne station<->station Kanten wirkungslos (Permutationstest: max|dpred| = 0.0).
+
       # NWP attention heads — sampled first; nwp_out_dim is then forced to be
       # a multiple of nwp_heads via nwp_out_per_head (see hpo_dcrnn.py)
       nwp_heads:

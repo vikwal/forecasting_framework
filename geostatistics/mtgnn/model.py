@@ -375,19 +375,33 @@ class MTGNNModel(nn.Module):
         topo_diff = topo.unsqueeze(0) - topo.unsqueeze(1)  # (N, N, topo_dim), dst - src
         return torch.cat([core, topo_diff], dim=-1)     # (N, N, 4 + topo_dim)
 
-    def _build_adjacency(self, static: Tensor) -> tuple[Tensor, Tensor]:
+    def _build_adjacency(
+        self, static: Tensor, target_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
         """Build forward and backward row-normalised adjacencies.
 
         Operation order is load-bearing:
           1. A_raw  from graph learning (ReLU·tanh·antisymmetric + edge_bias)
           2. diagonal → 0   (TopK selects only off-diagonal neighbours)
+          2b. target ↔ target → 0  (see below)
           3. TopK sparsification per row   (paper Eqs. 4-6, if topk_graph is set)
           4. self-loop +I   (paper Eq. 8: Â = D̂⁻¹(A + I))
           5. forward  row-normalise
           6. backward: A_raw^T separately row-normalised (DCRNN/GWN convention —
              NOT the transpose of the already-normalised forward matrix)
 
-        static : (N, S)
+        Step 2b keeps the target stations from informing each other. The
+        adjacency is dense over whatever nodes the batch contains, so without it
+        a validation batch — 51 targets among ~141 nodes — lets every target draw
+        up to a third of its ``topk_graph`` neighbours from other targets, while
+        a training batch with 1-10 targets barely can. Those co-targets do not
+        exist when a single new site is served at inference, so the model would
+        be trained and scored on information it will not have. It runs *before*
+        TopK so a target's k slots go to real neighbours instead of being spent
+        on links that are about to be dropped.
+
+        static      : (N, S)
+        target_mask : (N,) bool — True = target station. None disables step 2b.
         returns: a_hat_fwd (N, N) row-stochastic,
                  a_hat_bwd (N, N) row-stochastic
         """
@@ -403,6 +417,10 @@ class MTGNNModel(nn.Module):
 
         eye   = torch.eye(N, device=A_raw.device)
         A_raw = A_raw * (1 - eye)                          # zero diagonal before TopK
+
+        if target_mask is not None and bool(target_mask.any()):
+            tm    = target_mask.to(A_raw.device).view(-1)
+            A_raw = A_raw * (~(tm.view(-1, 1) & tm.view(1, -1))).float()
 
         if self.topk_graph is not None and self.topk_graph < N:
             topk_vals, _ = A_raw.topk(self.topk_graph, dim=1)
@@ -459,8 +477,11 @@ class MTGNNModel(nn.Module):
         else:
             static_single = static[0]        # (N, S) — take first (identical across batch)
 
-        # Build forward + backward adjacency once per forward pass
-        a_hat_fwd, a_hat_bwd = self._build_adjacency(static_single)   # (N, N) each
+        # Build forward + backward adjacency once per forward pass.
+        # The node set is identical across the batch, so the first N entries of
+        # target_mask describe it whichever layout the caller used.
+        tm_single = target_mask if target_mask.shape[0] == N else target_mask[:N]
+        a_hat_fwd, a_hat_bwd = self._build_adjacency(static_single, tm_single)  # (N, N) each
 
         # NWP aggregation via GATv2 when nwp_nodes=True (B=1 guaranteed by HomoSampler)
         if self.nwp_nodes:

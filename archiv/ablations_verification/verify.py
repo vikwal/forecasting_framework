@@ -457,12 +457,14 @@ def check_7_configs(cfg_dir: str) -> None:
     }
     # Deliberate, documented deviations on the *study* (non-fold) configs:
     #   * reduced HPO budget, 150 → 60
-    #   * variant C only: K_hop / next_n_neighbors pinned, i.e. removed from the
-    #     HPO search space because the permutation test proves they cannot
-    #     influence C (max|Δpred| = 0.0). Same move as config_wind_dcrnn_base.yaml,
-    #     which dropped nwp_heads / nwp_out_per_head for the same reason.
+    #   * variant C only: K_hop / next_n_neighbors / edge_weight_sigma pinned,
+    #     i.e. removed from the HPO search space because the permutation test
+    #     proves they cannot influence C (max|Δpred| = 0.0) — edge_weight_sigma
+    #     scales the station-edge kernel, of which C has no edges at all. Same
+    #     move as config_wind_dcrnn_base.yaml, which dropped nwp_heads /
+    #     nwp_out_per_head for the same reason.
     budget_key = "hpo.trials"
-    PINNED_IN_C = ("K_hop", "next_n_neighbors")
+    PINNED_IN_C = ("K_hop", "next_n_neighbors", "edge_weight_sigma")
     pinned_keys = {f"dcrnn.hpo.params.{p}.{f}"
                    for p in PINNED_IN_C for f in ("type", "low", "high", "step", "log")}
 

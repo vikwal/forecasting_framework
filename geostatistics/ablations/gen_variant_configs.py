@@ -86,7 +86,7 @@ VARIANTS: dict[str, tuple[list[tuple[str, str, str]], str]] = {
 }
 
 # HPO params that provably cannot influence variant C (no station edges).
-INERT_IN_C = ["K_hop", "next_n_neighbors"]
+INERT_IN_C = ["K_hop", "next_n_neighbors", "edge_weight_sigma"]
 
 
 def dcrnn_region(lines: list[str]) -> tuple[int, int]:
