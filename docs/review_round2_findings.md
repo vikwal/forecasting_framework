@@ -350,7 +350,7 @@ Neustarts haben zwei Cache-Schreibvorgänge ohne DB-Zugriff ausgelöst.
 
 Noch **nicht** in die Dokumente eingearbeitet:
 
-- `research_summary` §4.3 sagt, die NWP-Einbindung bei MTGNN sei „analog zu DCRNN".
+- `research_summary` §4.3 (inzwischen abgeloest durch `study_overview.md`, alte Fassung in `archiv/superseded_docs/`) sagt, die NWP-Einbindung bei MTGNN sei „analog zu DCRNN".
   Das stimmt nicht: DCRNN benutzt eine Hidden-State-Query, MTGNN/WaveNet eine
   Zero-Query. (Die fehlenden Kantenattribute sind seit A2 behoben.)
 - `research_summary` §6 beschreibt drei **zeitliche** Folds mit
