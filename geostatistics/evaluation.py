@@ -69,6 +69,7 @@ def build_eval_batch(
     ecmwf_static: np.ndarray,
     target_global: list[int],
     observer_global: list[int],
+    fold_train_indices: list[int],
     target_feat_idx: int,
     H_hist: int,
     H_fore: int,
@@ -152,6 +153,8 @@ def build_eval_batch(
         ecmwf_nwp=e2_grid_full,
         icond2_static=icond2_static,
         ecmwf_static=ecmwf_static,
+        fold_train_indices=fold_train_indices,
+        target_global=target_global,
     )
     return data, target_mask, gt_scaled
 
@@ -242,19 +245,14 @@ def evaluate(
         val = float(meas_raw[t_run_abs - 1, gidx, target_feat_idx])
         return np.full(H_fore, val, dtype=np.float32)
 
-    # Observer (context) selection must MATCH training (sampler.sample_val):
-    # the model was trained seeing only the next_n_neighbors nearest train
-    # stations per target, not all train stations. Using all of them at eval
-    # changes the station graph topology and degrades models that rely on the
-    # neighbour context (esp. nwp_nodes=true + hist_wind_available=false).
-    if sampler.tc.next_n_neighbors is not None:
-        observer_global = sampler._nearest_neighbors(
-            val_station_indices, train_station_indices, sampler.tc.next_n_neighbors,
-        )
-    else:
-        observer_global = sampler._neighbors_within_radius(
-            val_station_indices, train_station_indices,
-        )
+    # Observer (context) selection must MATCH training: the model was trained
+    # seeing only the next_n_neighbors nearest train stations per target, not all
+    # train stations. Using all of them at eval changes the station graph topology
+    # and degrades models that rely on the neighbour context (esp. nwp_nodes=true
+    # + hist_wind_available=false). Shared with sample_val so the two cannot drift.
+    observer_global = sampler.select_val_neighbours(
+        val_station_indices, train_station_indices,
+    )
     logger.info(
         "Observer context: %d / %d train stations (next_n_neighbors=%s)",
         len(observer_global), len(train_station_indices), sampler.tc.next_n_neighbors,
@@ -274,6 +272,7 @@ def evaluate(
                 r_curr=r_curr, r_hist=r_hist, t_run_abs=t_run_abs,
                 target_global=val_station_indices,
                 observer_global=observer_global,
+                fold_train_indices=train_station_indices,
             )
             preds_a = _to_phys(
                 model(data_a.to(device), mask_a.to(device)).cpu().numpy()

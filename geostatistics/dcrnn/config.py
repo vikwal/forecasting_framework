@@ -176,6 +176,7 @@ class DCRNNConfig:
         node_feat_names = parse_station_node_features(d, station_node_features)
         graph = GraphConfig(
             station_connectivity=d.get("station_connectivity", "delaunay"),
+            station_graph_mode=d.get("station_graph_mode", "attach"),
             next_n_icond2_grid_points=d.get("next_n_icond2", 4),
             next_n_ecmwf_grid_points=d.get("next_n_ecmwf", 4),
             use_distance_features=use_distance,

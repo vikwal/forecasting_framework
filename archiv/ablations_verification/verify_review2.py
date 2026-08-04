@@ -75,6 +75,7 @@ def _forward_on(static_pre: np.ndarray, fx) -> str:
         ecmwf_static=fx.ecmwf_static,
         target_global=list(fx.val_station_indices),
         observer_global=list(fx.train_station_indices)[: n_tr],
+        fold_train_indices=list(fx.train_station_indices),
         target_feat_idx=fx.model_cfg.target_feat_idx,
         H_hist=fx.model_cfg.history_length,
         H_fore=fx.model_cfg.forecast_horizon,

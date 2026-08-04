@@ -92,6 +92,12 @@ class GraphConfig:
     use_altitude_diff: bool = False
     topo_features_path: Optional[str] = None
     topo_feature_names: List[str] = field(default_factory=list)
+    # "attach"  — triangulate the fold's training stations, wire every target in
+    #             the way a single new site would be wired at inference time.
+    # "induced" — legacy: triangulate the whole station pool once and take the
+    #             subgraph induced by each sample.  Thins the training graph and
+    #             lets the held-out stations' positions shape its topology.
+    station_graph_mode: str = "attach"
 
 
 @dataclass
@@ -211,6 +217,7 @@ class ModelConfig:
         use_distance, use_direction, use_altitude_diff, topo_names = parse_edge_features(d)
         graph = GraphConfig(
             station_connectivity=d.get("station_connectivity", "delaunay"),
+            station_graph_mode=d.get("station_graph_mode", "attach"),
             next_n_icond2_grid_points=d["next_n_icond2"],
             next_n_ecmwf_grid_points=d["next_n_ecmwf"],
             use_distance_features=use_distance,

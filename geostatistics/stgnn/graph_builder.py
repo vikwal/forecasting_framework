@@ -19,6 +19,8 @@ Edge types (directed)
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 from torch import Tensor
@@ -32,6 +34,32 @@ from .utils.spatial import (
     pairwise_geodesic_km,
 )
 from .utils.topo_features import load_topo_node_features
+
+
+@dataclass
+class FoldTopology:
+    """
+    Station-graph topology for one train/target split.
+
+    Delaunay triangulation and node subsetting do not commute: removing a point
+    can only ever destroy edges, never create them, so the subgraph induced by a
+    node subset is a strict subset of the triangulation over that subset.  Taking
+    the induced subgraph of a triangulation over *all* stations therefore both
+    thins the training graph and lets the held-out stations' positions leak into
+    its topology.  This structure avoids that by triangulating the training
+    stations on their own and wiring every other station in the way it would be
+    wired at inference time.
+
+    backbone : (E, 2) global index pairs, i < j — Delaunay over the training
+               stations only.  Independent of where the held-out stations lie.
+    attach   : per station, the training stations it connects to when inserted
+               into that network.  For a training station this is its own
+               backbone neighbourhood; for a held-out station it is the set of
+               edges it gains in Delaunay(train ∪ {station}) — exactly the wiring
+               a single new site would receive in deployment.
+    """
+    backbone: np.ndarray
+    attach: dict[int, np.ndarray]
 
 
 class HeterogeneousGraphBuilder:
@@ -49,6 +77,11 @@ class HeterogeneousGraphBuilder:
 
     def __init__(self, config: GraphConfig) -> None:
         self.cfg = config
+        # Populated by build(); consumed by build_fold_topology / sample_station_edges.
+        self.station_coords: np.ndarray | None = None
+        self.station_pair_attr: np.ndarray | None = None   # (N, N, F) directed
+        self._max_dist_km: float = 1.0
+        self._s2s_feat_dim: int = 1
 
     # ------------------------------------------------------------------
     # Public API
@@ -116,6 +149,18 @@ class HeterogeneousGraphBuilder:
         )
         data["station", "near", "station"].edge_index = s2s_ei
         data["station", "near", "station"].edge_attr = s2s_ea
+
+        # --- pairwise edge-attribute table, for per-sample edge assembly ---
+        # station_graph_mode="attach" rebuilds the station edges per sample, so the
+        # attributes of every possible pair have to be available at that point.
+        # The table is small (N² × F floats) and computing it once here keeps the
+        # distance normaliser — and with it the Gaussian edge kernel — identical
+        # for an edge no matter which sample it turns up in.
+        self.station_coords = station_coords
+        if self.cfg.station_connectivity != "none":
+            self.station_pair_attr = self._build_pair_attr_table(
+                station_coords, station_altitudes, topo_node_feats,
+            )
 
         # --- ICON-D2 → station edges ---
         i2s_ei, i2s_ea = self._build_nwp_to_station_edges(
@@ -197,6 +242,7 @@ class HeterogeneousGraphBuilder:
                 dst_idx=_zero_idx,
             )
             n_feat = int(probe.shape[1])
+            self._s2s_feat_dim = n_feat
             return (
                 torch.zeros((2, 0), dtype=torch.long),
                 torch.zeros((0, n_feat), dtype=torch.float32),
@@ -230,6 +276,7 @@ class HeterogeneousGraphBuilder:
             coords[undirected[:, 1], 0], coords[undirected[:, 1], 1],
         )
         max_dist = float(all_dists_flat.max()) if len(all_dists_flat) > 0 else 1.0
+        self._max_dist_km = max_dist
 
         ea = edge_features(
             src_coords=coords[src],
@@ -246,8 +293,141 @@ class HeterogeneousGraphBuilder:
             dst_idx=dst,
         )
 
+        self._s2s_feat_dim = int(ea.shape[1])
         edge_index = torch.tensor(np.stack([src, dst], axis=0), dtype=torch.long)
         edge_attr = torch.from_numpy(ea)
+        return edge_index, edge_attr
+
+    def _build_pair_attr_table(
+        self,
+        coords: np.ndarray,
+        altitudes: np.ndarray,
+        topo_node_feats: dict[str, np.ndarray] | None,
+    ) -> np.ndarray:
+        """
+        Edge attributes for every directed station pair, shaped (N, N, F).
+
+        Uses the same distance normaliser as ``_build_station_edges``, so an edge
+        present in both carries bit-identical attributes.
+        """
+        n = len(coords)
+        src = np.repeat(np.arange(n), n)
+        dst = np.tile(np.arange(n), n)
+        attr = edge_features(
+            src_coords=coords[src],
+            dst_coords=coords[dst],
+            src_alt=(altitudes[src] if self.cfg.use_altitude_diff else None),
+            dst_alt=(altitudes[dst] if self.cfg.use_altitude_diff else None),
+            max_dist_km=self._max_dist_km,
+            use_distance=self.cfg.use_distance_features,
+            use_direction=self.cfg.use_direction_features,
+            use_altitude_diff=self.cfg.use_altitude_diff,
+            topo_node_feats=topo_node_feats,
+            topo_feature_names=self.cfg.topo_feature_names if topo_node_feats else None,
+            src_idx=src,
+            dst_idx=dst,
+        )
+        return attr.reshape(n, n, -1)
+
+    # ------------------------------------------------------------------
+    # Per-fold topology and per-sample edge assembly
+    # ------------------------------------------------------------------
+
+    def build_fold_topology(self, train_indices) -> FoldTopology:
+        """
+        Triangulate the training stations and record how every station attaches.
+
+        Call once per train/target split; the result is independent of the
+        individual sample and is cached by the sampler.  Cost is one Delaunay over
+        the training stations plus one per held-out station, a few tens of ms for
+        the sizes used here.
+        """
+        if self.station_coords is None:
+            raise RuntimeError("build() must run before build_fold_topology().")
+
+        train = np.asarray(sorted(int(i) for i in train_indices), dtype=np.int64)
+        if self.cfg.station_connectivity == "none" or len(train) < 3:
+            return FoldTopology(np.zeros((0, 2), dtype=np.int64), {})
+
+        # train is sorted, so local i < j maps to global i < j
+        backbone = train[delaunay_edges(self.station_coords[train])]
+
+        adj: dict[int, set[int]] = {int(t): set() for t in train}
+        for a, b in backbone:
+            adj[int(a)].add(int(b))
+            adj[int(b)].add(int(a))
+        attach = {t: np.array(sorted(nbrs), dtype=np.int64) for t, nbrs in adj.items()}
+
+        train_set = set(int(t) for t in train)
+        for v in range(len(self.station_coords)):
+            if v in train_set:
+                continue
+            sub = np.append(train, v)
+            local = delaunay_edges(self.station_coords[sub])
+            v_local = len(train)
+            nbrs = {int(sub[j]) for i, j in local if i == v_local}
+            nbrs |= {int(sub[i]) for i, j in local if j == v_local}
+            attach[v] = np.array(sorted(nbrs), dtype=np.int64)
+
+        return FoldTopology(backbone.astype(np.int64), attach)
+
+    def sample_station_edges(
+        self,
+        topo: FoldTopology,
+        all_global: list[int],
+        target_global,
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Assemble the station ↔ station edges for one sample.
+
+        Neighbour ↔ neighbour edges come from the fold backbone restricted to the
+        neighbours present; every target is wired to its attachment neighbours
+        among them.  Target ↔ target edges are deliberately absent: a single new
+        site has no co-targets to talk to at inference, and training on edges that
+        will not exist there is what made the validation graph denser than the
+        training one.
+        """
+        n_feat = (self.station_pair_attr.shape[-1]
+                  if self.station_pair_attr is not None else self._s2s_feat_dim)
+        empty = (torch.zeros((2, 0), dtype=torch.long),
+                 torch.zeros((0, n_feat), dtype=torch.float32))
+        if self.cfg.station_connectivity == "none" or not all_global:
+            return empty
+
+        n_all = len(self.station_coords)
+        targets = np.asarray(sorted(int(g) for g in target_global), dtype=np.int64)
+        is_target = np.zeros(n_all, dtype=bool)
+        is_target[targets] = True
+
+        in_nb = np.zeros(n_all, dtype=bool)
+        in_nb[np.asarray([int(g) for g in all_global], dtype=np.int64)] = True
+        in_nb &= ~is_target
+
+        blocks = []
+        if len(topo.backbone):
+            keep = in_nb[topo.backbone[:, 0]] & in_nb[topo.backbone[:, 1]]
+            if keep.any():
+                blocks.append(topo.backbone[keep])
+        for t in targets:
+            nbrs = topo.attach.get(int(t))
+            if nbrs is None or not len(nbrs):
+                continue
+            nbrs = nbrs[in_nb[nbrs]]
+            if len(nbrs):
+                blocks.append(np.stack([np.full(len(nbrs), t, dtype=np.int64), nbrs], axis=1))
+
+        if not blocks:
+            return empty
+        undirected = np.concatenate(blocks, axis=0)
+
+        src = np.concatenate([undirected[:, 0], undirected[:, 1]])
+        dst = np.concatenate([undirected[:, 1], undirected[:, 0]])
+
+        local = np.full(n_all, -1, dtype=np.int64)
+        local[np.asarray([int(g) for g in all_global], dtype=np.int64)] = np.arange(len(all_global))
+
+        edge_index = torch.from_numpy(np.stack([local[src], local[dst]], axis=0))
+        edge_attr = torch.from_numpy(np.ascontiguousarray(self.station_pair_attr[src, dst]))
         return edge_index, edge_attr
 
     def _build_nwp_to_station_edges(

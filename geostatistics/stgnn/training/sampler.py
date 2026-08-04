@@ -26,7 +26,7 @@ from torch import Tensor
 from torch_geometric.data import HeteroData
 
 from ..config import ModelConfig
-from ..graph_builder import HeterogeneousGraphBuilder
+from ..graph_builder import FoldTopology, HeterogeneousGraphBuilder
 
 
 @dataclass
@@ -59,8 +59,58 @@ class TrainingSampler:
         # the neighbours. target_mask is deliberately left untouched, so the loss
         # is still scored at exactly the same nodes as in the full model.
         self.neighbour_meas_available = neighbour_meas_available
+        self.station_graph_mode = getattr(
+            graph_builder.cfg, "station_graph_mode", "attach"
+        )
+        # One entry per train/target split — three under spatial CV, since the
+        # HPO drives all folds from a single process.
+        self._topo_cache: dict[tuple[int, ...], FoldTopology] = {}
 
     # ------------------------------------------------------------------
+
+    def _get_topo(self, train_station_indices) -> FoldTopology:
+        key = tuple(int(i) for i in train_station_indices)
+        topo = self._topo_cache.get(key)
+        if topo is None:
+            topo = self.builder.build_fold_topology(key)
+            self._topo_cache[key] = topo
+        return topo
+
+    def select_val_neighbours(
+        self,
+        val_station_indices: list[int],
+        train_station_indices: list[int],
+    ) -> list[int]:
+        """
+        Neighbour context for the validation graph.
+
+        Picking the ``next_n_neighbors`` train stations closest to the target
+        *group* means something different in training and validation: in training
+        the budget serves 1–10 targets sitting close together, in validation it is
+        spread across all 51 at once, so each validation target ends up with far
+        thinner local context than any training target ever saw.  Taking the union
+        of each target's own nearest neighbours removes that asymmetry — every
+        target, in either phase, sees the same local density.
+
+        Used by both ``sample_val`` and ``evaluation.evaluate`` so the two cannot
+        drift apart.
+        """
+        k = self.tc.next_n_neighbors
+        if k is None:
+            return self._neighbors_within_radius(val_station_indices, train_station_indices)
+        if self.station_coords is None or k >= len(train_station_indices):
+            return list(train_station_indices)
+
+        from ..utils.spatial import pairwise_geodesic_km
+
+        cand = np.asarray(train_station_indices)
+        dist = pairwise_geodesic_km(
+            self.station_coords[cand], self.station_coords[np.asarray(val_station_indices)],
+        )                                                     # (N_cand, N_target)
+        keep: set[int] = set()
+        for col in range(dist.shape[1]):
+            keep.update(cand[np.argsort(dist[:, col])[:k]].tolist())
+        return sorted(keep)
 
     def _neighbors_within_radius(
         self,
@@ -282,6 +332,8 @@ class TrainingSampler:
             icond2_static=icond2_static,
             ecmwf_static=ecmwf_static,
             icond2_uv_nwp=i2_uv_grid_full,
+            fold_train_indices=train_station_indices,
+            target_global=target_global_list,
         )
         return SampleBatch(data=data, target_mask=target_mask_bool, ground_truth=ground_truth)
 
@@ -309,12 +361,7 @@ class TrainingSampler:
         H_fore = self.cfg.forecast_horizon
         t_hist_abs = t_run_abs - H_hist
 
-        if self.tc.next_n_neighbors is not None:
-            neighbor_train = self._nearest_neighbors(
-                val_station_indices, train_station_indices, self.tc.next_n_neighbors
-            )
-        else:
-            neighbor_train = self._neighbors_within_radius(val_station_indices, train_station_indices)
+        neighbor_train = self.select_val_neighbours(val_station_indices, train_station_indices)
         all_global = neighbor_train + val_station_indices
         N_train    = len(neighbor_train)
         N_all      = len(all_global)
@@ -381,6 +428,8 @@ class TrainingSampler:
             icond2_static=icond2_static,
             ecmwf_static=ecmwf_static,
             icond2_uv_nwp=i2_uv_grid_full,
+            fold_train_indices=train_station_indices,
+            target_global=val_station_indices,
         )
         return SampleBatch(data=data, target_mask=target_mask_bool, ground_truth=ground_truth)
 
@@ -398,6 +447,8 @@ class TrainingSampler:
         icond2_static: np.ndarray,
         ecmwf_static: np.ndarray,
         icond2_uv_nwp: np.ndarray | None = None,  # (96, N_grid, 2) raw u/v for direction_to_adj
+        fold_train_indices: list[int] | None = None,
+        target_global: list[int] | None = None,
     ) -> HeteroData:
         H_hist = meas_hist.shape[0]
         N_sub  = i2_full.shape[0]
@@ -409,7 +460,13 @@ class TrainingSampler:
         data = HeteroData()
 
         # Station–station edges
-        sub_s2s_ei, sub_s2s_ea = self.builder.subgraph_station_edges(self.base_graph, all_global)
+        if self.station_graph_mode == "attach" and fold_train_indices is not None:
+            sub_s2s_ei, sub_s2s_ea = self.builder.sample_station_edges(
+                self._get_topo(fold_train_indices), all_global, target_global or [],
+            )
+        else:
+            # Legacy: induced subgraph of the triangulation over the whole pool.
+            sub_s2s_ei, sub_s2s_ea = self.builder.subgraph_station_edges(self.base_graph, all_global)
         data["station", "near", "station"].edge_index = sub_s2s_ei
         data["station", "near", "station"].edge_attr  = sub_s2s_ea
 

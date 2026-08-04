@@ -160,6 +160,7 @@ def check_2_b_zeroes(fx_a) -> None:
         ecmwf_static=fx_a.ecmwf_static,
         target_global=fx_a.val_station_indices,
         observer_global=fx_a.train_station_indices,
+        fold_train_indices=fx_a.train_station_indices,
         target_feat_idx=fx_a.model_cfg.target_feat_idx,
         H_hist=fx_a.H_hist, H_fore=fx_a.H_fore,
     )
