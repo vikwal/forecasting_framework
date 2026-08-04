@@ -163,6 +163,30 @@ GROUPS: list[Group] = [
         ],
     ),
 
+    # ── WaveNet (R4: bisher fehlte hier ein Retrain-Pfad) ──────────────────
+    # Exakt analog zu MTGNN_BASE/MTGNN_NWP: die regulaeren Fold-Configs (nicht
+    # die stdhp-Kopien — diese Gruppen sind fuer die spaetere echte Kampagne
+    # mit HPO-Params gedacht, s. geostatistics/stdrun/ fuer den stdhp-Trockenlauf).
+    Group(
+        name   = "WAVENET_BASE",
+        script = "train_wavenet",
+        folds  = [
+            FoldJob("configs/wavenet/config_wind_wavenet_fold1.yaml", "fold1"),
+            FoldJob("configs/wavenet/config_wind_wavenet_fold2.yaml", "fold2"),
+            FoldJob("configs/wavenet/config_wind_wavenet_fold3.yaml", "fold3"),
+        ],
+    ),
+
+    Group(
+        name   = "WAVENET_NWP",
+        script = "train_wavenet",
+        folds  = [
+            FoldJob("configs/wavenet/config_wind_wavenet_nwp_fold1.yaml", "fold1"),
+            FoldJob("configs/wavenet/config_wind_wavenet_nwp_fold2.yaml", "fold2"),
+            FoldJob("configs/wavenet/config_wind_wavenet_nwp_fold3.yaml", "fold3"),
+        ],
+    ),
+
 ]
 # ---------------------------------------------------------------------------
 # ▲▲▲ ENDE KONFIGURATION ▲▲▲

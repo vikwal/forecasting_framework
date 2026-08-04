@@ -123,6 +123,13 @@ def main() -> None:
             "otherwise static_dim differs and the checkpoint will not load."
         ),
     )
+    parser.add_argument(
+        "--broadcast-topo", action="store_true",
+        help=(
+            "Must match the flag train_mtgnn.py was given, otherwise input_proj "
+            "has the wrong width and the checkpoint will not load."
+        ),
+    )
     args = parser.parse_args()
 
     # ── Resolve model file ──────────────────────────────────────────────────
@@ -442,6 +449,7 @@ def main() -> None:
         in_channels      = in_channels_model,
         static_dim       = 6 + sampler.topo_dim,
         topo_dim         = sampler.topo_dim,
+        broadcast_topo   = args.broadcast_topo,
         hidden           = mcfg.get("hidden", 64),
         n_layers         = mcfg.get("n_layers", 4),
         K_hop            = mcfg.get("K_hop", 2),

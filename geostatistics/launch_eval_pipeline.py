@@ -290,6 +290,61 @@ JOBS: list[Job] = [
         raw_out_name= "dcrnn_wind_dcrnn_nograph_fold2",
     ),
 
+    # ==========================================================================
+    # ── WaveNet (R4: bisher fehlte hier ein Eval-Pfad) ───────────────────────
+    # Analog zu den MTGNN-Jobs oben; Script get_test_results_wavenet.
+    # Config fold1/2/3 -> raw_out_name fold0/1/2 (etablierte Konvention dieser
+    # Datei fuer alle anderen Modelle, hier unveraendert uebernommen).
+    # wind_wavenet_nwp_hist bewusst NICHT ergaenzt — Variante aus der Studie
+    # gestrichen (config existiert noch, bleibt ungenutzt).
+    # ==========================================================================
+
+    # ── WaveNet BASE ──────────────────────────────────────────────────────────
+    Job(
+        group       = "WAVENET_BASE",
+        script      = "get_test_results_wavenet",
+        model_name  = "wind_wavenet_fold1_wavenet_val",
+        config      = "configs/wavenet/config_wind_wavenet_fold1.yaml",
+        raw_out_name= "wavenet_wind_wavenet_fold0",
+    ),
+    Job(
+        group       = "WAVENET_BASE",
+        script      = "get_test_results_wavenet",
+        model_name  = "wind_wavenet_fold2_wavenet_val",
+        config      = "configs/wavenet/config_wind_wavenet_fold2.yaml",
+        raw_out_name= "wavenet_wind_wavenet_fold1",
+    ),
+    Job(
+        group       = "WAVENET_BASE",
+        script      = "get_test_results_wavenet",
+        model_name  = "wind_wavenet_fold3_wavenet_val",
+        config      = "configs/wavenet/config_wind_wavenet_fold3.yaml",
+        raw_out_name= "wavenet_wind_wavenet_fold2",
+    ),
+
+    # ── WaveNet NWP ───────────────────────────────────────────────────────────
+    Job(
+        group       = "WAVENET_NWP",
+        script      = "get_test_results_wavenet",
+        model_name  = "wind_wavenet_nwp_fold1_wavenet_val",
+        config      = "configs/wavenet/config_wind_wavenet_nwp_fold1.yaml",
+        raw_out_name= "wavenet_wind_wavenet_nwp_fold0",
+    ),
+    Job(
+        group       = "WAVENET_NWP",
+        script      = "get_test_results_wavenet",
+        model_name  = "wind_wavenet_nwp_fold2_wavenet_val",
+        config      = "configs/wavenet/config_wind_wavenet_nwp_fold2.yaml",
+        raw_out_name= "wavenet_wind_wavenet_nwp_fold1",
+    ),
+    Job(
+        group       = "WAVENET_NWP",
+        script      = "get_test_results_wavenet",
+        model_name  = "wind_wavenet_nwp_fold3_wavenet_val",
+        config      = "configs/wavenet/config_wind_wavenet_nwp_fold3.yaml",
+        raw_out_name= "wavenet_wind_wavenet_nwp_fold2",
+    ),
+
 ]
 
 # ---------------------------------------------------------------------------

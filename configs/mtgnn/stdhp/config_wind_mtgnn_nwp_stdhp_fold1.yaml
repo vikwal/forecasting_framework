@@ -1,0 +1,209 @@
+data:
+  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
+  files: [
+            '00183', '00282', '00591', '00596', '00656', '00691', '00856', '00963', '01001', '01078',
+            '01200', '01270', '01358', '01420', '01443', '01468', '01503', '01544', '01580', '01587',
+            '01605', '01639', '01684', '01694', '01757', '01759', '01766', '01869', '02014', '02115',
+            '02171', '02261', '02483', '02485', '02497', '02712', '02856', '02907', '02932', '02961',
+            '02985', '03028', '03086', '03093', '03098', '03126', '03158', '03167', '03244', '03366',
+            '03376', '03631', '03668', '03730', '03761', '03811', '03925', '04036', '04094', '04104',
+            '04271', '04280', '04393', '04464', '04625', '04745', '04887', '04911', '04931', '05029',
+            '05100', '05109', '05349', '05404', '05490', '05538', '05629', '05705', '05779', '05792',
+            '05797', '05800', '05825', '05871', '05930', '06197', '06314', '07341', '07351', '07367',
+            '07368', '07369', '07370', '07374', '07389', '07393', '07412', '13674', '13965', '15000',
+            '15207', '19171']
+  val_files: [
+            '00161', '00164', '00232', '00298', '00303', '00433', '00460', '00662', '00701', '00704',
+            '00853', '00880', '01048', '01357', '01550', '01691', '01886', '01975', '02023', '02044',
+            '02252', '02559', '02597', '02638', '02667', '02794', '02812', '03015', '03032', '03196',
+            '03231', '03287', '03321', '03379', '03402', '03513', '03821', '04371', '04466', '04642',
+            '05142', '05397', '05426', '05480', '05516', '05856', '06159', '06163', '06344', '07396',
+            '15813']
+  test_files: [
+            '00096', '00427', '00603', '05371', '00840', '00867', '00891', '00953', '01262', '01303',
+            '05906', '01612', '01803', '01832', '02290', '02429', '02564', '02601', '07410', '02878',
+            '02925', '02928', '03166', '03268', '03362', '03660', '03897', '03946', '03987', '04024',
+            '04032', '00198', '04039', '04177', '04336', '13711', '04501', '04928', '05158', '05347',
+            '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342']
+  val_start:  '2024-08-01'   # Train davor, Validierung danach
+  test_start: '2025-08-01'   # ab hier zurueckgehalten (finaler Test)
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
+  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
+  stations_master: 'data/stations_master.csv'
+  freq: '1h'
+  use_case: wind
+
+mtgnn:
+  # Input features
+  icond2_features: ['u_10m', 'v_10m', 'wind_speed_10m', 'wind_speed_38m']
+  ecmwf_features:  ['u_wind10m', 'v_wind10m', 'wind_speed_10m']
+  icond2_feature_mode: dir_in_deg   # absolute | components | both | dir_in_deg
+  ecmwf_feature_mode:  dir_in_deg   # absolute | components | both | dir_in_deg
+  measurement_features: ['wind_speed', 'wind_direction']
+  target_col: 'wind_speed'
+  edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
+  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  station_node_features: all
+  n_workers: 8
+  icond2_run_hours: [6,9,12,15]
+
+  # NWP aggregation
+  nwp_nodes: true                           # GATv2 over k grid points → station embedding
+  next_n_icond2: 4                          # nearest ICON-D2 grid points per station; HPO varies 1-7
+  next_n_ecmwf: 4                           # nearest ECMWF grid points (0 = disabled)
+  aggregate_nwp: false                      # forced false when nwp_nodes=true
+  nwp_out_dim: 32                           # GATv2 output dim; must be divisible by nwp_heads
+  nwp_heads: 4                              # fixed — nwp_out_dim HPO uses step=4 to guarantee divisibility
+
+  # Time windows
+  history_length: 48
+  forecast_horizon: 48
+
+  # Architecture
+  hidden: 64
+  n_layers: 5          # dilations [1,2,4,8,16] → RF=187, covers T_total=96
+  K_hop: 2
+  beta: 0.05
+  emb_dim: 64
+  graph_alpha: 3.0
+  dropout: 0.2
+
+  # Training
+  min_target_stations: 1
+  max_target_stations: 10
+  max_neighbor_stations: 90
+  next_n_neighbors: 90
+  hist_wind_available: false    # true = historical measurements kept for target nodes (ablation)
+  topk_graph: 20
+  handle_nans: break
+  loss_weights_by_horizon: true
+  horizon_decay: 0.90
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  scheduler: cosine
+  grad_accum: 4
+  max_epochs: 200
+  patience: 15
+  gradient_clip: 5.0
+
+  # Curriculum learning: increase forecast horizon by 1 step every N epochs
+  cl_period: 1
+
+  # ---------------------------------------------------------------------------
+  # HPO bounds — read by hpo_mtgnn.py
+  # ---------------------------------------------------------------------------
+  hpo:
+    trials: 1000
+    studies_path: studies/
+    tensorboard_monitoring: true
+    pruner: median
+    pruner_n_startup_trials: 20
+    pruner_n_warmup_steps: 1
+    n_folds: 3
+    cv_mode: spatial          # spatial | temporal (temporal = Expanding Window ueber test_start)
+    spatial_folds: 'configs/spatial_folds.yaml'
+    min_train_date: '2024-03-31'
+    n_val_stations: null      # raeumliche Folds definieren die Zielstationen
+    max_epochs_per_trial: 100
+    patience_per_trial: 10
+
+    params:
+      next_n_icond2:
+        type: int
+        low: 1
+        high: 7
+
+      next_n_ecmwf:
+        type: int
+        low: 0
+        high: 4
+
+      nwp_out_dim:
+        type: int
+        low: 16
+        high: 128
+        step: 4   # always divisible by nwp_heads=4
+
+      hidden:
+        type: int
+        low: 32
+        high: 128
+        step: 4
+
+      n_layers:
+        type: int
+        low: 4
+        high: 8
+
+      K_hop:
+        type: int
+        low: 1
+        high: 3
+
+      beta:
+        type: float
+        low: 0.01
+        high: 0.2
+
+      emb_dim:
+        type: int
+        low: 16
+        high: 128
+        step: 4
+
+      graph_alpha:
+        type: float
+        low: 1.0
+        high: 6.0
+
+      dropout:
+        type: float
+        low: 0.0
+        high: 0.4
+
+      lr:
+        type: float
+        low: 1.0e-5
+        high: 1.0e-3
+        log: true
+
+      weight_decay:
+        type: float
+        low: 1.0e-6
+        high: 1.0e-3
+        log: true
+
+      horizon_decay:
+        type: float
+        low: 0.5
+        high: 0.99
+
+      gradient_clip:
+        type: float
+        low: 0.5
+        high: 10.0
+
+      grad_accum:
+        type: int
+        low: 1
+        high: 64
+
+      next_n_neighbors:
+        type: int
+        low: 50
+        high: 90
+
+      icond2_feature_mode:
+        type: categorical
+        choices: [absolute, dir_in_deg]
+
+      ecmwf_feature_mode:
+        type: categorical
+        choices: [absolute, dir_in_deg]
+
+      topk_graph:
+        type: int
+        low: 5
+        high: 40
