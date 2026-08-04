@@ -535,7 +535,7 @@ CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.batch_fingerprin
     --out /tmp/fp_before.json
 #   … Änderung …
 CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.batch_fingerprint \
-    --out /tmp/fp_after.json --compare archiv/ablations_verification/fp_before_674a043.json
+    --out /tmp/fp_after.json --compare archiv/ablations_verification/fp_9808123.json
 
 # Plan §4.2 … §4.6 plus Config-Checks, 79 Checks, ~40 s, keine Daten, keine GPU
 CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.verify

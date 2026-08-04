@@ -647,7 +647,7 @@ CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.verif
 # Ablations-Suite und Fingerabdruck aus Runde 1 (unverändert)
 CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.verify
 CUDA_VISIBLE_DEVICES="" nice -n 19 python -m archiv.ablations_verification.batch_fingerprint \
-    --out /tmp/fp_after.json --compare archiv/ablations_verification/fp_before_674a043.json
+    --out /tmp/fp_after.json --compare archiv/ablations_verification/fp_9808123.json
 ```
 
 Alle fünf laufen auf der CPU, ohne GPU und ohne Optuna. `verify_review2_cache.py`

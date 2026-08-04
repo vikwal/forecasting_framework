@@ -473,7 +473,7 @@ Liegen unter `archiv/ablations_verification/` (nicht im Laufzeitpfad):
 CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.verify           # Ablations-Suite
 CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.verify_review2   # Runde-2-Belege
 CUDA_VISIBLE_DEVICES="" python -m archiv.ablations_verification.batch_fingerprint \
-    --out /tmp/fp.json --compare archiv/ablations_verification/fp_before_674a043.json
+    --out /tmp/fp.json --compare archiv/ablations_verification/fp_9808123.json
 ```
 
 Der Fingerprint vergleicht 28 Sampler-Tensoren bitweise gegen den Stand `674a043` — so
