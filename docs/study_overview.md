@@ -65,35 +65,53 @@ Correction als Forecasting**.
    (Wu et al. 2021): pro Trainingsbeispiel wird eine zufällige Teilmenge von Stationen
    als Ziel maskiert, die übrigen dienen als reale Nachbarn mit echten Messungen.
 
-> **Wichtige Einordnung — diese drei Ansprüche halten so nicht.** Die
-> Literatur-Einordnung in `story_positioning.md` §1.5–1.6 (196 + 62 gesichtete
-> Arbeiten, drei Suchkampagnen) hat sie einzeln widerlegt:
+> **Wichtige Einordnung — diese drei Ansprüche halten so nicht.** Ein Volltextdurchgang
+> durch die Primärquellen am 2026-08-04 hat sie einzeln geprüft. Das Ergebnis steht in
+> `story_positioning.md` §1.6; hier die Kurzfassung:
 >
-> - **(1) ist tot.** `zang2025dstg`, `jiang2023buaa` und `li2025tfdgcn` wenden DCRNN
->   bzw. MTGNN bereits auf Wind an. `li2025tfdgcn` belegt von dritter Seite, dass
->   beide die *akzeptierten starken Baselines* dieser Literatur sind — was der
->   bessere Verwendungszweck für sie ist.
-> - **(2) ist tot.** `low2026spatialsupport` (Juli 2026) modelliert jeden räumlichen
->   Trägertyp als eigene Knotenschicht in einem heterogenen Graphen **und**
->   kombiniert das mit induktivem Node-Masking; dazu `yang2025offgrid` v1 für
->   Gitterknoten. Urteil dort: nicht als eigenständige architektonische Novelty
->   beanspruchen.
-> - **(3) trägt nur verengt.** Tot sind auch „first inductive post-processing"
->   (`baran2024clustering` formuliert das Problem wörtlich, für dieselbe Variable
->   und eines der beiden NWP-Systeme), „first *learned* inductive post-processor"
->   (`cho2023downscaling`, `hou2026spatiotemporal`) und „first random node masking
->   in meteorology" (`li2023ssin`).
+> - **(1) trägt nicht**, aber anders als früher behauptet. `zang2025dstg`, `jiang2023buaa`
+>   und `li2025tfdgcn` wenden DCRNN bzw. MTGNN auf Wind an — aber alle drei sind
+>   **Leistungsprognose aus SCADA innerhalb von ein bis zwei Windparks**, ohne NWP-Input
+>   und ohne räumliche Generalisierung. Bei `zang2025dstg` sind die Knoten sogar
+>   *Variablen*, keine Orte. Sie taugen nicht als Prioritätsbeleg, wohl aber als **Beleg
+>   für die Lücke**: die gesamte GNN-für-Wind-Literatur ist SCADA-basiert, einzelparkbezogen
+>   und transduktiv.
+> - **(2) trägt nicht.** `yang2025offgrid` (JAMES 2025, peer-reviewed) baut genau diesen
+>   Graphen — Stationsknoten per Delaunay plus die 8 nächsten NWP-Gitterzellen als zweiten
+>   Knotentyp — für Wind, aus HRRR-Forecasts, mit Lead Times bis 48 h. **Aber: rein
+>   zeitlicher Split über dieselben 358 Stationen, und jede Zielstation bekommt ihre eigene
+>   Messhistorie als Input.** Die Architektur ist also besetzt, die Architektur **im
+>   induktiven Setting** nicht.
+> - **(3) trägt nur verengt.** Tot sind „first inductive post-processing"
+>   (`baran2024clustering`), „first *learned* inductive post-processor"
+>   (`cho2023downscaling`, `hou2026spatiotemporal`) und „first random node masking in
+>   meteorology" (`li2023ssin`, `low2026spatialsupport`).
 >
-> Was trägt, ist die **Kombination**: In der Tabelle in §1.6 ist diese Studie die
-> einzige Zeile mit lead-time-aufgelöstem, konvektionsauflösendem Forecast **und**
-> Windgeschwindigkeit — und die einzige, die live Nachbarmessungen liest *und*
-> einen Forecast konsumiert. Der größte unbesetzte Raum ist laut §1.6 die
-> systematische Frage, **wie weit die räumliche Generalisierung reicht**.
+> **Was stattdessen beansprucht wird** — die drei Contributions in `story_positioning.md`
+> §4, als Kette aufgebaut:
 >
-> **Die belastbare Erzählung steht in `story_positioning.md` §4, nicht hier.** Sie
-> ist bewusst ohne jedes „first to use X" formuliert und gibt zu jeder Contribution
-> ein Falsifikationsexperiment an. Achtung: Befund **R6** besagt, dass diese
-> Experimente im Code noch fehlen (siehe Abschnitt 9).
+> 1. **Das Problem benennen, formalisieren und vermessen.** Fünf Arbeiten aus vier
+>    Methodenfamilien erreichen das induktive Setting, ohne es je zu benennen; eine
+>    OpenAlex-Suche danach liefert ab 2022 **null** Treffer. Wir geben ihm einen Namen, das
+>    Evaluationsprotokoll und den ersten systematischen Benchmark für bodennahen Wind.
+> 2. **Was ein Beobachtungsnetz für einen Standort wert ist, der nicht darin liegt.** Die
+>    Zerlegung A/B/C ist an einer nie gemessenen Station **erschöpfend** — mit eigener
+>    Historie wäre sie es nicht, weshalb `yang2025offgrid` diese Frage trotz gleichen
+>    Graphen nicht stellen kann. Plus die Dosis-Wirkungs-Kurve über die Netzdichte.
+> 3. **Der Beleg an 13 realen Windparks.** Ein Windpark hat keine Messhistorie und wird nie
+>    eine haben — jedes Verfahren, das die eigene Historie des Zielorts liest, ist dort
+>    **konstruktionsbedingt unanwendbar**, `yang2025offgrid` eingeschlossen. Die induktive
+>    Fähigkeit ist damit die Anwendbarkeitsbedingung, nicht eine methodische Marotte.
+>
+> (2) sagt (3) quantitativ vorher — die Parks sitzen bei bekannter Nachbardichte. Trifft es
+> zu, ist das eine Konsistenzprüfung über zwei unabhängige Datenwelten.
+>
+> **Abhängigkeiten:** (1) ist ohne die QRF- und lokalen-MOS-Baselines hohl — Befund **R6**
+> ist damit Voraussetzung, nicht Kosmetik. (2) läuft als einzige schon vollständig; die
+> Ausdünnungskurve braucht zusätzlich den nie gelaufenen Eval-Pfad. (3) hängt an einer
+> Datenanfrage: die SCADA endet am 2024-06-01, also **innerhalb** des Trainingsfensters des
+> Windmodells. Geplanter Ersatz, falls sie scheitert: die sub-stündliche Variabilität
+> (`std_v_wind`) als neue Zielgröße.
 
 ---
 
