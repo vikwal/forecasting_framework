@@ -30,6 +30,7 @@ data:
             ]
   val_start:  '2024-08-01'   # Train davor, Validierung danach
   test_start: '2025-08-01'   # ab hier zurueckgehalten (finaler Test)
+  test_end: '2026-03-31'   # Grenze gegen NaN in ECMWF-Parquets ab 2026-05-01
   # Optional: restrict to a time window for evaluation (comment out to use all data)
   wind_parameter_path: 'data/stations_master.csv'
   interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'

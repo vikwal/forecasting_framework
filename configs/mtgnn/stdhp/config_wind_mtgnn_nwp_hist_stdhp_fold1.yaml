@@ -29,6 +29,7 @@ data:
             '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342']
   val_start:  '2024-08-01'   # Train davor, Validierung danach
   test_start: '2025-08-01'   # ab hier zurueckgehalten (finaler Test)
+  test_end: '2026-03-31'   # Grenze gegen NaN in ECMWF-Parquets ab 2026-05-01
   interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
   knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
   stations_master: 'data/stations_master.csv'

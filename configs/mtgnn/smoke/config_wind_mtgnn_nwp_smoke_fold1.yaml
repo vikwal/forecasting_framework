@@ -218,6 +218,7 @@ data:
   - '00342'
   val_start: '2024-08-01'
   test_start: '2025-08-01'
+  test_end: '2026-03-31'
   interpol_path: /mnt/lambda1/nvme1/synthetic/interpol/wind
   knnimputer_path: /mnt/lambda1/nvme1/synthetic/knnimputer/wind
   stations_master: data/stations_master.csv
