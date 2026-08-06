@@ -21,15 +21,32 @@ AGGREGATION CONVENTION — read this before quoting a number from this script's 
     more valid samples) dominate this number more than they do the per-station mean. The two
     numbers are reported side by side deliberately — they can and do diverge, and the paper needs
     to know which one is being quoted.
-  - Horizon / month / wind-speed-class curves are aggregated the same way: per fold from raw
-    residual sums, then averaged across the 3 folds for the "average" panel (fold counts equally,
-    not sample-weighted).
+  - Horizon / month / wind-speed-class curves use the POOLED convention WITHIN a fold (sqrt of
+    summed squared residuals over all stations of that fold), and only the across-fold step is
+    the same as above (each fold counts once). They are therefore NOT directly comparable to the
+    overview table's per-station-mean RMSE column: e.g. ICON-D2 sits at ~1.325 m/s per-station-
+    mean but at ~1.450 m/s pooled, and the horizon/month/ws-class figures show the pooled level.
+    Quote figure levels against the "RMSE pooled" column, never against the per-station column.
+  - SKILL AVERAGING: the skill / skill_nwp columns of the overview table are the mean over
+    stations of the PER-STATION skill (1 - rmse_station / rmse_ref_station), then the mean over
+    folds. That is NOT the same as 1 - mean(RMSE) / mean(RMSE_ref); the latter is systematically
+    ~0.02-0.03 higher here and even reorders WaveNet GRID vs. MTGNN GRID. The per-station mean is
+    what evaluate_reference.py / evaluation.py write into the CSVs, so it is what this table
+    reports; state the definition explicitly wherever a skill number is quoted.
   - ICON-D2 and Persistence are NOT separate model runs — there is no stdhp_*.csv for them. They
     are pseudo-models derived from the nwp_ref / pers_ref columns of the raw prediction parquets,
     which are per-construction on the same station set / time window / horizon grid as whichever
     model run they were saved alongside. Before using them the script verifies that nwp_ref /
-    pers_ref / gt are numerically identical across several variants of the same fold; if that
-    check fails it aborts loudly (SystemExit) instead of silently mixing disagreeing baselines.
+    pers_ref / gt are numerically identical across ALL available variants of the same fold; if
+    that check fails it aborts loudly (SystemExit) instead of silently mixing disagreeing
+    baselines.
+  - PAIRED ANALYSIS: differences are formed per (fold, station) via an explicit pivot join, never
+    positionally. The "pooled" rows concatenate the three folds' 51-station difference vectors
+    into one n=153 vector and bootstrap-resample stations from that pooled vector, i.e. the fold
+    structure is IGNORED in the pooled CI. Verified against a fold-stratified bootstrap (resample
+    51 stations within each fold, then concatenate): the CIs agree to <0.001 m/s here, so the
+    simplification is harmless for this data set — but it does not carry any between-fold
+    variance, and the per-fold rows are the place to look for that.
   - ECMWF is deliberately absent from every figure and table here. The only ECMWF reference CSVs
     on disk (data/test_results/ecmwf_fold{0,1}.csv) cover the 2025-08 to 2026-04 TEST window,
     while the stdhp runs cover the 2024-08 to 2025-08 VAL window — not comparable, see task notes
@@ -91,6 +108,17 @@ MODEL_COLORS = {
 }
 FOLD_COLORS = {0: "#1b9e77", 1: "#d95f02", 2: "#7570b3"}
 
+# Colour encodes the model, line style encodes the variant. Without the second channel the
+# 10 variants collapse onto 3 colours and e.g. "DCRNN GRID" and "DCRNN BASE" — the single most
+# important contrast in the ablation — are drawn as two identical solid blue lines.
+VARIANT_LINESTYLE = {
+    "BASE":         (0, (1, 1.2)),      # dotted
+    "GRID":         "solid",
+    "GRID-NOMEAS":  (0, (5, 2)),        # dashed
+    "GRID-NOGRAPH": (0, (3, 1.5, 1, 1.5)),  # dash-dot
+    "GRID+HIST":    (0, (7, 1.5, 1, 1.5, 1, 1.5)),  # long dash-dot-dot
+}
+
 WS_BINS = list(range(0, 22, 2))
 WS_LABELS = [f"[{WS_BINS[i]},{WS_BINS[i + 1]})" for i in range(len(WS_BINS) - 1)] + ["[20,inf)"]
 
@@ -149,20 +177,47 @@ def load_station_csvs(results_dir: Path) -> pd.DataFrame:
     return out
 
 
+def _assert_finite(df: pd.DataFrame, cols: list[str], what: str) -> None:
+    """
+    Abort if any of `cols` contains NaN/inf.
+
+    Rationale (paired comparisons): every downstream number here is either a paired per-station
+    difference between variants or a ratio against a reference derived from a *different* file.
+    Silently dropping non-finite rows would give each variant a slightly different sample set,
+    which biases exactly the A-B / B-C / A-C / A-BASE contrasts this script exists to produce.
+    The stdhp parquets are complete (51 stations x 1460 runs x 48 h = 3,574,080 rows, 0 NaN in
+    pred/gt/nwp_ref/pers_ref, verified), so hitting this is a signal that something upstream
+    changed — fail loudly rather than quietly re-defining the sample.
+    """
+    bad = {c: int((~np.isfinite(df[c].to_numpy(dtype=float))).sum()) for c in cols}
+    bad = {c: n for c, n in bad.items() if n}
+    if bad:
+        sys.exit(f"[FATAL] {what}: nicht-endliche Werte in {bad}. Ein stiller Drop wuerde die "
+                 f"Stichprobe zwischen Varianten unterschiedlich machen und alle gepaarten "
+                 f"Vergleiche verzerren -- Abbruch. Erst die Ursache upstream klaeren.")
+
+
 def _canonical_prefixes_for_fold(fold: int, raw_dir: Path) -> list[str]:
     return sorted(p for p in STDHP_META if (raw_dir / f"{p}_fold{fold}_raw.parquet").exists())
 
 
 def verify_and_derive_references(raw_dir: Path, folds=FOLDS, atol: float = 1e-4,
-                                  n_check_files: int = 3) -> pd.DataFrame:
+                                  n_check_files: int | None = None) -> pd.DataFrame:
     """
     For each fold: verify that gt / nwp_ref / pers_ref are numerically identical (within `atol`)
-    across several stdhp raw parquets of that fold — they are supposed to be, since they depend
+    across the stdhp raw parquets of that fold — they are supposed to be, since they depend
     only on the (station, valid_time, horizon) grid, not on the model that was trained. Then
     derive per-station ICON-D2 and Persistence metrics from one canonical file per fold.
 
-    Aborts with SystemExit (clear message) if the identity assumption is violated — per task
-    instructions, do NOT silently average over disagreeing baselines.
+    `n_check_files=None` (default) checks EVERY other variant of the fold. Do not lower this to a
+    small number: the prefix list is sorted alphabetically, so a truncated check only ever covers
+    the DCRNN family (stdhp_dcrnn_*) and never reaches stdhp_mtgnn_* / stdhp_wavenet_*, which run
+    through a different get_test_results_*.py and are exactly where a divergent nwp_ref/pers_ref
+    would first show up. A truncated check would therefore pass while proving nothing about the
+    variants it skipped.
+
+    Aborts with SystemExit (clear message) if the identity assumption is violated — do NOT
+    silently average over disagreeing baselines.
     """
     ref_rows = []
     for fold in folds:
@@ -172,8 +227,9 @@ def verify_and_derive_references(raw_dir: Path, folds=FOLDS, atol: float = 1e-4,
         canon_path = raw_dir / f"{prefixes[0]}_fold{fold}_raw.parquet"
         canon = pd.read_parquet(canon_path, columns=["station_id", "valid_time", "horizon", "gt", "nwp_ref", "pers_ref"])
         canon["station_id"] = canon["station_id"].map(norm_station)
+        _assert_finite(canon, ["gt", "nwp_ref", "pers_ref"], f"{prefixes[0]}_fold{fold}")
 
-        check_prefixes = prefixes[1:1 + n_check_files]
+        check_prefixes = prefixes[1:] if n_check_files is None else prefixes[1:1 + n_check_files]
         for other_prefix in check_prefixes:
             other_path = raw_dir / f"{other_prefix}_fold{fold}_raw.parquet"
             other = pd.read_parquet(other_path, columns=["station_id", "valid_time", "horizon", "gt", "nwp_ref", "pers_ref"])
@@ -195,15 +251,22 @@ def verify_and_derive_references(raw_dir: Path, folds=FOLDS, atol: float = 1e-4,
               f"{1 + len(check_prefixes)} geprueften Varianten (kanonisch: {prefixes[0]}).")
 
         for ref_col, model_name in [("nwp_ref", "ICON-D2"), ("pers_ref", "Persistence")]:
-            err = (canon[ref_col] - canon["gt"]).values
-            tmp = pd.DataFrame({"station_id": canon["station_id"], "err": err, "gt": canon["gt"].values})
+            err = (canon[ref_col] - canon["gt"]).to_numpy()
+            tmp = pd.DataFrame({"station_id": canon["station_id"].to_numpy(),
+                                "err": err, "gt": canon["gt"].to_numpy()})
 
             def _agg(g):
-                sse = float((g["err"] ** 2).sum())
-                n = len(g)
-                mae = float(g["err"].abs().mean())
+                # NB: _assert_finite() above guarantees there are no NaN left here, so numpy sums
+                # (which propagate NaN) and n = len(g) refer to the same rows. Never mix a
+                # skipna pandas sum with n = len(g) — that silently divides a partial SSE by the
+                # full row count and reports an RMSE that is biased LOW.
+                e = g["err"].to_numpy()
+                n = e.size
+                sse = float(np.sum(e ** 2))
+                mae = float(np.mean(np.abs(e))) if n else np.nan
                 rmse = float(np.sqrt(sse / n)) if n else np.nan
-                ss_tot = float(((g["gt"] - g["gt"].mean()) ** 2).sum())
+                gt = g["gt"].to_numpy()
+                ss_tot = float(np.sum((gt - gt.mean()) ** 2))
                 r2 = 1.0 - sse / ss_tot if ss_tot > 0 else np.nan
                 return pd.Series({"rmse": rmse, "mae": mae, "r2": r2, "n_samples": n})
 
@@ -247,6 +310,7 @@ def scan_raw_parquets(raw_dir: Path, folds=FOLDS):
     station_rows = []
     ref_bucket_rows = {"horizon": [], "month": [], "ws_bin": []}
     ref_station_rows = []
+    unbinned_rows = []
     seen_ref_fold = set()
 
     files = [(prefix, meta, fold)
@@ -260,8 +324,16 @@ def scan_raw_parquets(raw_dir: Path, folds=FOLDS):
             continue
         df = pd.read_parquet(path, columns=RAW_COLUMNS)
         df["station_id"] = df["station_id"].map(norm_station)
+        _assert_finite(df, ["pred", "gt", "nwp_ref", "pers_ref"], f"{prefix}_fold{fold}")
         df["month"] = pd.to_datetime(df["valid_time"]).dt.month
+        # gt < 0 falls outside every bin and would be dropped by the observed=True groupby below,
+        # i.e. the ws-class figure would silently score fewer samples than the overview table.
+        # Count them so the discrepancy is visible instead of invisible.
         df["ws_bin"] = pd.cut(df["gt"], bins=WS_BINS + [np.inf], labels=WS_LABELS, right=False)
+        n_unbinned = int(df["ws_bin"].isna().sum())
+        if n_unbinned:
+            unbinned_rows.append({"model": model, "variant": variant, "fold": fold,
+                                  "n_unbinned": n_unbinned, "gt_min": float(df["gt"].min())})
 
         err = (df["pred"] - df["gt"]).to_numpy()
         sq, ab = err ** 2, np.abs(err)
@@ -302,7 +374,15 @@ def scan_raw_parquets(raw_dir: Path, folds=FOLDS):
     def _cat(rows):
         return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
+    if unbinned_rows:
+        ub = pd.DataFrame(unbinned_rows)
+        print(f"[WARN] {int(ub['n_unbinned'].sum())} Zeilen mit gt < 0 (min {ub['gt_min'].min():.2f} m/s) "
+              f"fallen in KEINE Windklasse und fehlen daher nur in 05_error_by_windspeed_class -- "
+              f"die Uebersichtstabelle und alle anderen Figuren enthalten sie. Nicht-physikalische "
+              f"Messwerte upstream, siehe stations_unbinned_gt.csv.")
+
     return {
+        "unbinned": pd.DataFrame(unbinned_rows),
         "pooled": pd.DataFrame(pooled_rows),
         "horizon": _cat(bucket_rows["horizon"]),
         "month": _cat(bucket_rows["month"]),
@@ -332,6 +412,30 @@ def build_overview_table(station_df: pd.DataFrame, pooled_df: pd.DataFrame | Non
         rows.append(row)
 
     out = pd.DataFrame(rows)
+
+    # ── The OTHER skill definition, reported side by side ────────────────────────────────
+    # skill_mean / skill_nwp_mean above are  mean_over_stations(1 - rmse_s / rmse_ref_s).
+    # The columns below are                  1 - mean_over_stations(rmse_s) / mean_over_stations(rmse_ref_s),
+    # both averaged over folds afterwards. These are NOT the same number (Jensen: the ratio of
+    # means ignores the covariance between a station's model error and its reference error) and
+    # they do not even induce the same ranking here — WaveNet GRID and MTGNN GRID swap places.
+    # Whichever goes into the paper must be named in the caption; they are exported together so
+    # the discrepancy can never be discovered only after submission.
+    ref_fold_rmse = (station_df[station_df["variant"] == "REF"]
+                     .groupby(["model", "fold"])["rmse"].mean())
+    if not ref_fold_rmse.empty:
+        model_fold_rmse = station_df.groupby(["model", "variant", "fold"])["rmse"].mean()
+        for ref_model, out_col in [("ICON-D2", "skill_nwp_ratio_mean"), ("Persistence", "skill_ratio_mean")]:
+            if ref_model not in ref_fold_rmse.index.get_level_values("model"):
+                continue
+            ref_by_fold = ref_fold_rmse.xs(ref_model, level="model")
+
+            def _ratio_skill(r, ref_by_fold=ref_by_fold):
+                per_fold = [1.0 - model_fold_rmse.get((r["model"], r["variant"], f), np.nan) / ref_by_fold.get(f, np.nan)
+                            for f in FOLDS]
+                return float(np.nanmean(per_fold)) if np.any(np.isfinite(per_fold)) else np.nan
+
+            out[out_col] = out.apply(_ratio_skill, axis=1)
 
     if pooled_df is not None and not pooled_df.empty:
         pooled_df = pooled_df.copy()
@@ -364,6 +468,11 @@ def overview_markdown(overview: pd.DataFrame) -> str:
         "Skill vs Persistence": [fmt(m, s) for m, s in zip(overview["skill_mean"], overview["skill_sd"])],
         "Skill vs ICON-D2": [fmt(m, s) for m, s in zip(overview["skill_nwp_mean"], overview["skill_nwp_sd"])],
     })
+    # Both skill definitions in the same table — see build_overview_table() for why they differ.
+    for col, header in [("skill_ratio_mean", "Skill vs Pers (ratio of means)"),
+                        ("skill_nwp_ratio_mean", "Skill vs ICON-D2 (ratio of means)")]:
+        if col in overview.columns:
+            disp[header] = [f"{v:.4f}" if pd.notna(v) else "--" for v in overview[col]]
     if "pooled_rmse_mean" in overview.columns:
         disp["RMSE pooled (mean+/-sd)"] = [fmt(m, s) for m, s in
                                             zip(overview["pooled_rmse_mean"], overview["pooled_rmse_sd"])]
@@ -379,14 +488,23 @@ def fig_bar_rmse(overview: pd.DataFrame, out_dir: Path, formats):
     df["label"] = df["model"] + " " + df["variant"]
     df = df.sort_values("rmse_mean")
 
+    # ICON-D2 / Persistence are references, not trained models — they must not be painted in the
+    # "inductive model" colour, otherwise the legend asserts something false about them.
+    is_ref = df["variant"].eq("REF").to_numpy()
     fig, ax = plt.subplots(figsize=(max(10, len(df) * 0.9), 6))
     x = np.arange(len(df))
-    colors = ["#c44e52" if t else "steelblue" for t in df["transductive"]]
-    hatches = ["//" if t else "" for t in df["transductive"]]
+    colors = ["#888888" if r else ("#c44e52" if t else "steelblue")
+              for r, t in zip(is_ref, df["transductive"])]
+    hatches = ["" if r else ("//" if t else "") for r, t in zip(is_ref, df["transductive"])]
     bars = ax.bar(x, df["rmse_mean"], yerr=df["rmse_sd"], capsize=4, color=colors,
                   edgecolor="white", linewidth=0.6, error_kw={"elinewidth": 1.3, "alpha": 0.75})
     for bar, h in zip(bars, hatches):
         bar.set_hatch(h)
+    # Persistence sits ~1 m/s above everything else and flattens the model bars into a
+    # visually identical row. Annotate the values so the ranking stays readable.
+    for xi, v in zip(x, df["rmse_mean"]):
+        ax.annotate(f"{v:.3f}", (xi, v), textcoords="offset points", xytext=(0, 12),
+                    ha="center", fontsize=8, rotation=90)
 
     ax.set_xticks(x)
     ax.set_xticklabels(df["label"], rotation=40, ha="right", fontsize=10)
@@ -396,9 +514,11 @@ def fig_bar_rmse(overview: pd.DataFrame, out_dir: Path, formats):
 
     from matplotlib.patches import Patch
     legend_handles = [
-        Patch(facecolor="steelblue", label="Inductive (target station unseen in training)"),
+        Patch(facecolor="steelblue", label="Inductive model (target station unseen in training)"),
         Patch(facecolor="#c44e52", hatch="//", label="GRID+HIST — transductive, sees target-station\n"
                                                        "history — NOT an inductive comparison point"),
+        Patch(facecolor="#888888", label="Reference, not a trained model\n"
+                                          "(ICON-D2 nwp_ref / temporal persistence pers_ref)"),
     ]
     ax.legend(handles=legend_handles, loc="upper left", fontsize=9, framealpha=0.9)
     plt.tight_layout()
@@ -445,6 +565,14 @@ def paired_diff_analysis(station_df: pd.DataFrame, n_boot: int = 10000, seed: in
                         (station_df["variant"].isin(["GRID", "GRID-NOMEAS", "GRID-NOGRAPH", "BASE"]))].copy()
     letter_of_variant = {"GRID": "A", "GRID-NOMEAS": "B", "GRID-NOGRAPH": "C", "BASE": "BASE"}
     dcrnn["letter"] = dcrnn["variant"].map(letter_of_variant)
+    # pivot_table's default aggfunc="mean" would silently average duplicate (fold, station,
+    # variant) rows instead of failing — a duplicated CSV would then look like a valid pairing.
+    dup = dcrnn.duplicated(["fold", "station_id", "letter"]).sum()
+    if dup:
+        sys.exit(f"[FATAL] {dup} doppelte (fold, station, variant)-Zeilen in den stdhp-CSVs. "
+                 f"Die gepaarte Analyse wuerde sie stillschweigend mitteln -- Abbruch.")
+    # Pairing is an explicit join on (fold, station_id): variant A and variant B are only ever
+    # compared at the same station of the same spatial fold, never by row position.
     pivot = dcrnn.pivot_table(index=["fold", "station_id"], columns="letter", values="rmse")
 
     rng = np.random.default_rng(seed)
@@ -471,12 +599,22 @@ def paired_diff_analysis(station_df: pd.DataFrame, n_boot: int = 10000, seed: in
 
 
 def _diff_stats(pair_label, fold_label, d, rng, n_boot):
+    """
+    d = per-station RMSE(first variant) - RMSE(second variant); NEGATIVE means the first-named
+    variant is better (lower RMSE). Wilcoxon and the bootstrap operate on exactly this one
+    paired vector, so p-value, CI and mean_diff_rmse always refer to the same sign convention.
+    """
     if np.any(d != 0):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            stat, p = stats.wilcoxon(d)
+            # Explicit: two-sided (we do not assume a direction a priori), zeros discarded
+            # (scipy's "wilcox" default) — spelled out so a scipy default change cannot
+            # silently alter published p-values.
+            stat, p = stats.wilcoxon(d, zero_method="wilcox", alternative="two-sided")
     else:
         p = np.nan
+    # Bootstrap unit = the paired station difference, resampled with replacement. Resampling the
+    # two variants independently would destroy the pairing and inflate the CI.
     boot_idx = rng.integers(0, len(d), size=(n_boot, len(d)))
     boot_means = d[boot_idx].mean(axis=1)
     ci_lo, ci_hi = np.percentile(boot_means, [2.5, 97.5])
@@ -503,9 +641,13 @@ def fig_paired_diff_boxplots(station_df: pd.DataFrame, out_dir: Path, formats):
         ax.axhline(0, color="gray", linewidth=1, linestyle="--")
         ax.boxplot(box_data, labels=[f"Fold {f}" for f in FOLDS], showfliers=False, patch_artist=True,
                    boxprops=dict(facecolor="#a6cee3", alpha=0.7))
+        # Place the annotation in axes coordinates: ax.get_ylim() grows while the shared y axis is
+        # still being autoscaled, so a data-coordinate offset ends up at a different height in
+        # every panel and can collide with the whiskers.
         for i, d in enumerate(box_data, start=1):
             frac = float((d < 0).mean())
-            ax.text(i, ax.get_ylim()[1] * 0.9, f"{frac * 100:.0f}% improved", ha="center", fontsize=8)
+            ax.text(i, 1.02, f"{frac * 100:.0f}% improved", ha="center", fontsize=8,
+                    transform=ax.get_xaxis_transform())
         ax.set_title(f"{ABLATION_LETTER_LABEL[a]} minus {ABLATION_LETTER_LABEL[b]}", fontsize=11)
         ax.tick_params(axis="x", rotation=20)
     axes[0].set_ylabel("Per-station RMSE difference (m/s)\nnegative = first variant better", fontsize=10)
@@ -552,8 +694,8 @@ def fig_horizon_error(raw_bundle: dict, out_dir: Path, formats):
             if y is None:
                 continue
             ax.plot(y.index.to_numpy(), y.to_numpy(), label=f"{model} {variant}", linewidth=1.6,
-                    color=MODEL_COLORS.get(model), alpha=0.5 if variant not in ("GRID", "BASE") else 0.95,
-                    linestyle="--" if is_transductive(model, variant) else "-")
+                    color=MODEL_COLORS.get(model), alpha=0.9,
+                    linestyle=VARIANT_LINESTYLE.get(variant, "solid"))
         for ref_model in ["ICON-D2", "Persistence"]:
             piv = _ref_rmse_by_key(ref_horizon_df, ref_model, "horizon")
             if piv is None:
@@ -569,7 +711,10 @@ def fig_horizon_error(raw_bundle: dict, out_dir: Path, formats):
     axes[0].set_ylabel("RMSE (m/s)", fontsize=11)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=6, fontsize=8.5)
-    fig.suptitle("RMSE by forecast horizon — all stdhp variants + ICON-D2 + Persistence", fontsize=13, y=1.25)
+    fig.suptitle("RMSE by forecast horizon — all stdhp variants + ICON-D2 + Persistence\n"
+                 "(pooled over the 51 stations within each fold — NOT the per-station mean of the "
+                 "overview table; ICON-D2 sits ~0.12 m/s higher here for that reason)",
+                 fontsize=12, y=1.30)
     plt.tight_layout()
     for fmt in formats:
         fig.savefig(out_dir / f"04_error_by_horizon.{fmt}", dpi=150, bbox_inches="tight")
@@ -599,14 +744,17 @@ def fig_error_by_ws_class(raw_bundle, out_dir, formats):
     series = _important_series(raw_bundle["ws_bin"], raw_bundle["ref_ws_bin"], "ws_bin", order=WS_LABELS)
     fig, ax = plt.subplots(figsize=(11, 5.5))
     for name, y in series.items():
-        model = name.split(" ")[0]
+        model, _, variant = name.partition(" ")
         ax.plot(range(len(WS_LABELS)), y.values, marker="o", label=name,
-                color=MODEL_COLORS.get(model, None), linewidth=2)
+                color=MODEL_COLORS.get(model, None), linewidth=2,
+                linestyle=VARIANT_LINESTYLE.get(variant, "solid"))
     ax.set_xticks(range(len(WS_LABELS)))
     ax.set_xticklabels(WS_LABELS, rotation=45, ha="right")
-    ax.set_xlabel("Wind speed class (m/s), ground truth, left-inclusive")
-    ax.set_ylabel("RMSE (m/s)")
-    ax.set_title("RMSE by wind-speed class — key variants (averaged over 3 folds)")
+    ax.set_xlabel("Wind speed class (m/s), ground truth, left-inclusive; last class is open-ended")
+    ax.set_ylabel("RMSE (m/s), pooled within fold")
+    ax.set_title("RMSE by wind-speed class — key variants (averaged over 3 folds)\n"
+                 "Binned on the GROUND TRUTH, so each class is conditioned on the observation; "
+                 "gt < 0 (non-physical, upstream) falls in no class and is excluded here only.")
     ax.legend(fontsize=9)
     ax.grid(alpha=0.3)
     plt.tight_layout()
@@ -620,11 +768,12 @@ def fig_error_by_month(raw_bundle, out_dir, formats):
     series = _important_series(raw_bundle["month"], raw_bundle["ref_month"], "month", order=months)
     fig, ax = plt.subplots(figsize=(11, 5.5))
     for name, y in series.items():
-        model = name.split(" ")[0]
-        ax.plot(months, y.values, marker="o", label=name, color=MODEL_COLORS.get(model, None), linewidth=2)
+        model, _, variant = name.partition(" ")
+        ax.plot(months, y.values, marker="o", label=name, color=MODEL_COLORS.get(model, None),
+                linewidth=2, linestyle=VARIANT_LINESTYLE.get(variant, "solid"))
     ax.set_xticks(months)
-    ax.set_xlabel("Month")
-    ax.set_ylabel("RMSE (m/s)")
+    ax.set_xlabel("Month (calendar month of valid_time, UTC)")
+    ax.set_ylabel("RMSE (m/s), pooled within fold")
     ax.set_title("RMSE by calendar month — key variants (averaged over 3 folds)\n"
                  "Note: months are pooled across all 3 folds' val windows (Aug 2024-Aug 2025)")
     ax.legend(fontsize=9)
@@ -707,6 +856,33 @@ def fig_skill_distribution(station_df: pd.DataFrame, out_dir: Path, formats):
 # ─────────────────────────────────────────────────────────────────────────────
 # Extra tables: stations with skill_nwp <= 0
 # ─────────────────────────────────────────────────────────────────────────────
+def _crosscheck_csv_vs_raw(csv_station_df: pd.DataFrame, raw_station_df: pd.DataFrame,
+                            atol: float = 1e-6) -> None:
+    """
+    The overview table is built from the stdhp_*.csv per-station metrics; every stratified figure
+    is built from the raw parquets. Both must describe the same sample. Compare the CSV `rmse`
+    against sqrt(SSE/n) recomputed from the parquet of the same (model, variant, fold, station).
+    """
+    if raw_station_df.empty:
+        return
+    raw = raw_station_df.copy()
+    raw["rmse_raw"] = np.sqrt(raw["sse"] / raw["n"])
+    merged = csv_station_df.merge(raw[["model", "variant", "fold", "station_id", "rmse_raw", "n"]],
+                                  on=["model", "variant", "fold", "station_id"], how="inner")
+    if len(merged) != len(csv_station_df):
+        warnings.warn(f"CSV/Parquet-Abgleich: nur {len(merged)} von {len(csv_station_df)} "
+                      f"Stationszeilen haben ein Gegenstueck im Rohparquet.")
+    d = (merged["rmse"] - merged["rmse_raw"]).abs()
+    n_mismatch = int((merged["n_samples"] != merged["n"]).sum())
+    if float(d.max()) > atol or n_mismatch:
+        sys.exit(f"[FATAL] CSV-RMSE und aus dem Rohparquet nachgerechnetes RMSE weichen um bis zu "
+                 f"{float(d.max()):.3g} ab ({n_mismatch} Zeilen mit abweichender Samplezahl). "
+                 f"Uebersichtstabelle und stratifizierte Figuren wuerden verschiedene Stichproben "
+                 f"beschreiben -- Abbruch.")
+    print(f"[OK] CSV-RMSE == sqrt(SSE/n) aus den Rohparquets fuer alle {len(merged)} "
+          f"(variant, fold, station)-Zeilen (max. Abweichung {float(d.max()):.2g}).")
+
+
 def stations_below_icon_table(station_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for (model, variant), g in station_df.groupby(["model", "variant"]):
@@ -757,6 +933,13 @@ ECMWF is not included anywhere here: the only ECMWF reference CSVs on disk cover
 
 - `overview_table.md` / `.csv` — per-variant RMSE/MAE/R2/skill vs. Persistence/skill vs. ICON-D2,
   mean +/- SD over the 3 folds, plus per-fold values and the pooled-RMSE variant.
+  TWO skill definitions are exported side by side: the "Skill vs ..." columns are the mean over
+  stations of the per-station skill (what evaluation.py writes into the CSVs), the
+  "... (ratio of means)" columns are 1 - mean(RMSE)/mean(RMSE_ref). They differ by ~0.02-0.03 and
+  reorder WaveNet GRID vs. MTGNN GRID — name the one you quote in the caption.
+- `stations_unbinned_gt.csv` — rows whose ground truth is < 0 m/s and therefore falls into no
+  wind-speed class. Non-physical measurements from upstream; they ARE scored everywhere except
+  in `05_error_by_windspeed_class`.
 - `paired_diff_stats.md` / `.csv` — mean RMSE difference, 95% bootstrap CI, Wilcoxon signed-rank
   p-value and share of stations improved, per fold and pooled, for A-B / B-C / A-C / A-BASE.
 - `stations_below_icon.md` / `.csv` — number and share of (up to 153) station-fold pairs per
@@ -803,6 +986,14 @@ def main():
                       .agg(sse=("sse", "sum"), n=("n", "sum")).reset_index())
         ref_pooled["variant"] = "REF"
         raw_bundle["pooled"] = pd.concat([raw_bundle["pooled"], ref_pooled], ignore_index=True)
+        if not raw_bundle["unbinned"].empty:
+            raw_bundle["unbinned"].to_csv(args.out_dir / "stations_unbinned_gt.csv", index=False)
+
+        # Cross-check: the per-station RMSE the CSVs carry must equal sqrt(SSE/n) recomputed from
+        # the raw parquets. If evaluate()'s NaN masking ever diverges from the raw files, the
+        # overview table (CSV-based) and every raw-based figure would silently describe different
+        # samples. Catch that here instead of in review.
+        _crosscheck_csv_vs_raw(station_df, raw_bundle["station"])
     else:
         print("[2/6] --skip-raw: no ICON-D2/Persistence reference rows, no pooled RMSE, no raw-based figures.")
         station_df_full = station_df
