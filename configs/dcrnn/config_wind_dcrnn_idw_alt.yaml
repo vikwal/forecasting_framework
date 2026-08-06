@@ -199,6 +199,31 @@ dcrnn:
         low: 4
         high: 32
 
+      # Inverse-Distanz-Exponent (nwp_attention.py). Untergrenze deutlich ueber
+      # 0, weil p=0 ein ungewichtetes Mittel und p<0 die Gewichtung umkehren
+      # wuerde (validate_idw_p faengt das ab, der Suchraum soll dort gar nicht
+      # erst hingreifen); 4.0 liegt weit ueber den in der Literatur ueblichen
+      # 1-3 -- die alte Float32-Ueberlaufschranke _IDW_P_MAX ist mit der
+      # Umnormierung auf die stationsweise Minimaldistanz entfallen, es gibt
+      # also keine numerische Obergrenze mehr, die den Suchraum einengt.
+      idw_p:
+        type: float
+        low: 0.5
+        high: 4.0
+
+      # Vertikal/horizontal-Verhaeltnis in d3d = sqrt(d^2 + (alpha_alt*dalt)^2)
+      # (nwp_attention.py). Kalibriert an der gemessenen Delta-Alt/Distanz-
+      # Verteilung des echten Graphen: bei alpha_alt=10 liegt der vertikale
+      # Term im Median bei 6.5 % (ICON-D2) / 2.0 % (ECMWF) der horizontalen
+      # Distanz, bei alpha_alt=50 schon bei 22 % / 6 % -- dort ist es keine
+      # Korrektur mehr, sondern eine Hoehen-Rangfolge. Unter 1 waere die
+      # Korrektur bedeutungslos (vertikaler Term < 0.1 % der Distanz im
+      # ICON-D2-Median).
+      alpha_alt:
+        type: float
+        low: 1.0
+        high: 30.0
+
       dropout:
         type: float
         low: 0.0

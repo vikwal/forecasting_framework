@@ -200,6 +200,18 @@ dcrnn:
         low: 4
         high: 32
 
+      # Inverse-Distanz-Exponent (nwp_attention.py). Untergrenze deutlich ueber
+      # 0, weil p=0 ein ungewichtetes Mittel und p<0 die Gewichtung umkehren
+      # wuerde (validate_idw_p faengt das ab, der Suchraum soll dort gar nicht
+      # erst hingreifen); 4.0 liegt weit ueber den in der Literatur ueblichen
+      # 1-3 -- die alte Float32-Ueberlaufschranke _IDW_P_MAX ist mit der
+      # Umnormierung auf die stationsweise Minimaldistanz entfallen, es gibt
+      # also keine numerische Obergrenze mehr, die den Suchraum einengt.
+      idw_p:
+        type: float
+        low: 0.5
+        high: 4.0
+
       dropout:
         type: float
         low: 0.0

@@ -219,7 +219,7 @@ WS_BINS = list(range(0, 22, 2))
 WS_LABELS = [f"[{WS_BINS[i]},{WS_BINS[i + 1]})" for i in range(len(WS_BINS) - 1)] + ["[20,inf)"]
 
 # run_time added (beyond what the graph-only script originally needed) so the (station_id,
-# run_time, horizon) row identity used for the 12-variant intersection (see
+# run_time, horizon) row identity used for the 14-variant intersection (see
 # build_intersection_keys()/_composite_key()) and for the TFT pers_ref borrow/nwp_ref cross-check
 # (scan_tft_raw_parquets()) is available directly from this same single read -- no second pass.
 RAW_COLUMNS = ["station_id", "run_time", "valid_time", "horizon", "pred", "gt", "nwp_ref", "pers_ref"]
@@ -611,7 +611,7 @@ def verify_and_derive_references(raw_dir: Path, folds=FOLDS, atol: float = 1e-4,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1c) 12-variant row intersection (TFT's sample differs from the graph models' -- see the module
+# 1c) 14-variant row intersection (TFT's sample differs from the graph models' -- see the module
 #     docstring's TFT section -- so a like-for-like comparison needs the common
 #     (station_id, run_time, horizon) rows, not each variant's own sample).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -621,8 +621,8 @@ def build_graph_canonical_keys(raw_dir: Path, mask: dict, folds=FOLDS, keep_impu
     (station_id, run_time, horizon) grid and gt/nwp_ref/pers_ref values are already verified
     identical across all 10 in verify_and_derive_references()), apply the imputed-hour filter, and
     return the filtered (station_id, run_time, horizon, valid_time, gt, nwp_ref, pers_ref) frame.
-    Because all 10 graph variants share one identical post-filter grid (see
-    _verify_uniform_filtering()), this single frame doubles as (a) the graph side of the 12-variant
+    Because all 12 graph variants share one identical post-filter grid (see
+    _verify_uniform_filtering()), this single frame doubles as (a) the graph side of the 14-variant
     row intersection (build_intersection_keys()) and (b) the source TFT's pers_ref is borrowed
     from and its nwp_ref is cross-checked against (scan_tft_raw_parquets()).
     """
@@ -686,8 +686,8 @@ def _composite_key(df: pd.DataFrame) -> np.ndarray:
 
 def build_intersection_keys(graph_canon: dict, tft_keys_by_fold_variant: dict, folds=FOLDS) -> dict:
     """
-    Per fold: the (station_id, run_time, horizon) triplets present in ALL 12 variants (10 graph +
-    TFT base + TFT hist) after imputed-hour filtering -- task B's "Schnittmenge". The 10 graph
+    Per fold: the (station_id, run_time, horizon) triplets present in ALL 14 variants (12 graph +
+    TFT base + TFT hist) after imputed-hour filtering -- task B's "Schnittmenge". The 12 graph
     variants already share one identical filtered grid (build_graph_canonical_keys()), so this
     reduces to graph_keys ∩ tft_base_keys ∩ tft_hist_keys per fold. Returns {fold: set(int64)}
     (a plain Python set, used via np.isin(..., np.array(sorted(...))) at the call sites for
@@ -849,7 +849,7 @@ def scan_raw_parquets(raw_dir: Path, mask: dict, folds=FOLDS, keep_imputed: bool
         gst["model"], gst["variant"], gst["fold"] = model, variant, fold
         station_rows.append(gst)
 
-        # ---- Stage 3 (task B): restricted to the 12-variant (station, run_time, horizon)
+        # ---- Stage 3 (task B): restricted to the 14-variant (station, run_time, horizon)
         # intersection of this fold -- the sample the paper's reported numbers use by default
         # (--intersect-only). ----
         if intersect_arr is not None:
@@ -903,7 +903,7 @@ def scan_tft_raw_parquets(raw_dir: Path, mask: dict, graph_canon: dict, intersec
     function rather than folded into scan_raw_parquets() because TFT's files break several
     assumptions that function relies on: different filename scheme and 1-based fold numbering
     (TFT_META/TFT_FOLD_OFFSET), different station-id format ("synth_00161.csv", see
-    norm_station()), and -- unlike the 10 graph variants -- TFT's own sample is NOT the shared
+    norm_station()), and -- unlike the 12 graph variants -- TFT's own sample is NOT the shared
     full (station, run_time, horizon) grid (see the module docstring's TFT section: TFT reads raw
     station measurements directly, `raw_station_source: true`, no interpol_path/knnimputer_path,
     so it drops any run/station whose lookback or target touches a raw measurement gap instead of
@@ -921,7 +921,7 @@ def scan_tft_raw_parquets(raw_dir: Path, mask: dict, graph_canon: dict, intersec
 
     Returns a bundle shaped like a subset of scan_raw_parquets()'s: pooled, horizon, month,
     ws_bin, station (own-sample filtered), station_full (own-sample unfiltered), station_intersect
-    (Stage 3, 12-variant intersection), nwp_ref_check.
+    (Stage 3, 14-variant intersection), nwp_ref_check.
     """
     pooled_rows = []
     bucket_rows = {"horizon": [], "month": [], "ws_bin": []}
@@ -1090,7 +1090,7 @@ def build_overview_table(station_df: pd.DataFrame, pooled_df: pd.DataFrame | Non
                           station_df_ownfiltered: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     `station_df` is the PRIMARY sample the un-suffixed columns (rmse_mean, ...) report -- by
-    default (--intersect-only) this is Stage 3, the 12-variant row intersection (task B); with
+    default (--intersect-only) this is Stage 3, the 14-variant row intersection (task B); with
     --intersect-only disabled it is Stage 2, each variant's own imputed-hour-filtered sample (the
     graph-only script's original meaning). Two comparison stages are added alongside, task B's
     "drei Stufen nebeneinander", so the size of each filtering step stays visible in one table
@@ -1267,22 +1267,42 @@ def fig_bar_rmse(overview: pd.DataFrame, out_dir: Path, formats):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4) Fold-dispersion parallel-coordinates plot for the 4 DCRNN ablations
+# 4) Fold-dispersion parallel-coordinates plot for the DCRNN ablation ladder
+#    (6 rungs: A/GRID, B/GRID-NOMEAS, C/GRID-NOGRAPH, D/GRID-IDW,
+#    D'/GRID-IDW-ALT, BASE -- see ABLATION_LETTER_LABEL)
 # ─────────────────────────────────────────────────────────────────────────────
+# Order + colours for fig_fold_dispersion, ColorBrewer Dark2 (colourblind-safe),
+# continued for D/D' with the palette's next two entries. Kept separate from
+# ABLATION_LETTER_LABEL's dict (whose order is "ladder rung order", not
+# necessarily "plot legend order") so this figure's presentation is an
+# explicit choice, not an accident of insertion order elsewhere.
+_FOLD_DISPERSION_ORDER = ["GRID", "GRID-NOMEAS", "GRID-NOGRAPH", "GRID-IDW", "GRID-IDW-ALT", "BASE"]
+_FOLD_DISPERSION_COLORS = {
+    "GRID": "#1b9e77", "GRID-NOMEAS": "#d95f02", "GRID-NOGRAPH": "#7570b3",
+    "GRID-IDW": "#e7298a", "GRID-IDW-ALT": "#66a61e", "BASE": "#888888",
+}
+
+
 def fig_fold_dispersion(station_df: pd.DataFrame, out_dir: Path, formats):
     dcrnn = station_df[(station_df["model"] == "DCRNN") &
-                        (station_df["variant"].isin(["GRID", "GRID-NOMEAS", "GRID-NOGRAPH", "BASE"]))]
+                        (station_df["variant"].isin(_FOLD_DISPERSION_ORDER))]
     fig, ax = plt.subplots(figsize=(7, 5.5))
-    order = ["GRID", "GRID-NOMEAS", "GRID-NOGRAPH", "BASE"]
-    colors = {"GRID": "#1b9e77", "GRID-NOMEAS": "#d95f02", "GRID-NOGRAPH": "#7570b3", "BASE": "#888888"}
-    for variant in order:
+    # Rungs without data yet (e.g. D/D' before their stdhp runs exist) would
+    # otherwise plot an all-NaN line and an "nan" annotation -- skip them
+    # instead, same reasoning as fig_paired_diff_boxplots.
+    present = [v for v in _FOLD_DISPERSION_ORDER if not dcrnn[dcrnn["variant"] == v].empty]
+    missing = [v for v in _FOLD_DISPERSION_ORDER if v not in present]
+    if missing:
+        print(f"[fig_fold_dispersion] no data yet for {missing} -- plotting only {present}")
+    for variant in present:
         sub = dcrnn[dcrnn["variant"] == variant]
         means = sub.groupby("fold")["rmse"].mean().reindex(FOLDS)
+        color = _FOLD_DISPERSION_COLORS[variant]
         ax.plot(FOLDS, means.values, marker="o", linewidth=2.2, markersize=8,
-                color=colors[variant], label=variant)
+                color=color, label=variant)
         for f, v in zip(FOLDS, means.values):
             ax.annotate(f"{v:.3f}", (f, v), textcoords="offset points", xytext=(0, 8),
-                        ha="center", fontsize=9, color=colors[variant])
+                        ha="center", fontsize=9, color=color)
     ax.set_xticks(FOLDS)
     ax.set_xticklabels([f"Fold {f}" for f in FOLDS])
     ax.set_ylabel("RMSE (m/s), mean over 51 stations", fontsize=12)
@@ -1851,7 +1871,7 @@ def main():
     ap.add_argument("--skip-raw", action="store_true",
                      help="Skip everything that needs the raw prediction parquets (pooled RMSE, "
                           "ICON-D2/Persistence reference derivation, imputed-hour mask/filtering, "
-                          "the 12-variant intersection, TFT, horizon/month/ws-class/scatter "
+                          "the 14-variant intersection, TFT, horizon/month/ws-class/scatter "
                           "figures). The overview table then falls back to the UNFILTERED "
                           "stdhp_*.csv sample (imputed hours included, graph only), with a "
                           "warning -- none of this can be reconstructed from the CSVs alone.")
@@ -1863,7 +1883,7 @@ def main():
                      help="Task B, Stage 2 vs Stage 3: whether the PRIMARY reported numbers "
                           "(overview table's un-suffixed columns, bar chart, fold-dispersion, "
                           "skill-distribution and paired-diff figures/tables) are computed on the "
-                          "Stage 3 12-variant (station_id, run_time, horizon) intersection "
+                          "Stage 3 14-variant (station_id, run_time, horizon) intersection "
                           "(default, --intersect-only) or on each variant's own Stage 2 "
                           "imputed-hour-filtered sample (--no-intersect-only, the graph-only "
                           "script's original behaviour). Both stages are ALWAYS written to the "
@@ -1912,7 +1932,7 @@ def main():
         print("[4/9] Graph canonical filtered grid (source of TFT's pers_ref + intersection base) ...")
         graph_canon = build_graph_canonical_keys(args.raw_dir, mask, FOLDS, keep_imputed=args.keep_imputed)
 
-        print("[5/9] Building the 12-variant (station_id, run_time, horizon) intersection per fold ...")
+        print("[5/9] Building the 14-variant (station_id, run_time, horizon) intersection per fold ...")
         tft_keys = build_tft_filtered_keys(args.raw_dir, mask, FOLDS, keep_imputed=args.keep_imputed)
         intersect_keys = build_intersection_keys(graph_canon, tft_keys, FOLDS)
         intersect_sizes = pd.DataFrame([
@@ -1968,14 +1988,14 @@ def main():
         station_metrics = build_station_metrics(raw_bundle["station"], raw_bundle["ref_station"])
         station_metrics_unfiltered = build_station_metrics(raw_bundle["station_full"], raw_bundle["ref_station_full"])
 
-        # Stage 3: the 12-variant row intersection -- what the paper reports by default. Built
+        # Stage 3: the 14-variant row intersection -- what the paper reports by default. Built
         # from the SAME recipe (build_station_metrics()) as the other two stages, just fed the
         # intersection-restricted buckets instead.
         station_intersect_all = pd.concat([raw_bundle["station_intersect"], tft_bundle["station_intersect"]],
                                           ignore_index=True)
         station_metrics_intersect = build_station_metrics(station_intersect_all, raw_bundle["ref_station_intersect"])
 
-        # Task D verification #3: after intersection, every one of the 12 variants (+ REF) must
+        # Task D verification #3: after intersection, every one of the 14 variants (+ REF) must
         # have EXACTLY the same total row count per fold -- abort loudly otherwise.
         n_per_variant_fold = station_metrics_intersect.groupby(["model", "variant", "fold"])["n_samples"].sum()
         n_uniform = n_per_variant_fold.groupby("fold").nunique()
@@ -1983,7 +2003,7 @@ def main():
         if not bad_fold.empty:
             detail = n_per_variant_fold[n_per_variant_fold.index.get_level_values("fold").isin(bad_fold.index)]
             sys.exit(f"[FATAL] Nach Schnittmengenbildung ist die Zeilenzahl je Fold NICHT ueber alle "
-                     f"12 Varianten (+REF) identisch (Fold(s) {list(bad_fold.index)}):\n{detail}\n"
+                     f"14 Varianten (+REF) identisch (Fold(s) {list(bad_fold.index)}):\n{detail}\n"
                      f"Abbruch statt verzerrter Schnittmengen-Vergleiche.")
         print(f"[OK] Nach Schnittmengenbildung: identische Zeilenzahl je Fold ueber alle 12 "
               f"Varianten + REF ({n_per_variant_fold.groupby('fold').first().to_dict()}).")
