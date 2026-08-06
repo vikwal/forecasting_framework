@@ -74,6 +74,27 @@ class DCRNN(nn.Module):
 
         edge_dim = config.edge_input_dim()
 
+        if config.nwp_aggregation == "idw_alt":
+            # Fail fast, at construction time, rather than silently running
+            # with a degenerate d3d — see DCRNNConfig.attach_nwp_geometry()
+            # and the "Recovering physical kilometres" section of
+            # nwp_attention.py's module docstring for why these two floats
+            # cannot be filled in from YAML and must be set by the caller
+            # right after building the graph.
+            if config.icond2_max_dist_km <= 0.0:
+                raise ValueError(
+                    "nwp_aggregation='idw_alt' requires config.icond2_max_dist_km > 0. "
+                    "Call DCRNNConfig.attach_nwp_geometry(base_graph) after "
+                    "HeterogeneousGraphBuilder.build() and before constructing DCRNN(config)."
+                )
+            if config.ecmwf_features_per_step > 0 and config.ecmwf_max_dist_km <= 0.0:
+                raise ValueError(
+                    "nwp_aggregation='idw_alt' with ecmwf_features_per_step > 0 requires "
+                    "config.ecmwf_max_dist_km > 0. Call "
+                    "DCRNNConfig.attach_nwp_geometry(base_graph) after "
+                    "HeterogeneousGraphBuilder.build() and before constructing DCRNN(config)."
+                )
+
         if config.nwp_nodes:
             # Standard path: GATv2 over explicit NWP nodes
             enc_meas_dim     = config.station_meas_features          # M
@@ -106,6 +127,10 @@ class DCRNN(nn.Module):
             nwp_nodes=config.nwp_nodes,
             nwp_aggregation=config.nwp_aggregation,
             idw_p=config.idw_p,
+            alpha_alt=config.alpha_alt,
+            alt_col=config.altitude_diff_col(),
+            icond2_max_dist_km=config.icond2_max_dist_km,
+            ecmwf_max_dist_km=config.ecmwf_max_dist_km,
         )
 
         self.encoder = DCGRUEncoder(

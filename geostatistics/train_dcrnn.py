@@ -1022,6 +1022,10 @@ def main() -> None:
         base_graph["icond2", "informs", "station"].edge_index.shape[1],
         base_graph["ecmwf",  "informs", "station"].edge_index.shape[1],
     )
+    # Required for nwp_aggregation="idw_alt" (DCRNN.__init__ hard-fails
+    # otherwise); a harmless no-op for every other aggregation. See
+    # DCRNNConfig.attach_nwp_geometry().
+    model_cfg.attach_nwp_geometry(base_graph)
 
     # ------------------------------------------------------------------
     # Sampler  — reused unchanged from stgnn

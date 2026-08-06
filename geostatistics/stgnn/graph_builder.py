@@ -163,7 +163,7 @@ class HeterogeneousGraphBuilder:
             )
 
         # --- ICON-D2 → station edges ---
-        i2s_ei, i2s_ea = self._build_nwp_to_station_edges(
+        i2s_ei, i2s_ea, i2s_max_dist_km = self._build_nwp_to_station_edges(
             nwp_coords=icond2_grid_coords,
             station_coords=station_coords,
             nwp_altitudes=icond2_altitudes,
@@ -172,10 +172,19 @@ class HeterogeneousGraphBuilder:
         )
         data["icond2", "informs", "station"].edge_index = i2s_ei
         data["icond2", "informs", "station"].edge_attr = i2s_ea
+        # Distance-column normaliser (see _build_nwp_to_station_edges), persisted
+        # so callers can recover physical km from edge_attr[:, 0] without
+        # re-deriving it from raw coordinates. Only consumer today: DCRNN's
+        # nwp_aggregation="idw_alt" (geostatistics/dcrnn/model/nwp_attention.py),
+        # which combines this with the (fixed-normalisation) altitude-diff column
+        # and therefore cannot rely on the distance normaliser cancelling out the
+        # way plain "idw" does. Harmless for every other consumer (MTGNN/WaveNet
+        # ignore unrecognised HeteroData attributes).
+        data["icond2", "informs", "station"].max_dist_km = i2s_max_dist_km
 
         # --- ECMWF → station edges ---
         if self.cfg.next_n_ecmwf_grid_points > 0:
-            e2s_ei, e2s_ea = self._build_nwp_to_station_edges(
+            e2s_ei, e2s_ea, e2s_max_dist_km = self._build_nwp_to_station_edges(
                 nwp_coords=ecmwf_grid_coords,
                 station_coords=station_coords,
                 nwp_altitudes=ecmwf_altitudes,
@@ -185,8 +194,10 @@ class HeterogeneousGraphBuilder:
         else:
             e2s_ei = torch.zeros((2, 0), dtype=torch.long)
             e2s_ea = torch.zeros((0, 1), dtype=torch.float32)
+            e2s_max_dist_km = 0.0   # unused: no ecmwf edges to normalise
         data["ecmwf", "informs", "station"].edge_index = e2s_ei
         data["ecmwf", "informs", "station"].edge_attr = e2s_ea
+        data["ecmwf", "informs", "station"].max_dist_km = e2s_max_dist_km
 
         return data
 
@@ -437,7 +448,7 @@ class HeterogeneousGraphBuilder:
         nwp_altitudes: np.ndarray | None,
         station_altitudes: np.ndarray,
         k: int,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, float]:
         """
         Build directed nwp_node → station edges using k-nearest-neighbour lookup.
 
@@ -446,8 +457,12 @@ class HeterogeneousGraphBuilder:
 
         Returns
         -------
-        edge_index : (2, N_stations * k) — row 0 = NWP indices, row 1 = station indices
-        edge_attr  : (N_stations * k, F)
+        edge_index  : (2, N_stations * k) — row 0 = NWP indices, row 1 = station indices
+        edge_attr   : (N_stations * k, F)
+        max_dist_km : the distance-column normaliser used in edge_attr[:, 0]
+                      (edge_attr[:, 0] == dist_km / max_dist_km) — the caller
+                      persists this on the returned HeteroData so it can be
+                      recovered later without re-deriving it from coordinates.
         """
         dist_km, nwp_idx = geodesic_knn(nwp_coords, station_coords, k=k)
         # dist_km : (N_stations, k), nwp_idx : (N_stations, k)
@@ -480,7 +495,7 @@ class HeterogeneousGraphBuilder:
             np.stack([nwp_idx_flat, station_idx], axis=0), dtype=torch.long
         )
         edge_attr = torch.from_numpy(ea)
-        return edge_index, edge_attr
+        return edge_index, edge_attr, max_dist
 
     # ------------------------------------------------------------------
     # Utility: rebuild station subgraph for a node subset

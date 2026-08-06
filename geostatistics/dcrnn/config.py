@@ -140,8 +140,31 @@ class DCRNNConfig:
     # for the full design and geostatistics/ablations/guard.py for the hard
     # guard (idw requires nwp_nodes=True, nwp_injection=True, and a distance
     # edge feature).
-    nwp_aggregation: str = "attention"   # "attention" | "idw"
-    idw_p: float = 2.0                    # inverse-distance power (idw only), 0 < p <= ~6.42
+    #
+    # Ablation D' ("idw_alt"): D plus a great-circle-with-height-offset distance
+    # d3d = sqrt(d_km^2 + (alpha_alt * Delta_alt_km)^2), matching the
+    # bias-correction baseline in ertz2025postprocessing (ASCMO 2025) — see
+    # nwp_attention.py for why this needs icond2_max_dist_km/ecmwf_max_dist_km
+    # (physical-km recovery) and alpha_alt.
+    nwp_aggregation: str = "attention"   # "attention" | "idw" | "idw_alt"
+    idw_p: float = 2.0                    # inverse-distance power (idw/idw_alt), p > 0
+
+    # idw_alt only: vertical/horizontal trade-off in d3d = sqrt(d^2 + (alpha*dalt)^2)
+    # (both terms in km). Default 10.0 — see nwp_attention.py module docstring
+    # for the measured alpha*Delta-alt vs horizontal-distance distributions this
+    # is calibrated against (real fold graph, 153 stations).
+    alpha_alt: float = 10.0
+
+    # idw_alt only: physical-km normalisers for the icond2/ecmwf->station distance
+    # column, recovered from the built graph (HeterogeneousGraphBuilder persists
+    # them as data[edge_type].max_dist_km — see graph_builder.py:build()). NOT a
+    # YAML key: these are set by calling attach_nwp_geometry(base_graph) after
+    # building the graph and before constructing DCRNN(config) — every driver
+    # script (train_dcrnn.py, get_test_results_dcrnn.py, hpo_dcrnn.py) must call
+    # it, and DCRNN.__init__ hard-fails under idw_alt if it was skipped, so a
+    # forgotten call cannot silently produce a wrong (0-valued) distance term.
+    icond2_max_dist_km: float = 0.0
+    ecmwf_max_dist_km: float = 0.0
 
     # ------------------------------------------------------------------
 
@@ -165,6 +188,47 @@ class DCRNNConfig:
         if self.graph.use_altitude_diff:
             dim += 1
         return max(dim, 1)
+
+    def altitude_diff_col(self) -> int | None:
+        """
+        Column index of the altitude-diff feature in i2s/e2s edge_attr, or
+        None when it is not enabled. Mirrors the column order
+        stgnn/utils/spatial.py:edge_features() actually produces: distance,
+        then direction sin/cos, then altitude_diff (topo features are s2s-only
+        and never appear here, see edge_input_dim()). Not hardcoded to 3
+        because that position only holds for the common case where distance
+        AND direction are both enabled — idw_alt does not require direction.
+        """
+        if not self.graph.use_altitude_diff:
+            return None
+        col = 0
+        if self.graph.use_distance_features:
+            col += 1
+        if self.graph.use_direction_features:
+            col += 2
+        return col
+
+    def attach_nwp_geometry(self, base_graph) -> None:
+        """
+        Populate icond2_max_dist_km / ecmwf_max_dist_km from the built graph.
+
+        Call exactly once, right after ``HeterogeneousGraphBuilder.build()``
+        and before constructing ``DCRNN(config)`` — required for
+        nwp_aggregation="idw_alt" (DCRNN.__init__ hard-fails if this was
+        skipped), a harmless no-op for every other aggregation. Centralised
+        here, as a single method every driver script calls identically,
+        because a per-script copy of "read this attribute off the graph" is
+        exactly the kind of thing that has been forgotten before in this
+        codebase (see K1/R2 in docs/review_round2_findings.md re.
+        get_test_results_dcrnn.py's architecture reconstruction).
+        """
+        i2s_key = ("icond2", "informs", "station")
+        e2s_key = ("ecmwf", "informs", "station")
+        self.icond2_max_dist_km = float(base_graph[i2s_key].max_dist_km)
+        if self.ecmwf_features_per_step > 0 and base_graph[e2s_key].edge_index.numel() > 0:
+            self.ecmwf_max_dist_km = float(base_graph[e2s_key].max_dist_km)
+        else:
+            self.ecmwf_max_dist_km = 0.0
 
     # ------------------------------------------------------------------
 
@@ -265,12 +329,13 @@ class DCRNNConfig:
         nwp_nodes = d.get("nwp_nodes", True)
 
         nwp_aggregation = d.get("nwp_aggregation", "attention")
-        if nwp_aggregation not in ("attention", "idw"):
+        if nwp_aggregation not in ("attention", "idw", "idw_alt"):
             raise ValueError(
-                f"nwp_aggregation must be 'attention' or 'idw', got {nwp_aggregation!r}"
+                f"nwp_aggregation must be 'attention', 'idw' or 'idw_alt', got {nwp_aggregation!r}"
             )
         idw_p = float(d.get("idw_p", 2.0))
-        if nwp_aggregation == "idw":
+        alpha_alt = float(d.get("alpha_alt", 10.0))
+        if nwp_aggregation in ("idw", "idw_alt"):
             # Local import: geostatistics/dcrnn/__init__.py loads .config before
             # .model.dcrnn, so a module-level import here would be circular.
             from .model.nwp_attention import validate_idw_p
@@ -308,6 +373,7 @@ class DCRNNConfig:
             nwp_nodes=nwp_nodes,
             nwp_aggregation=nwp_aggregation,
             idw_p=idw_p,
+            alpha_alt=alpha_alt,
             direction_to_adj=direction_to_adj,
             wind_dir_meas_idx=wind_dir_meas_idx,
             wind_dir_cos_idx=wind_dir_cos_idx,

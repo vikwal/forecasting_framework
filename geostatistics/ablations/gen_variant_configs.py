@@ -98,10 +98,50 @@ VARIANTS: dict[str, tuple[list[tuple[str, str, str]], str]] = {
         "  # Nachbarmessungen zusammen sind nicht von null zu trennen (p = 0.143).\n"
         "  # Erzeugt aus {src} von geostatistics/ablations/gen_variant_configs.py.",
     ),
+    "idw_alt": (
+        [("nwp_aggregation", "idw_alt",
+          "  # Ablation D': wie D, plus Hoehenkorrektur (3D-Distanz)")],
+        "Ablation D' (idw_alt, wie D plus Hoehenkorrektur): d3d_ij = sqrt(d_ij^2\n"
+        "  # + (alpha_alt * Delta_alt_ij)^2), Grosskreisdistanz mit Hoehenversatz wie\n"
+        "  # in ertz2025postprocessing (ASCMO 2025), unser direktester Vorarbeits-\n"
+        "  # Vergleich. alpha_alt (Default 10.0, siehe nwp_attention.py) kalibriert\n"
+        "  # gegen die gemessene Delta-Alt/Distanz-Verteilung des echten Graphen, so\n"
+        "  # dass der Hoehenterm im Median klar untergeordnet bleibt, aber fuer die\n"
+        "  # Minderheit steiler Kanten (Alpenstationen) wirklich greift. D beantwortet\n"
+        "  # 'warum nicht interpolieren', D' beantwortet 'warum nicht hoehenkorrigiert\n"
+        "  # interpolieren' — der in der operationellen Meteorologie uebliche Standard.\n"
+        "  # Erzeugt aus {src} von geostatistics/ablations/gen_variant_configs.py.",
+    ),
 }
 
 # HPO params that provably cannot influence variant C (no station edges).
 INERT_IN_C = ["K_hop", "next_n_neighbors", "edge_weight_sigma"]
+
+# HPO params that are redundant (not inert, but degenerate) under idw/idw_alt:
+# NWPAttentionLayer only ever constructs nn.Linear(*, nwp_out_dim) in idw*
+# mode (see nwp_attention.py) — nwp_heads has no effect on the model at all
+# except co-determining nwp_out_dim = nwp_heads * nwp_out_per_head via
+# train_dcrnn.py/hpo_dcrnn.py's derivation, so searching it independently of
+# nwp_out_per_head just reparametrises the same nwp_out_dim values many times
+# over. Pinning it to the harmonized value (4) leaves nwp_out_per_head as the
+# sole (and sufficient) search dimension for nwp_out_dim.
+INERT_IN_IDW = ["nwp_heads"]
+
+# variant -> (HPO keys to drop, one-line reason written in their place).
+# The static default each dropped key pins to is already fixed in the
+# dcrnn: block above hpo: — drop_hpo_params only touches the search space.
+_REASON_C = ("ohne station<->station Kanten wirkungslos "
+             "(Permutationstest: max|dpred| = 0.0).")
+_REASON_IDW = ("unter idw/idw_alt wirkungslos ausser als Faktor von nwp_out_dim = "
+               "nwp_heads * nwp_out_per_head (NWPAttentionLayer baut in diesem Modus nur "
+               "nn.Linear(*, nwp_out_dim), kein GATv2 mit echten Attention-Heads) — "
+               "nwp_out_per_head bleibt der alleinige Suchparameter fuer nwp_out_dim, "
+               "nwp_heads ist auf den harmonisierten Wert (4) fixiert.")
+PIN_INERT_KEYS: dict[str, tuple[list[str], str]] = {
+    "nograph": (INERT_IN_C, _REASON_C),
+    "idw": (INERT_IN_IDW, _REASON_IDW),
+    "idw_alt": (INERT_IN_IDW, _REASON_IDW),
+}
 
 
 def dcrnn_region(lines: list[str]) -> tuple[int, int]:
@@ -132,8 +172,19 @@ def set_key(lines: list[str], lo: int, hi: int, key: str, value: str,
     return lines, "absent"
 
 
-def drop_hpo_params(lines: list[str], lo: int, hi: int, keys: list[str]) -> tuple[list[str], list[str]]:
-    """Remove ``      <key>:`` entries (and their block) from the hpo params list."""
+def drop_hpo_params(
+    lines: list[str], lo: int, hi: int, keys: list[str], reason: str,
+) -> tuple[list[str], list[str]]:
+    """Remove ``      <key>:`` entries (and their block) from the hpo params list.
+
+    ``reason`` is a one-line, variant-specific justification written into the
+    generated config in place of the removed block (e.g. why the key cannot,
+    or need not, be searched for THIS variant) — deliberately a parameter
+    rather than hardcoded, since "inert" (variant C: provably has zero effect)
+    and "redundant" (idw/idw_alt: co-varies with another searched param, not
+    literally inert) are different claims and conflating them in one fixed
+    message would misstate the idw/idw_alt case.
+    """
     dropped = []
     out = list(lines)
     for key in keys:
@@ -163,8 +214,7 @@ def drop_hpo_params(lines: list[str], lo: int, hi: int, keys: list[str]) -> tupl
             begin -= 1
         note = f"{key} (lines {begin - lo}..{end - lo} of dcrnn region)"
         out = out[:begin] + [
-            f"      # {key} entfaellt: ohne station<->station Kanten wirkungslos "
-            f"(Permutationstest: max|dpred| = 0.0).\n"
+            f"      # {key} entfaellt: {reason}\n"
         ] + out[end:]
         dropped.append(note)
         hi -= (end - begin) - 1
@@ -193,8 +243,9 @@ def main() -> None:
     ap.add_argument("--trials", type=int, default=None,
                     help="rewrite dcrnn.hpo.trials in the non-fold config")
     ap.add_argument("--pin-inert", action="store_true",
-                    help="variant C only: drop K_hop / next_n_neighbors from the "
-                         "HPO search space (they cannot influence C)")
+                    help="drop this variant's inert/redundant HPO params (see "
+                         "PIN_INERT_KEYS): K_hop/next_n_neighbors/edge_weight_sigma for "
+                         "nograph, nwp_heads for idw/idw_alt")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="overwrite existing outputs")
     args = ap.parse_args()
@@ -255,8 +306,9 @@ def main() -> None:
         # touched — exactly like --trials above. The fold configs keep their
         # (unused) hpo blocks byte for byte, which keeps their diff against the
         # variant-A fold configs confined to the ablated axis.
-        if args.pin_inert and args.variant == "nograph" and not is_fold:
-            lines, dropped = drop_hpo_params(lines, lo, hi, INERT_IN_C)
+        if args.pin_inert and args.variant in PIN_INERT_KEYS and not is_fold:
+            keys, reason = PIN_INERT_KEYS[args.variant]
+            lines, dropped = drop_hpo_params(lines, lo, hi, keys, reason)
             notes.append(f"dropped from HPO search space: {dropped or 'none found'}")
 
         out = "".join(lines)

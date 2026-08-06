@@ -68,18 +68,17 @@ dcrnn:
   next_n_ecmwf: 4
   station_connectivity: delaunay
 
-  # ── Ablation D (idw, R6(a) in docs/review_round2_findings.md): ersetzt in
-  # NWPAttentionLayer die GELERNTEN GATv2-Attention-Gewichte der
-  # icond2/ecmwf->station-Aggregation durch feste Gewichte w_ij = d_ij^-p /
-  # sum_k d_ik^-p (Distanz aus edge_attr-Spalte 0). Die lineare
-  # Quellprojektion bleibt lernbar; Bearing und uebrige Kantenspalten gehen
-  # NICHT in die Gewichte ein (siehe nwp_attention.py-Docstring). Isoliert
-  # den Beitrag der gelernten Gewichtung: der gesamte nachweisbare
-  # Graph-Gewinn von GRID gegenueber rohem ICON-D2 sitzt in BASE->NOGRAPH,
-  # also in genau dieser Attention (p = 1.2e-5); Stationsgraph und
-  # Nachbarmessungen zusammen sind nicht von null zu trennen (p = 0.143).
+  # ── Ablation D' (idw_alt, wie D plus Hoehenkorrektur): d3d_ij = sqrt(d_ij^2
+  # + (alpha_alt * Delta_alt_ij)^2), Grosskreisdistanz mit Hoehenversatz wie
+  # in ertz2025postprocessing (ASCMO 2025), unser direktester Vorarbeits-
+  # Vergleich. alpha_alt (Default 10.0, siehe nwp_attention.py) kalibriert
+  # gegen die gemessene Delta-Alt/Distanz-Verteilung des echten Graphen, so
+  # dass der Hoehenterm im Median klar untergeordnet bleibt, aber fuer die
+  # Minderheit steiler Kanten (Alpenstationen) wirklich greift. D beantwortet
+  # 'warum nicht interpolieren', D' beantwortet 'warum nicht hoehenkorrigiert
+  # interpolieren' — der in der operationellen Meteorologie uebliche Standard.
   # Erzeugt aus config_wind_dcrnn.yaml von geostatistics/ablations/gen_variant_configs.py.
-  nwp_aggregation: idw  # Ablation D: gelernte NWP-Attention -> feste inverse-distanzgewichtete Aggregation
+  nwp_aggregation: idw_alt  # Ablation D': wie D, plus Hoehenkorrektur (3D-Distanz)
   use_altitude_diff: true
   use_direction_features: true
   use_distance_features: true

@@ -115,6 +115,11 @@ STDHP_META = {
     "stdhp_dcrnn_wind_dcrnn":          ("DCRNN",   "GRID",         "A"),
     "stdhp_dcrnn_wind_dcrnn_nomeas":   ("DCRNN",   "GRID-NOMEAS",  "B"),
     "stdhp_dcrnn_wind_dcrnn_nograph":  ("DCRNN",   "GRID-NOGRAPH", "C"),
+    # R6(a): D = fixed inverse-distance NWP aggregation (no learned attention),
+    # D' = D plus a height-corrected 3D distance (nwp_attention.py). Both derive
+    # from the GRID/NWP arm (variant A) exactly like B/C do.
+    "stdhp_dcrnn_wind_dcrnn_idw":      ("DCRNN",   "GRID-IDW",     "D"),
+    "stdhp_dcrnn_wind_dcrnn_idw_alt":  ("DCRNN",   "GRID-IDW-ALT", "D'"),
     "stdhp_dcrnn_wind_dcrnn_nwp_hist": ("DCRNN",   "GRID+HIST",    None),
     "stdhp_mtgnn_wind_mtgnn":          ("MTGNN",   "BASE",         None),
     "stdhp_mtgnn_wind_mtgnn_nwp":      ("MTGNN",   "GRID",         None),
@@ -139,8 +144,13 @@ TFT_FOLD_OFFSET = 1
 ALL_META = {**STDHP_META, **TFT_META}
 
 TRANSDUCTIVE_VARIANTS = {("DCRNN", "GRID+HIST"), ("MTGNN", "GRID+HIST"), ("TFT", "hist")}
-ABLATION_PAIRS = [("A", "B"), ("B", "C"), ("A", "C"), ("A", "BASE")]
-ABLATION_LETTER_LABEL = {"A": "GRID", "B": "GRID-NOMEAS", "C": "GRID-NOGRAPH", "BASE": "BASE"}
+ABLATION_PAIRS = [("A", "B"), ("B", "C"), ("A", "C"), ("A", "BASE"),
+                   # R6(a): D = idw, D' = idw_alt (height-corrected) — see STDHP_META.
+                   # A-D / A-D' isolate the learned-vs-fixed NWP aggregation each; D-D'
+                   # isolates the height correction alone; D'-BASE is D's counterpart to A-BASE.
+                   ("A", "D"), ("A", "D'"), ("D", "D'"), ("D'", "BASE")]
+ABLATION_LETTER_LABEL = {"A": "GRID", "B": "GRID-NOMEAS", "C": "GRID-NOGRAPH", "BASE": "BASE",
+                          "D": "GRID-IDW", "D'": "GRID-IDW-ALT"}
 
 # Paired comparisons beyond the DCRNN ablation ladder: (group, label, model_a, variant_a,
 # model_b, variant_b). All (model, variant) combinations share the SAME 51 target stations per
@@ -379,8 +389,9 @@ def _verify_uniform_filtering(pooled_df: pd.DataFrame) -> None:
                  f"Der Filter ist variantenabhaengig geworden -- Abbruch statt verzerrter "
                  f"gepaarter Vergleiche.")
     per_fold = {int(f): int(n.iloc[0]) for f, n in pooled_df.groupby("fold")["n"]}
-    print(f"[OK] Nach Imputations-Filterung: identische Zeilenzahl je Fold ueber alle 10 "
-          f"Varianten ({per_fold}).")
+    n_variants = pooled_df.groupby(["model", "variant"]).ngroups
+    print(f"[OK] Nach Imputations-Filterung: identische Zeilenzahl je Fold ueber alle "
+          f"{n_variants} Varianten ({per_fold}).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1289,9 +1300,12 @@ def fig_fold_dispersion(station_df: pd.DataFrame, out_dir: Path, formats):
 # 5) Paired difference analysis for the ablation ladder
 # ─────────────────────────────────────────────────────────────────────────────
 def paired_diff_analysis(station_df: pd.DataFrame, n_boot: int = 10000, seed: int = 0) -> pd.DataFrame:
+    # Derived from ABLATION_LETTER_LABEL (single source of truth for the ladder's
+    # letter<->variant mapping) rather than duplicated here, so adding a rung
+    # there (as done for D/D', R6(a)) automatically reaches this function too.
+    letter_of_variant = {v: k for k, v in ABLATION_LETTER_LABEL.items()}
     dcrnn = station_df[(station_df["model"] == "DCRNN") &
-                        (station_df["variant"].isin(["GRID", "GRID-NOMEAS", "GRID-NOGRAPH", "BASE"]))].copy()
-    letter_of_variant = {"GRID": "A", "GRID-NOMEAS": "B", "GRID-NOGRAPH": "C", "BASE": "BASE"}
+                        (station_df["variant"].isin(letter_of_variant))].copy()
     dcrnn["letter"] = dcrnn["variant"].map(letter_of_variant)
     # pivot_table's default aggfunc="mean" would silently average duplicate (fold, station,
     # variant) rows instead of failing — a duplicated CSV would then look like a valid pairing.
@@ -1456,14 +1470,28 @@ def _diff_stats(pair_label, fold_label, d, rng, n_boot, diffs_by_fold=None):
 
 
 def fig_paired_diff_boxplots(station_df: pd.DataFrame, out_dir: Path, formats):
+    # See paired_diff_analysis() — same derivation, same reasoning.
+    letter_of_variant = {v: k for k, v in ABLATION_LETTER_LABEL.items()}
     dcrnn = station_df[(station_df["model"] == "DCRNN") &
-                        (station_df["variant"].isin(["GRID", "GRID-NOMEAS", "GRID-NOGRAPH", "BASE"]))].copy()
-    letter_of_variant = {"GRID": "A", "GRID-NOMEAS": "B", "GRID-NOGRAPH": "C", "BASE": "BASE"}
+                        (station_df["variant"].isin(letter_of_variant))].copy()
     dcrnn["letter"] = dcrnn["variant"].map(letter_of_variant)
     pivot = dcrnn.pivot_table(index=["fold", "station_id"], columns="letter", values="rmse")
 
-    fig, axes = plt.subplots(1, len(ABLATION_PAIRS), figsize=(4.2 * len(ABLATION_PAIRS), 5), sharey=True)
-    for ax, (a, b) in zip(axes, ABLATION_PAIRS):
+    # Ladder rungs without any data yet (e.g. D/D' before their stdhp runs exist)
+    # have no column in pivot at all -- skip those pairs instead of a KeyError,
+    # so this figure keeps working for whichever rungs ARE available.
+    pairs = [(a, b) for a, b in ABLATION_PAIRS if a in pivot.columns and b in pivot.columns]
+    missing = [(a, b) for a, b in ABLATION_PAIRS if (a, b) not in pairs]
+    if missing:
+        print(f"[fig_paired_diff_boxplots] skipping {missing} — no data yet for "
+              f"{sorted({x for pair in missing for x in pair if x not in pivot.columns})}")
+    if not pairs:
+        print("[fig_paired_diff_boxplots] no ablation pair has data yet — skipping figure.")
+        return
+
+    fig, axes = plt.subplots(1, len(pairs), figsize=(4.2 * len(pairs), 5), sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, (a, b) in zip(axes, pairs):
         sub = pivot[[a, b]].dropna()
         box_data = [sub.xs(f, level="fold")[a] - sub.xs(f, level="fold")[b]
                     for f in FOLDS if f in sub.index.get_level_values("fold")]
@@ -1897,7 +1925,8 @@ def main():
         del tft_keys
 
         mode = "KEEP-IMPUTED (--keep-imputed, ungefiltert)" if args.keep_imputed else "gefiltert (Standard)"
-        print(f"[6/9] Single pass over 30 GRAPH raw parquets [{mode}] ...")
+        print(f"[6/9] Single pass over {len(STDHP_META) * len(FOLDS)} GRAPH raw parquets "
+              f"(expected — some may be missing, e.g. ablations not trained yet) [{mode}] ...")
         raw_bundle = scan_raw_parquets(args.raw_dir, mask, keep_imputed=args.keep_imputed,
                                        intersect_keys=intersect_keys)
         _verify_uniform_filtering(raw_bundle["pooled"])

@@ -36,16 +36,26 @@ failure mode, not a crash, if left unchecked:
     weight stations by the wrong quantity.
 
 ``idw_p`` is range-checked here too (``validate_idw_p``): it is a free config
-field outside the HPO search space, and both ends of its range fail silently
-rather than loudly — p <= 0 inverts or flattens the weighting instead of
-crashing, p above the float32 limit turns a clamped zero-distance edge into
-inf and the whole station's weights into NaN.
+field outside the HPO search space, and p <= 0 fails silently rather than
+loudly (inverts or flattens the weighting instead of crashing). It no longer
+has an upper bound — see nwp_attention.py's "Min-distance renormalisation"
+section for why the previous float32-overflow cap was removed.
+
+Ablation D' guard (idw_alt, height-corrected IDW)
+----------------------------------------------------
+Same three preconditions as D, plus a fourth: ``use_altitude_diff: true`` (or
+``altitude_diff`` present in ``edge_features``) — idw_alt reads the
+altitude-diff column to build its 3D distance, so without it there is no
+height information to correct with (and, absent the earlier checks, the
+column position derived by DCRNNConfig.altitude_diff_col() would not even
+exist). ``alpha_alt`` is range-checked the same way ``idw_p`` is
+(``validate_alpha_alt``).
 """
 from __future__ import annotations
 
 import logging
 
-from geostatistics.dcrnn.model.nwp_attention import validate_idw_p
+from geostatistics.dcrnn.model.nwp_attention import validate_alpha_alt, validate_idw_p
 from geostatistics.stgnn.config import parse_edge_features
 
 
@@ -102,40 +112,54 @@ def check_ablation_flags(dcrnn_cfg: dict, logger: logging.Logger | None = None) 
             "Set interpolate_history: false in the variant config."
         )
 
-    if flags["nwp_aggregation"] not in ("attention", "idw"):
+    if flags["nwp_aggregation"] not in ("attention", "idw", "idw_alt"):
         raise AblationConfigError(
-            f"nwp_aggregation must be 'attention' or 'idw', got "
+            f"nwp_aggregation must be 'attention', 'idw' or 'idw_alt', got "
             f"{flags['nwp_aggregation']!r}."
         )
 
-    if flags["nwp_aggregation"] == "idw":
+    if flags["nwp_aggregation"] in ("idw", "idw_alt"):
+        agg = flags["nwp_aggregation"]
         if not flags["nwp_nodes"]:
             raise AblationConfigError(
-                "nwp_aggregation='idw' requires nwp_nodes=true: with nwp_nodes=false "
+                f"nwp_aggregation={agg!r} requires nwp_nodes=true: with nwp_nodes=false "
                 "there is no NWPAttentionLayer to switch — NWP features go straight "
-                "into station.x instead. Set nwp_nodes: true, or drop nwp_aggregation: idw."
+                f"into station.x instead. Set nwp_nodes: true, or drop nwp_aggregation: {agg}."
             )
         if not flags["nwp_injection"]:
             raise AblationConfigError(
-                "nwp_aggregation='idw' requires nwp_injection=true: with "
+                f"nwp_aggregation={agg!r} requires nwp_injection=true: with "
                 "nwp_injection=false, nwp_out_dim is forced to 0 and the "
                 "NWPAttentionLayer is never constructed. Set nwp_injection: true, "
-                "or drop nwp_aggregation: idw."
+                f"or drop nwp_aggregation: {agg}."
             )
         try:
             validate_idw_p(dcrnn_cfg.get("idw_p", 2.0))
         except (ValueError, TypeError) as exc:
-            raise AblationConfigError(f"nwp_aggregation='idw': {exc}") from exc
+            raise AblationConfigError(f"nwp_aggregation={agg!r}: {exc}") from exc
 
-        use_distance, _, _, _ = parse_edge_features(dcrnn_cfg)
+        use_distance, _, use_altitude_diff, _ = parse_edge_features(dcrnn_cfg)
         if not use_distance:
             raise AblationConfigError(
-                "nwp_aggregation='idw' requires a distance edge feature (the default "
+                f"nwp_aggregation={agg!r} requires a distance edge feature (the default "
                 "use_distance_features=true, or 'distance' present in edge_features): "
                 "the IDW weights are read from column 0 of edge_attr, which is only a "
                 "distance when that feature is enabled — otherwise column 0 holds "
                 "whatever feature (bearing sin, altitude diff, …) happens to sit first, "
                 "and d**-p would silently weight stations by the wrong quantity."
             )
+
+        if agg == "idw_alt":
+            if not use_altitude_diff:
+                raise AblationConfigError(
+                    "nwp_aggregation='idw_alt' requires the altitude_diff edge feature "
+                    "(use_altitude_diff: true, or 'altitude_diff' present in edge_features): "
+                    "idw_alt's 3D distance needs a height difference to correct with. Set "
+                    "use_altitude_diff: true, or use nwp_aggregation: idw (no height term)."
+                )
+            try:
+                validate_alpha_alt(dcrnn_cfg.get("alpha_alt", 10.0))
+            except (ValueError, TypeError) as exc:
+                raise AblationConfigError(f"nwp_aggregation='idw_alt': {exc}") from exc
 
     return flags

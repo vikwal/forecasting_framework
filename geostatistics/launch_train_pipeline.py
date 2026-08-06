@@ -178,6 +178,18 @@ GROUPS: list[Group] = [
         ],
     ),
 
+    # ── DCRNN IDW_ALT (Ablation D', hoehenkorrigiertes IDW) ─────────────────
+    # Wie DCRNN_IDW, plus Hoehenversatz in der 3D-Distanz (nwp_attention.py).
+    Group(
+        name   = "DCRNN_IDW_ALT",
+        script = "train_dcrnn",
+        folds  = [
+            FoldJob("configs/dcrnn/config_wind_dcrnn_idw_alt_fold1.yaml", "fold1"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_idw_alt_fold2.yaml", "fold2"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_idw_alt_fold3.yaml", "fold3"),
+        ],
+    ),
+
     # ── WaveNet (R4: bisher fehlte hier ein Retrain-Pfad) ──────────────────
     # Exakt analog zu MTGNN_BASE/MTGNN_NWP: die regulaeren Fold-Configs (nicht
     # die stdhp-Kopien — diese Gruppen sind fuer die spaetere echte Kampagne

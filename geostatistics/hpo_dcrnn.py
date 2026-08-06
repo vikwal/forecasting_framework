@@ -1168,6 +1168,13 @@ def main() -> None:
             _trial_builder = _static_builder
             _trial_graph   = _static_base_graph
 
+        # Required for nwp_aggregation="idw_alt" (DCRNN.__init__ hard-fails
+        # otherwise); a harmless no-op for every other aggregation. model_cfg
+        # is rebuilt every trial (unlike _trial_graph, which may be the
+        # shared static graph), so this has to run every iteration — see
+        # DCRNNConfig.attach_nwp_geometry().
+        model_cfg.attach_nwp_geometry(_trial_graph)
+
         sampler_obj = TrainingSampler(
             model_cfg, _trial_builder, _trial_graph,
             target_feat_idx=target_feat_idx,

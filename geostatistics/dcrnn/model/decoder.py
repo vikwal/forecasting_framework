@@ -52,8 +52,12 @@ class DCGRUDecoder(nn.Module):
     ecmwf_dim        : E2
     nwp_heads        : attention heads
     edge_dim         : edge_attr dimension
-    nwp_aggregation  : "attention" (default) | "idw" — see NWPAttentionLayer
-    idw_p            : inverse-distance power (nwp_aggregation="idw" only)
+    nwp_aggregation  : "attention" (default) | "idw" | "idw_alt" — see NWPAttentionLayer
+    idw_p            : inverse-distance power (nwp_aggregation in {"idw","idw_alt"} only)
+    alpha_alt        : vertical/horizontal trade-off (nwp_aggregation="idw_alt" only)
+    alt_col          : edge_attr column holding altitude_diff (nwp_aggregation="idw_alt" only)
+    icond2_max_dist_km : physical-km normaliser, icond2 distance column (nwp_aggregation="idw_alt" only)
+    ecmwf_max_dist_km  : physical-km normaliser, ecmwf distance column (nwp_aggregation="idw_alt" only)
     """
 
     def __init__(
@@ -73,6 +77,10 @@ class DCGRUDecoder(nn.Module):
         station_nwp_dim: int = 0,
         nwp_aggregation: str = "attention",
         idw_p: float = 2.0,
+        alpha_alt: float = 10.0,
+        alt_col: int | None = None,
+        icond2_max_dist_km: float = 0.0,
+        ecmwf_max_dist_km: float = 0.0,
     ) -> None:
         super().__init__()
         self.forecast_horizon = forecast_horizon
@@ -91,6 +99,10 @@ class DCGRUDecoder(nn.Module):
                 dropout=dropout,
                 aggregation=nwp_aggregation,
                 idw_p=idw_p,
+                alpha_alt=alpha_alt,
+                alt_col=alt_col,
+                icond2_max_dist_km=icond2_max_dist_km,
+                ecmwf_max_dist_km=ecmwf_max_dist_km,
             )
 
         if nwp_nodes:

@@ -313,6 +313,29 @@ JOBS: list[Job] = [
         raw_out_name= "dcrnn_wind_dcrnn_idw_fold2",
     ),
 
+    # ── DCRNN IDW_ALT (Ablation D', hoehenkorrigiertes IDW) ──────────────────
+    Job(
+        group       = "DCRNN_IDW_ALT",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_idw_alt_fold1_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_idw_alt_fold1.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_idw_alt_fold0",
+    ),
+    Job(
+        group       = "DCRNN_IDW_ALT",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_idw_alt_fold2_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_idw_alt_fold2.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_idw_alt_fold1",
+    ),
+    Job(
+        group       = "DCRNN_IDW_ALT",
+        script      = "get_test_results_dcrnn",
+        model_name  = "wind_dcrnn_idw_alt_fold3_dcrnn_val",
+        config      = "configs/dcrnn/config_wind_dcrnn_idw_alt_fold3.yaml",
+        raw_out_name= "dcrnn_wind_dcrnn_idw_alt_fold2",
+    ),
+
     # ==========================================================================
     # ── WaveNet (R4: bisher fehlte hier ein Eval-Pfad) ───────────────────────
     # Analog zu den MTGNN-Jobs oben; Script get_test_results_wavenet.
