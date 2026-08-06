@@ -44,6 +44,8 @@ class DCGRUEncoder(nn.Module):
     ecmwf_dim       : E2 — raw ECMWF features per step
     nwp_heads       : attention heads in NWPAttentionLayer
     edge_dim        : edge_attr dimension from graph builder
+    nwp_aggregation : "attention" (default) | "idw" — see NWPAttentionLayer
+    idw_p           : inverse-distance power (nwp_aggregation="idw" only)
     """
 
     def __init__(
@@ -60,6 +62,8 @@ class DCGRUEncoder(nn.Module):
         nwp_heads: int = 4,
         edge_dim: int = 3,
         nwp_nodes: bool = True,
+        nwp_aggregation: str = "attention",
+        idw_p: float = 2.0,
     ) -> None:
         super().__init__()
         self.hidden_dim  = hidden_dim
@@ -76,6 +80,8 @@ class DCGRUEncoder(nn.Module):
                 heads=nwp_heads,
                 edge_dim=edge_dim,
                 dropout=dropout,
+                aggregation=nwp_aggregation,
+                idw_p=idw_p,
             )
 
         if nwp_nodes:

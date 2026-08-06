@@ -101,7 +101,7 @@ def build_source_list() -> list[dict]:
     """Enumerate the 30 (source, target, kind) triples."""
     entries = []
 
-    dcrnn_variants = ["", "_base", "_nwp_hist", "_nomeas", "_nograph"]
+    dcrnn_variants = ["", "_base", "_nwp_hist", "_nomeas", "_nograph", "_idw"]
     for variant in dcrnn_variants:
         for fold in (1, 2, 3):
             src = f"configs/dcrnn/config_wind_dcrnn{variant}_fold{fold}.yaml"

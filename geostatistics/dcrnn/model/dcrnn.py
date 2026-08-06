@@ -104,6 +104,8 @@ class DCRNN(nn.Module):
             nwp_heads=config.nwp_heads,
             edge_dim=edge_dim,
             nwp_nodes=config.nwp_nodes,
+            nwp_aggregation=config.nwp_aggregation,
+            idw_p=config.idw_p,
         )
 
         self.encoder = DCGRUEncoder(

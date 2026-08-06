@@ -83,6 +83,21 @@ VARIANTS: dict[str, tuple[list[tuple[str, str, str]], str]] = {
         "  # NWP-Kontextkanal.\n"
         "  # Erzeugt aus {src} von geostatistics/ablations/gen_variant_configs.py.",
     ),
+    "idw": (
+        [("nwp_aggregation", "idw",
+          "  # Ablation D: gelernte NWP-Attention -> feste inverse-distanzgewichtete Aggregation")],
+        "Ablation D (idw, R6(a) in docs/review_round2_findings.md): ersetzt in\n"
+        "  # NWPAttentionLayer die GELERNTEN GATv2-Attention-Gewichte der\n"
+        "  # icond2/ecmwf->station-Aggregation durch feste Gewichte w_ij = d_ij^-p /\n"
+        "  # sum_k d_ik^-p (Distanz aus edge_attr-Spalte 0). Die lineare\n"
+        "  # Quellprojektion bleibt lernbar; Bearing und uebrige Kantenspalten gehen\n"
+        "  # NICHT in die Gewichte ein (siehe nwp_attention.py-Docstring). Isoliert\n"
+        "  # den Beitrag der gelernten Gewichtung: der gesamte nachweisbare\n"
+        "  # Graph-Gewinn von GRID gegenueber rohem ICON-D2 sitzt in BASE->NOGRAPH,\n"
+        "  # also in genau dieser Attention (p = 1.2e-5); Stationsgraph und\n"
+        "  # Nachbarmessungen zusammen sind nicht von null zu trennen (p = 0.143).\n"
+        "  # Erzeugt aus {src} von geostatistics/ablations/gen_variant_configs.py.",
+    ),
 }
 
 # HPO params that provably cannot influence variant C (no station edges).

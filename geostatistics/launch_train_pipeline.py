@@ -163,6 +163,21 @@ GROUPS: list[Group] = [
         ],
     ),
 
+    # ── DCRNN IDW (Ablation D, R6(a) in docs/review_round2_findings.md) ────
+    # Ersetzt die gelernte NWP-Attention (GATv2) durch feste inverse-
+    # distanzgewichtete Aggregation; leitet sich wie NOMEAS/NOGRAPH vom
+    # GRID/NWP-Arm (Variante A) ab. Eigene HPO-Studie ueber den Config-Stem
+    # (config_wind_dcrnn_idw*.yaml -> ..._wind_dcrnn_idw), analog zu oben.
+    Group(
+        name   = "DCRNN_IDW",
+        script = "train_dcrnn",
+        folds  = [
+            FoldJob("configs/dcrnn/config_wind_dcrnn_idw_fold1.yaml", "fold1"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_idw_fold2.yaml", "fold2"),
+            FoldJob("configs/dcrnn/config_wind_dcrnn_idw_fold3.yaml", "fold3"),
+        ],
+    ),
+
     # ── WaveNet (R4: bisher fehlte hier ein Retrain-Pfad) ──────────────────
     # Exakt analog zu MTGNN_BASE/MTGNN_NWP: die regulaeren Fold-Configs (nicht
     # die stdhp-Kopien — diese Gruppen sind fuer die spaetere echte Kampagne

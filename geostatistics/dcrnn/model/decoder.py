@@ -52,6 +52,8 @@ class DCGRUDecoder(nn.Module):
     ecmwf_dim        : E2
     nwp_heads        : attention heads
     edge_dim         : edge_attr dimension
+    nwp_aggregation  : "attention" (default) | "idw" — see NWPAttentionLayer
+    idw_p            : inverse-distance power (nwp_aggregation="idw" only)
     """
 
     def __init__(
@@ -69,6 +71,8 @@ class DCGRUDecoder(nn.Module):
         edge_dim: int = 3,
         nwp_nodes: bool = True,
         station_nwp_dim: int = 0,
+        nwp_aggregation: str = "attention",
+        idw_p: float = 2.0,
     ) -> None:
         super().__init__()
         self.forecast_horizon = forecast_horizon
@@ -85,6 +89,8 @@ class DCGRUDecoder(nn.Module):
                 heads=nwp_heads,
                 edge_dim=edge_dim,
                 dropout=dropout,
+                aggregation=nwp_aggregation,
+                idw_p=idw_p,
             )
 
         if nwp_nodes:

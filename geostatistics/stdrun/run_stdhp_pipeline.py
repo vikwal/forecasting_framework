@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 run_stdhp_pipeline.py — Trockenlauf-Treiber: Retrain -> Eval mit festen
-Standard-Hyperparametern (stdhp) statt HPO-Best-Params, ueber 10 Varianten x
-3 Folds = 30 Fold-Jobs (DCRNN {base, nwp, nwp_hist, nomeas, nograph}, MTGNN
-{base, nwp, nwp_hist}, WaveNet {base, nwp}).
+Standard-Hyperparametern (stdhp) statt HPO-Best-Params, ueber 11 Varianten x
+3 Folds = 33 Fold-Jobs (DCRNN {base, nwp, nwp_hist, nomeas, nograph, idw},
+MTGNN {base, nwp, nwp_hist}, WaveNet {base, nwp}).
 
 Bewusst ein eigener Treiber neben launch_train_pipeline.py / launch_eval_pipeline.py,
 damit die Kampagnen-Launcher (die die laufende HPO-Infrastruktur mitbenutzen)
@@ -81,8 +81,9 @@ from launch_eval_pipeline import JOBS as EVAL_JOBS       # noqa: E402
 REQUIRED_ENV = ["WEATHER_DB_URL", "ECMWF_WIND_SL_URL", "OPTUNA_STORAGE"]
 
 # Groups that never had an end-to-end retrain+eval run before this dry-run —
-# scheduled first so the new paths produce results early.
-PRIORITY_GROUPS = ["WAVENET_BASE", "WAVENET_NWP", "DCRNN_NOMEAS", "DCRNN_NOGRAPH"]
+# scheduled first so the new paths produce results early. DCRNN_IDW (Ablation
+# D, R6(a)) is the newest of these: fixed inverse-distance NWP aggregation.
+PRIORITY_GROUPS = ["WAVENET_BASE", "WAVENET_NWP", "DCRNN_NOMEAS", "DCRNN_NOGRAPH", "DCRNN_IDW"]
 
 
 # ---------------------------------------------------------------------------

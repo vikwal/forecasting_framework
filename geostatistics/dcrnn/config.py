@@ -133,6 +133,16 @@ class DCRNNConfig:
     wind_dir_meas_idx: int = -1     # index of sin_wind_direction (or raw wind_direction) in encoded measurement_features
     wind_dir_cos_idx: int = -1      # index of cos_wind_direction (-1 when wind_direction is raw degrees)
 
+    # Ablation D (R6(a), docs/review_round2_findings.md): replaces the learned
+    # GATv2 attention weights in NWPAttentionLayer with fixed inverse-distance
+    # weights; the source projection stays learnable. Default "attention"
+    # preserves variant A exactly. See geostatistics/dcrnn/model/nwp_attention.py
+    # for the full design and geostatistics/ablations/guard.py for the hard
+    # guard (idw requires nwp_nodes=True, nwp_injection=True, and a distance
+    # edge feature).
+    nwp_aggregation: str = "attention"   # "attention" | "idw"
+    idw_p: float = 2.0                    # inverse-distance power (idw only)
+
     # ------------------------------------------------------------------
 
     def edge_input_dim(self) -> int:
@@ -254,6 +264,13 @@ class DCRNNConfig:
 
         nwp_nodes = d.get("nwp_nodes", True)
 
+        nwp_aggregation = d.get("nwp_aggregation", "attention")
+        if nwp_aggregation not in ("attention", "idw"):
+            raise ValueError(
+                f"nwp_aggregation must be 'attention' or 'idw', got {nwp_aggregation!r}"
+            )
+        idw_p = float(d.get("idw_p", 2.0))
+
         return cls(
             training=training,
             graph=graph,
@@ -284,6 +301,8 @@ class DCRNNConfig:
             prefetch_workers=d.get("prefetch_workers", 1),
             nwp_injection=nwp_injection,
             nwp_nodes=nwp_nodes,
+            nwp_aggregation=nwp_aggregation,
+            idw_p=idw_p,
             direction_to_adj=direction_to_adj,
             wind_dir_meas_idx=wind_dir_meas_idx,
             wind_dir_cos_idx=wind_dir_cos_idx,
