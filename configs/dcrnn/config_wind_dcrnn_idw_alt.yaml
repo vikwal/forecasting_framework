@@ -1,7 +1,7 @@
 data:
-  path: '/mnt/nvme1/synthetic/raw/wind'
-  nwp_path: '/mnt/nvme1/icon-d2/parquet'
-  ecmwf_path: '/mnt/nvme1/ecmwf/parquet' #ecmwf_wind_sl_full_prefect.parquet'
+  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet' #ecmwf_wind_sl_full_prefect.parquet'
   files: [
             '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
             '03730', '05792', '05856', '15000', '05779', '04271', '02638', '02961', '05490', '05426',
@@ -32,9 +32,9 @@ data:
   test_start: '2025-08-01'
   test_end:   '2025-10-31'
   wind_parameter_path: 'data/stations_master.csv'
-  interpol_path: '/mnt/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/wind'
-  power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
+  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
+  power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
   #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
@@ -83,7 +83,7 @@ dcrnn:
   use_direction_features: true
   use_distance_features: true
   edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
-  topo_features_path: '/mnt/nvme1/topo_features'
+  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
   # Alle neun Topo-Features als absolute Knotenfeatures. Ohne diesen
   # Schluessel bekam DCRNN gar keine (parse_station_node_features hat
   # keinen edge_features-Fallback) und MTGNN/WaveNet nur die acht aus
@@ -190,14 +190,23 @@ dcrnn:
         low: 0.1
         high: 0.6
 
-      # nwp_heads entfaellt: unter idw/idw_alt wirkungslos ausser als Faktor von nwp_out_dim = nwp_heads * nwp_out_per_head (NWPAttentionLayer baut in diesem Modus nur nn.Linear(*, nwp_out_dim), kein GATv2 mit echten Attention-Heads) — nwp_out_per_head bleibt der alleinige Suchparameter fuer nwp_out_dim, nwp_heads ist auf den harmonisierten Wert (4) fixiert.
-
-      # Per-head output dimension of the NWP attention layer.
-      # nwp_out_dim = nwp_heads * nwp_out_per_head (enforced in hpo_dcrnn.py)
-      nwp_out_per_head:
+      # nwp_heads entfaellt: unter idw/idw_alt wirkungslos, da NWPAttentionLayer
+      # in diesem Modus nur eine einzige nn.Linear(*, nwp_out_dim) baut, kein
+      # GATv2 mit echten Attention-Heads -- nwp_heads ist auf den harmonisierten
+      # Wert (4) fixiert. Deshalb wird hier nicht wie bei A ueber
+      # nwp_heads x nwp_out_per_head gesucht (das haette den gesampelten
+      # nwp_out_per_head-Wert mangels nwp_heads im Suchraum nur still verworfen
+      # -- genau der Bug, den dieser Block behebt), sondern nwp_out_dim direkt.
+      # Bereich aus A's Suchraum abgeleitet, damit D/D' dieselbe Suchraum-
+      # Dimensionalitaet wie A/B/C behalten: low = min(nwp_heads) x
+      # min(nwp_out_per_head) = 1 x 4 = 4, high = max(nwp_heads) x
+      # max(nwp_out_per_head) = 6 x 32 = 192 (config_wind_dcrnn.yaml:
+      # nwp_heads low=1/high=6, nwp_out_per_head low=4/high=32). Keine
+      # Teilbarkeitsbedingung noetig, da nn.Linear nicht in Heads aufteilt.
+      nwp_out_dim:
         type: int
         low: 4
-        high: 32
+        high: 192
 
       # Inverse-Distanz-Exponent (nwp_attention.py). Untergrenze deutlich ueber
       # 0, weil p=0 ein ungewichtetes Mittel und p<0 die Gewichtung umkehren

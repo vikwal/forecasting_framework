@@ -1,7 +1,7 @@
 data:
-  path: '/mnt/nvme1/synthetic/raw/wind'
-  nwp_path: '/mnt/nvme1/icon-d2/parquet'
-  ecmwf_path: '/mnt/nvme1/ecmwf/parquet'
+  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
+  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
   files: [
             '00161', '00164', '00232', '00282', '00298', '00303', '00433', '00460', '00591', '00656',
             '00662', '00701', '00704', '00853', '00856', '00880', '01048', '01200', '01270', '01357',
@@ -33,9 +33,9 @@ data:
   test_end: '2026-03-31'   # Grenze gegen NaN in ECMWF-Parquets ab 2026-05-01
   # Optional: restrict to a time window for evaluation (comment out to use all data)
   wind_parameter_path: 'data/stations_master.csv'
-  interpol_path: '/mnt/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/nvme1/synthetic/knnimputer/wind'
-  power_curves_path: '/mnt/nvme1/synthetic/wind/power_curves'
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
+  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
+  power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
   #synth_path: '/mnt/nas/synthetic/open-meteo/icon_d2/wind/wind_hourly_age'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
@@ -159,7 +159,7 @@ dcrnn:
   nwp_aggregation: idw  # Ablation D: gelernte NWP-Attention -> feste inverse-distanzgewichtete Aggregation
   use_altitude_diff: true
   edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
-  topo_features_path: '/mnt/nvme1/topo_features'
+  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
   station_node_features: all
   icond2_run_hours: [6, 9, 12, 15]
 

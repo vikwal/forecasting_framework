@@ -166,6 +166,10 @@ def sample_hyperparameters(trial: optuna.Trial, hpo_params: dict) -> dict:
       - ``nwp_out_dim = nwp_heads * nwp_out_per_head`` is derived (not sampled
         directly), mirroring the hpo_cl.py approach of using ``step=n_heads``
         to guarantee divisibility without trial pruning.
+      - Variants whose NWPAttentionLayer has no head structure to divide
+        (``nwp_aggregation`` in {"idw", "idw_alt"}: a plain nn.Linear, no
+        GATv2) search ``nwp_out_dim`` directly instead and never declare
+        ``nwp_heads`` — see config_wind_dcrnn_idw(_alt).yaml.
     """
     sampled: dict = {}
     for name, spec in hpo_params.items():
@@ -175,7 +179,30 @@ def sample_hyperparameters(trial: optuna.Trial, hpo_params: dict) -> dict:
     if "nwp_heads" in sampled and "nwp_out_per_head" in sampled:
         sampled["nwp_out_dim"] = sampled.pop("nwp_out_per_head") * sampled["nwp_heads"]
     elif "nwp_out_per_head" in sampled:
-        sampled.pop("nwp_out_per_head")   # can't derive without nwp_heads
+        # nwp_out_per_head without nwp_heads cannot be turned into nwp_out_dim
+        # and used to be silently dropped here -- the sampled value was
+        # recorded in the Optuna study and then discarded, so every trial
+        # trained (and, worse, every RETRAIN from study.best_params would
+        # have trained) with whatever nwp_out_dim the static config default
+        # happened to carry, never the value Optuna actually explored. Found
+        # in review: this was live in configs/dcrnn/config_wind_dcrnn_idw.yaml
+        # and config_wind_dcrnn_idw_alt.yaml, which searched nwp_out_per_head
+        # without nwp_heads (nwp_heads is pinned/absent under idw/idw_alt, see
+        # the docstring above) -- fixed there by searching nwp_out_dim
+        # directly, but this abort stays as the general guard: a future
+        # config making the same mistake must fail loudly, not silently
+        # train the wrong architecture.
+        raise ValueError(
+            "hpo.params declares 'nwp_out_per_head' without 'nwp_heads' -- "
+            "nwp_out_dim cannot be derived and the sampled value would "
+            "otherwise be silently discarded (every trial would then train "
+            "with the static nwp_out_dim default instead of the searched "
+            "one). Either add an 'nwp_heads' entry to hpo.params, or search "
+            "'nwp_out_dim' directly (the correct choice when "
+            "nwp_aggregation is 'idw' or 'idw_alt' -- NWPAttentionLayer "
+            "builds a plain nn.Linear there, no head structure to divide "
+            "by)."
+        )
 
     return sampled
 

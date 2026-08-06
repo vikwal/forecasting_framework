@@ -214,23 +214,57 @@ class DCRNNConfig:
 
         Call exactly once, right after ``HeterogeneousGraphBuilder.build()``
         and before constructing ``DCRNN(config)`` — required for
-        nwp_aggregation="idw_alt" (DCRNN.__init__ hard-fails if this was
-        skipped); for every other aggregation the values are read but never
-        consumed. Note it is not a *no-op* there: it dereferences
-        ``base_graph[...].max_dist_km`` unconditionally and therefore raises
-        AttributeError on any graph that did not come from this repo's
-        ``build()`` (a loud failure, never a wrong number). Centralised
-        here, as a single method every driver script calls identically,
-        because a per-script copy of "read this attribute off the graph" is
-        exactly the kind of thing that has been forgotten before in this
-        codebase (see K1/R2 in docs/review_round2_findings.md re.
-        get_test_results_dcrnn.py's architecture reconstruction).
+        nwp_aggregation="idw_alt" (DCRNN.__init__ hard-fails if the values
+        are non-positive, whatever the cause).
+
+        ``base_graph[edge_type].max_dist_km`` may legitimately be absent: a
+        graph built by an older or reverted ``HeterogeneousGraphBuilder`` (it
+        started persisting this attribute for exactly this feature) simply
+        won't have it. Two different reactions to that, deliberately not one:
+
+          * ``nwp_aggregation == "idw_alt"`` — the value is load-bearing (the
+            physical-km distance normaliser, see nwp_attention.py), so a
+            missing attribute is a real configuration error and raises
+            loudly, with a message that points at the cause, rather than
+            surfacing as a bare AttributeError three layers down in
+            NWPAttentionLayer once the icond2_max_dist_km <= 0 check there
+            fires anyway.
+          * every other aggregation — the values are read but never consumed
+            (see nwp_attention.py: only "idw_alt" reads them), so a missing
+            attribute falls back to 0.0 rather than aborting. This is what
+            decouples graph_builder.py from the three driver scripts: a
+            revert of the graph_builder.py persistence change alone must not
+            break variant A (or D, or B/C) — only idw_alt, which actually
+            depends on it, should notice.
+
+        Centralised here, as a single method every driver script calls
+        identically, because a per-script copy of "read this attribute off
+        the graph" is exactly the kind of thing that has been forgotten
+        before in this codebase (see K1/R2 in
+        docs/review_round2_findings.md re. get_test_results_dcrnn.py's
+        architecture reconstruction).
         """
         i2s_key = ("icond2", "informs", "station")
         e2s_key = ("ecmwf", "informs", "station")
-        self.icond2_max_dist_km = float(base_graph[i2s_key].max_dist_km)
+
+        def _read(key: tuple, label: str) -> float:
+            try:
+                return float(base_graph[key].max_dist_km)
+            except AttributeError:
+                if self.nwp_aggregation == "idw_alt":
+                    raise AttributeError(
+                        f"attach_nwp_geometry: base_graph[{key!r}].max_dist_km is missing "
+                        f"({label}), but nwp_aggregation='idw_alt' needs it as the physical-km "
+                        f"distance normaliser (see nwp_attention.py). This graph was not built "
+                        f"by the current HeterogeneousGraphBuilder.build() -- rebuild it (an "
+                        f"older/reverted graph_builder.py, or a cached/pickled graph predating "
+                        f"the max_dist_km persistence, would both look like this)."
+                    ) from None
+                return 0.0   # unused outside idw_alt, see the docstring above
+
+        self.icond2_max_dist_km = _read(i2s_key, "icond2->station")
         if self.ecmwf_features_per_step > 0 and base_graph[e2s_key].edge_index.numel() > 0:
-            self.ecmwf_max_dist_km = float(base_graph[e2s_key].max_dist_km)
+            self.ecmwf_max_dist_km = _read(e2s_key, "ecmwf->station")
         else:
             self.ecmwf_max_dist_km = 0.0
 
@@ -290,6 +324,20 @@ class DCRNNConfig:
             val_stations=list(range(n_train, n_train + n_val)),
         )
 
+        # Parsed here (ahead of its previous position below) because the
+        # nwp_out_dim/nwp_heads divisibility check right below needs it:
+        # under idw/idw_alt, NWPAttentionLayer builds a plain nn.Linear, not a
+        # GATv2 split across heads (see nwp_attention.py), so nwp_heads is a
+        # harmonized-but-otherwise-inert value there and nwp_out_dim need not
+        # be a multiple of it. Enforcing divisibility anyway would silently
+        # exclude ~3/4 of an nwp_out_dim search space like [4, 192] for no
+        # functional reason.
+        nwp_aggregation = d.get("nwp_aggregation", "attention")
+        if nwp_aggregation not in ("attention", "idw", "idw_alt"):
+            raise ValueError(
+                f"nwp_aggregation must be 'attention', 'idw' or 'idw_alt', got {nwp_aggregation!r}"
+            )
+
         hidden_dim     = d.get("hidden")
         nwp_injection  = d.get("nwp_injection", True)
         nwp_heads      = d.get("nwp_heads", 4)
@@ -297,11 +345,21 @@ class DCRNNConfig:
         if not nwp_injection:
             nwp_out_dim = 0
             nwp_heads   = 1   # dummy — NWPAttentionLayer not created
-        # Enforce divisibility (skipped when nwp_out_dim == 0)
-        if nwp_out_dim > 0 and nwp_out_dim % nwp_heads != 0:
+        # Enforce divisibility (skipped when nwp_out_dim == 0, or under
+        # idw/idw_alt where nwp_heads doesn't split anything — see above).
+        if (nwp_out_dim > 0 and nwp_aggregation == "attention"
+                and nwp_out_dim % nwp_heads != 0):
             raise ValueError(
                 f"nwp_out_dim ({nwp_out_dim}) must be divisible by nwp_heads ({nwp_heads})"
             )
+
+        idw_p = float(d.get("idw_p", 2.0))
+        alpha_alt = float(d.get("alpha_alt", 10.0))
+        if nwp_aggregation in ("idw", "idw_alt"):
+            # Local import: geostatistics/dcrnn/__init__.py loads .config before
+            # .model.dcrnn, so a module-level import here would be circular.
+            from .model.nwp_attention import validate_idw_p
+            validate_idw_p(idw_p)
 
         interpolate_history = d.get("interpolate_history", False)
         # Default True preserves variant A exactly.
@@ -331,19 +389,6 @@ class DCRNNConfig:
                 )
 
         nwp_nodes = d.get("nwp_nodes", True)
-
-        nwp_aggregation = d.get("nwp_aggregation", "attention")
-        if nwp_aggregation not in ("attention", "idw", "idw_alt"):
-            raise ValueError(
-                f"nwp_aggregation must be 'attention', 'idw' or 'idw_alt', got {nwp_aggregation!r}"
-            )
-        idw_p = float(d.get("idw_p", 2.0))
-        alpha_alt = float(d.get("alpha_alt", 10.0))
-        if nwp_aggregation in ("idw", "idw_alt"):
-            # Local import: geostatistics/dcrnn/__init__.py loads .config before
-            # .model.dcrnn, so a module-level import here would be circular.
-            from .model.nwp_attention import validate_idw_p
-            validate_idw_p(idw_p)
 
         return cls(
             training=training,

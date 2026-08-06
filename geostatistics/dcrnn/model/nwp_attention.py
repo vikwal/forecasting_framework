@@ -455,8 +455,6 @@ class NWPAttentionLayer(nn.Module):
                     f"DCRNNConfig.attach_nwp_geometry(base_graph)), got {ecmwf_max_dist_km!r}."
                 )
             alpha_alt = validate_alpha_alt(alpha_alt)
-        assert nwp_out_dim % heads == 0
-        out_per_head = nwp_out_dim // heads
         self.station_dim  = station_dim
         self.nwp_out_dim  = nwp_out_dim
         self.ecmwf_dim    = ecmwf_dim
@@ -468,6 +466,15 @@ class NWPAttentionLayer(nn.Module):
         self.ecmwf_max_dist_km  = float(ecmwf_max_dist_km)
 
         if aggregation == "attention":
+            # heads only matter here: GATv2Conv splits nwp_out_dim across
+            # `heads` real attention heads, so it must divide evenly. idw/
+            # idw_alt build a single nn.Linear(*, nwp_out_dim) below instead
+            # (see the class docstring) -- there is no head structure to
+            # divide by, so nwp_out_dim is unconstrained there (this is what
+            # lets D/D' search nwp_out_dim directly over a range that is not
+            # a multiple of 4, see config_wind_dcrnn_idw(_alt).yaml).
+            assert nwp_out_dim % heads == 0
+            out_per_head = nwp_out_dim // heads
             self.gat_i2s = GATv2Conv(
                 in_channels=(icond2_dim, station_dim),
                 out_channels=out_per_head,

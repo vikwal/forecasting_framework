@@ -2,6 +2,29 @@
 """
 get_test_results_stgnn2.py — Evaluate trained STGNN2 / DCRNN models on test data.
 
+LEGACY / UNMAINTAINED for DCRNN. get_test_results_dcrnn.py is a "specialized
+version of get_test_results_stgnn2.py" (see its own docstring) that
+superseded this script's DCRNN path: it is the only DCRNN eval entry point
+wired into launch_eval_pipeline.py / run_stdhp_pipeline.py, and the only one
+that calls check_ablation_flags() (geostatistics/ablations/guard.py) and
+DCRNNConfig.attach_nwp_geometry() (required for nwp_aggregation="idw_alt";
+see geostatistics/dcrnn/config.py). This script's own DCRNN construction
+site (below, ~line 462) has neither: it does not know about the B/C/D/D'
+ablation flags at all, and would hard-fail under idw_alt (by design —
+attach_nwp_geometry() aborts loudly rather than silently defaulting
+icond2_max_dist_km — but a loud failure on an otherwise-silent gap in
+functionality, not a working fallback). Found while auditing every DCRNN(...)
+construction site in the tree (docs/review_round2_findings.md K1/R2 is the
+precedent for exactly this class of bug: a switch reaching some construction
+sites and not others). Decision: mark as legacy rather than retrofit,
+because it is unreferenced by any current pipeline (grep confirms only
+docstring mentions elsewhere, no imports, no launcher entries) and already
+lacks the neighbour_meas_available/station_connectivity guards too --
+patching only the idw_alt gap would leave it silently wrong for B/C, which
+is a worse state than a script that is clearly labelled unmaintained. If
+this script is ever revived for DCRNN, add both check_ablation_flags() and
+attach_nwp_geometry() at its DCRNN construction site first.
+
 Supports both architectures (detected automatically from the model filename).
 Runs inference over all test-period run pairs, accumulates per-station
 predictions in physical units (m/s), and writes a summary CSV.

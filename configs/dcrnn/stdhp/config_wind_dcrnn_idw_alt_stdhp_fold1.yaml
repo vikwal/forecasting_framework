@@ -9,9 +9,9 @@
 # always dead: grad_accum shadowed it) to avoid misleading future readers.
 # Do not hand-edit — regenerate from the source config instead.
 data:
-  path: /mnt/nvme1/synthetic/raw/wind
-  nwp_path: /mnt/nvme1/icon-d2/parquet
-  ecmwf_path: /mnt/nvme1/ecmwf/parquet
+  path: /mnt/lambda1/nvme1/synthetic/raw/wind
+  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
+  ecmwf_path: /mnt/lambda1/nvme1/ecmwf/parquet
   files:
   - 00183
   - 00282
@@ -222,9 +222,9 @@ data:
   test_start: '2025-08-01'
   test_end: '2026-03-31'
   wind_parameter_path: data/stations_master.csv
-  interpol_path: /mnt/nvme1/synthetic/interpol/wind
-  knnimputer_path: /mnt/nvme1/synthetic/knnimputer/wind
-  power_curves_path: /mnt/nvme1/synthetic/wind/power_curves
+  interpol_path: /mnt/lambda1/nvme1/synthetic/interpol/wind
+  knnimputer_path: /mnt/lambda1/nvme1/synthetic/knnimputer/wind
+  power_curves_path: /mnt/lambda1/nvme1/synthetic/wind/power_curves
   stations_master: data/stations_master.csv
   freq: 1h
   train_frac: 1
@@ -348,7 +348,7 @@ dcrnn:
   - aspect_sin
   - aspect_cos
   - dist_coast
-  topo_features_path: /mnt/nvme1/topo_features
+  topo_features_path: /mnt/lambda1/nvme1/topo_features
   station_node_features: all
   icond2_run_hours:
   - 6
