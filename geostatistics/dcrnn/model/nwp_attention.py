@@ -134,8 +134,9 @@ epsilon floor raised to a large enough power did overflow to inf and turn the
 per-station normalisation into inf/inf = NaN; that failure mode does not
 exist here, so p is no longer upper-bounded (p > 0 is still required — p <= 0
 does not down-weight distance at all or inverts it, see ``validate_idw_p``).
-Measured against the real fold graph (153 stations, k=4, p=2, 918 icond2 /
-612 ecmwf edges): the renormalised weights deviate from the
+Measured against the real fold graph (153 stations, p=2, next_n_icond2=6 /
+next_n_ecmwf=4 — the HPO config's k, hence 918 icond2 / 612 ecmwf edges):
+the renormalised weights deviate from the
 pre-renormalisation weights by at most 1.79e-7 (icond2) / 1.19e-7 (ecmwf) —
 float32 rounding, not a behavioural change (verify_idw.py §9). The resulting
 DCRNN forward pass shifts correspondingly little: on a full model forward
@@ -201,12 +202,20 @@ would silently degenerate d3d to just the height term).
 Back-calculation against the real graph (data_cache/gnns/*/derived.pkl, 153
 stations, 1071 icond2 / 553 ecmwf grid points): reconstructing the altitude
 column from the real station/grid altitudes matches the stored edge_attr to
-within 8.4e-5 m (float32 rounding) for both edge types, and 0 of 918 icond2 /
+within ~1e-4 m (float32 rounding) for both edge types, and 0 of 918 icond2 /
 612 ecmwf edges hit the +-3000 m clip (max observed |Delta_alt| = 1605 m /
 2215 m). The implied distance normaliser (edge_attr[:,0] against
 independently recomputed geodesic km) is exactly constant across each edge
-type (3.4945 km for icond2, 29.2554 km for ecmwf), confirming it is the
-single graph-wide scalar the code assumes.
+type, confirming it is the single graph-wide scalar the code assumes.
+
+Its VALUE, however, is not a constant of the data: max_dist_km is the largest
+station-to-k-th-nearest-grid-point distance, so it moves with next_n_icond2 /
+next_n_ecmwf and with the fold's station set. Measured on this graph:
+3.4945 km at next_n_icond2=6 (the HPO configs) but 2.6090 km at
+next_n_icond2=4 (the stdhp ladder configs); 29.2554 km for ecmwf at
+next_n_ecmwf=4. That is exactly why it is read back off the graph that was
+actually built for the run (attach_nwp_geometry) instead of being written
+into a config as a literal.
 
 Choice of alpha_alt (default 10.0)
 -------------------------------------
@@ -217,17 +226,18 @@ a distance-based baseline at all). Calibrated against the measured
 distributions on the real fold graph (same source as above), NOT a rule of
 thumb:
 
-  icond2 (k=4, 918 edges): Delta_alt median 14.0 m, q75 32.8 m, max 1605 m;
+  icond2 (next_n_icond2=6, 918 edges): Delta_alt median 14.0 m, q75 32.8 m, max 1605 m;
     horizontal distance median 2145 m, q75 2690 m, max 3495 m.
     Delta_alt / distance ratio: median 0.79%, q75 1.74%, q95 6.62%, max 76%.
-  ecmwf (k=4, 612 edges): Delta_alt median 35.9 m, q75 104.0 m, max 2215 m;
+  ecmwf (next_n_ecmwf=4, 612 edges): Delta_alt median 35.9 m, q75 104.0 m, max 2215 m;
     horizontal distance median 17519 m, q75 21540 m, max 29255 m.
     Delta_alt / distance ratio: median 0.24%, q75 0.67%, q95 2.17%, max 16%.
 
 At alpha_alt=10: the vertical term is ~6.5% of the horizontal median (icond2)
 / ~2.0% (ecmwf) — clearly subordinate in the typical case — while the
 vertical term exceeds the horizontal one for 2.5% of icond2 edges and 0.2%
-of ecmwf edges: exactly the steep-terrain minority (e.g. Alpine stations)
+of ecmwf edges (3.1% / 0.2% on the stdhp ladder graph, next_n_icond2=4):
+exactly the steep-terrain minority (e.g. Alpine stations)
 where a height correction is supposed to matter, without the correction
 taking over the flat-terrain majority. At alpha_alt=50 that fraction grows to
 22%/6% — no longer a correction, closer to a height-only ranking — which is

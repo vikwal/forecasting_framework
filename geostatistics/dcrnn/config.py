@@ -215,7 +215,11 @@ class DCRNNConfig:
         Call exactly once, right after ``HeterogeneousGraphBuilder.build()``
         and before constructing ``DCRNN(config)`` — required for
         nwp_aggregation="idw_alt" (DCRNN.__init__ hard-fails if this was
-        skipped), a harmless no-op for every other aggregation. Centralised
+        skipped); for every other aggregation the values are read but never
+        consumed. Note it is not a *no-op* there: it dereferences
+        ``base_graph[...].max_dist_km`` unconditionally and therefore raises
+        AttributeError on any graph that did not come from this repo's
+        ``build()`` (a loud failure, never a wrong number). Centralised
         here, as a single method every driver script calls identically,
         because a per-script copy of "read this attribute off the graph" is
         exactly the kind of thing that has been forgotten before in this
