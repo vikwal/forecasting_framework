@@ -25,10 +25,14 @@ forward_sequence() : all T timesteps at once using the block-diagonal trick.
                      cover T independent time-slices in one GATv2 call.
                      Mathematically identical to calling forward() T times,
                      but eliminates 96× Python/kernel-dispatch overhead.
-                     Used exclusively by MTGNN/WaveNet via
-                     geostatistics/shared/nwp_gat.py — the DCRNN path never
-                     calls this method and it stays "attention"-only;
-                     "idw" is not wired into it.
+                     Currently has NO caller anywhere in the tree: the
+                     DCRNN encoder/decoder always use forward(), and
+                     MTGNN/WaveNet do not use this class at all — they use the
+                     separate HomoNWPAttentionLayer in
+                     geostatistics/shared/nwp_gat.py, which carries its own
+                     copy of the block-diagonal trick. It stays
+                     "attention"-only and raises NotImplementedError under
+                     "idw"; wiring idw in here would be dead code today.
 
 Block-diagonal trick (forward_sequence)
 -----------------------------------------
@@ -97,14 +101,26 @@ weights and hold everything else fixed.
   single scalar — the maximum station-to-nearest-grid-point distance over
   the *entire* edge type — so every edge of that type shares the same
   normalisation constant. IDW weights are a ratio of distances into the same
-  softmax-style per-destination sum, so that shared constant cancels exactly:
-  computing w_ij from the *normalised* column gives bit-identical weights to
-  computing it from physical km. No unit conversion is needed or performed.
-  A distance of exactly 0 (station coincides with a grid point) is guarded
-  by clamping to ``idw_eps`` before the ``**-p``, so it dominates the
-  aggregate (correctly — it is a coincident point) without producing inf/NaN.
+  per-destination sum, so that shared constant cancels *algebraically* and no
+  unit conversion is needed or performed. In float32 the cancellation is not
+  bit-exact but rounding-exact: measured against the real fold graph
+  (153 stations, k=4), max|w(normalised) - w(km)| = 1.2e-7 for icond2 and
+  1.2e-7 for ecmwf at p=2, and the per-station weight sums deviate from 1 by
+  at most 1.8e-7 / 1.2e-7 respectively.
+* A distance of exactly 0 (station coincides with a grid point) is guarded by
+  clamping to ``_IDW_EPS`` before the ``**-p``, so it dominates the aggregate
+  (correctly — it is a coincident point) without producing inf/NaN. That
+  guarantee only holds while ``_IDW_EPS ** -p`` is representable in float32,
+  which caps ``idw_p`` at ``_IDW_P_MAX`` (~6.42 for eps=1e-6); beyond that the
+  floored edge overflows to inf and the normalisation yields NaN instead. Both
+  bounds on p are enforced at construction time and in
+  geostatistics/ablations/guard.py, so a config can no longer produce silent
+  NaNs — or, with p <= 0, a silently *inverted* weighting that favours the
+  most distant grid point.
 """
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn as nn
@@ -113,6 +129,34 @@ from torch_geometric.nn import GATv2Conv
 
 _IDW_EPS = 1e-6      # floor on the (normalised, unitless) distance before **-p
 _DIST_COL = 0        # edge_attr column holding normalised distance (see module docstring)
+
+# Largest inverse-distance power for which a distance sitting exactly on the
+# _IDW_EPS floor still yields a finite float32 weight: _IDW_EPS ** -p <= finfo.max.
+# Above it, a coincident grid point produces inf -> inf/inf -> NaN, silently, for
+# the whole destination station. ~6.42 for eps=1e-6.
+_IDW_P_MAX = math.log(torch.finfo(torch.float32).max) / math.log(1.0 / _IDW_EPS)
+
+
+def validate_idw_p(p: float) -> float:
+    """Range-check the inverse-distance power. Shared by DCRNNConfig.from_yaml,
+    geostatistics/ablations/guard.py and NWPAttentionLayer.__init__ so the same
+    bounds hold whichever entry point a run comes through."""
+    p = float(p)
+    if not math.isfinite(p) or p <= 0.0:
+        raise ValueError(
+            f"idw_p must be a finite number > 0, got {p!r}. p <= 0 does not "
+            f"down-weight distance at all (p == 0 is a plain unweighted mean, "
+            f"p < 0 *inverts* the weighting and favours the most distant grid "
+            f"point) — neither is the IDW baseline this ablation is defined as."
+        )
+    if p > _IDW_P_MAX:
+        raise ValueError(
+            f"idw_p must be <= {_IDW_P_MAX:.4f} (float32 limit), got {p!r}. The "
+            f"zero-distance guard clamps to _IDW_EPS={_IDW_EPS:g} before the "
+            f"**-p; above this power that clamped edge overflows to inf and the "
+            f"per-station normalisation returns NaN for the whole station."
+        )
+    return p
 
 
 def _expand_hetero_edge_index(
@@ -198,11 +242,13 @@ class NWPAttentionLayer(nn.Module):
         super().__init__()
         if aggregation not in ("attention", "idw"):
             raise ValueError(f"Unknown aggregation: {aggregation!r} (expected 'attention' or 'idw')")
-        if aggregation == "idw" and edge_dim < 1:
-            raise ValueError(
-                f"aggregation='idw' needs edge_dim >= 1 (column {_DIST_COL} must hold the "
-                f"distance feature), got edge_dim={edge_dim}."
-            )
+        if aggregation == "idw":
+            if edge_dim < 1:
+                raise ValueError(
+                    f"aggregation='idw' needs edge_dim >= 1 (column {_DIST_COL} must hold the "
+                    f"distance feature), got edge_dim={edge_dim}."
+                )
+            idw_p = validate_idw_p(idw_p)
         assert nwp_out_dim % heads == 0
         out_per_head = nwp_out_dim // heads
         self.station_dim  = station_dim

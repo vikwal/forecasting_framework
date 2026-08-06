@@ -141,7 +141,7 @@ class DCRNNConfig:
     # guard (idw requires nwp_nodes=True, nwp_injection=True, and a distance
     # edge feature).
     nwp_aggregation: str = "attention"   # "attention" | "idw"
-    idw_p: float = 2.0                    # inverse-distance power (idw only)
+    idw_p: float = 2.0                    # inverse-distance power (idw only), 0 < p <= ~6.42
 
     # ------------------------------------------------------------------
 
@@ -270,6 +270,11 @@ class DCRNNConfig:
                 f"nwp_aggregation must be 'attention' or 'idw', got {nwp_aggregation!r}"
             )
         idw_p = float(d.get("idw_p", 2.0))
+        if nwp_aggregation == "idw":
+            # Local import: geostatistics/dcrnn/__init__.py loads .config before
+            # .model.dcrnn, so a module-level import here would be circular.
+            from .model.nwp_attention import validate_idw_p
+            validate_idw_p(idw_p)
 
         return cls(
             training=training,

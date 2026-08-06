@@ -34,11 +34,18 @@ failure mode, not a crash, if left unchecked:
     of edge_attr is NOT a distance (it would be bearing sin, or altitude diff,
     or whatever feature happens to sit first), and ``d**-p`` would silently
     weight stations by the wrong quantity.
+
+``idw_p`` is range-checked here too (``validate_idw_p``): it is a free config
+field outside the HPO search space, and both ends of its range fail silently
+rather than loudly — p <= 0 inverts or flattens the weighting instead of
+crashing, p above the float32 limit turns a clamped zero-distance edge into
+inf and the whole station's weights into NaN.
 """
 from __future__ import annotations
 
 import logging
 
+from geostatistics.dcrnn.model.nwp_attention import validate_idw_p
 from geostatistics.stgnn.config import parse_edge_features
 
 
@@ -115,6 +122,11 @@ def check_ablation_flags(dcrnn_cfg: dict, logger: logging.Logger | None = None) 
                 "NWPAttentionLayer is never constructed. Set nwp_injection: true, "
                 "or drop nwp_aggregation: idw."
             )
+        try:
+            validate_idw_p(dcrnn_cfg.get("idw_p", 2.0))
+        except (ValueError, TypeError) as exc:
+            raise AblationConfigError(f"nwp_aggregation='idw': {exc}") from exc
+
         use_distance, _, _, _ = parse_edge_features(dcrnn_cfg)
         if not use_distance:
             raise AblationConfigError(
