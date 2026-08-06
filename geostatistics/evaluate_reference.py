@@ -34,7 +34,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.spatial import cKDTree
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -133,17 +132,18 @@ def evaluate_nwp_baselines(
     val_ids:           list[str],
     meas_raw:          np.ndarray,          # (T, N, M) physical
     grid_icond2_runs:  np.ndarray,          # (R, n_leads, N_grid_i2, I2) physical
-    grid_ecmwf_runs:   np.ndarray | None,   # (T, N_grid_e2, E2) physical
+    station_ecmwf_nwp: np.ndarray | None,   # (T, N_all, E2) physical — already at each
+                                             # station's own geodesically-nearest grid point
     target_feat_idx:   int,
     nwp_ws_feat_idx:   int,
     ecmwf_ws_feat_idx: int,
     nearest_i2:        np.ndarray,          # (N_val,) nearest ICON-D2 grid idx per val station
-    nearest_e2:        np.ndarray | None,   # (N_val,) nearest ECMWF  grid idx per val station
+                                             # (geodesic — from load_icond2_ml_runs itself)
     timestamps:        pd.DatetimeIndex,
     F_h:               int,
 ):
     N_val     = len(val_ids)
-    has_ecmwf = grid_ecmwf_runs is not None and nearest_e2 is not None
+    has_ecmwf = station_ecmwf_nwp is not None
 
     i2_preds = [[] for _ in range(N_val)]
     i2_gts   = [[] for _ in range(N_val)]
@@ -170,10 +170,12 @@ def evaluate_nwp_baselines(
         pers_vals = meas_raw[t_run_abs - 1, val_indices, target_feat_idx]  # (N_val,)
         pers_fc   = np.repeat(pers_vals[:, None], F_h, axis=1).astype(np.float32)
 
-        # ECMWF nearest grid point: time-indexed, future window [t+1 .. t+F_h]
-        if has_ecmwf and t_run_abs + F_h <= grid_ecmwf_runs.shape[0]:
-            e2_slice = grid_ecmwf_runs[t_run_abs : t_run_abs + F_h, :, ecmwf_ws_feat_idx]
-            e2_fc    = e2_slice[:, nearest_e2].T.astype(np.float32)         # (N_val, F_h)
+        # ECMWF at each station's own (geodesically) nearest grid point — already
+        # resolved by load_ecmwf_parquet_at_stations_and_grid; index directly via
+        # val_indices exactly like meas_raw, no re-derived nearest-neighbour here.
+        if has_ecmwf and t_run_abs + F_h <= station_ecmwf_nwp.shape[0]:
+            e2_slice = station_ecmwf_nwp[t_run_abs : t_run_abs + F_h, val_indices, ecmwf_ws_feat_idx]  # (F_h, N_val)
+            e2_fc    = e2_slice.T.astype(np.float32)         # (N_val, F_h)
         else:
             e2_fc = None
 
@@ -315,13 +317,36 @@ def main() -> None:
     meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
 
     # ── Temporal split ───────────────────────────────────────────────────────
+    # Mirrors get_test_results_dcrnn.py:284-306 — without a val_start/eval_cutoff
+    # boundary, a dev-mode run (val_ids = val_files) was always scored over the
+    # held-out test period, because test_start was the only boundary this
+    # script knew about (bug: dev-mode CSVs covered 2025-08-01..2026-04-01
+    # instead of the val window, while the matching model raw_preds covered
+    # 2024-08-01..2025-08-02).
     test_start = data_cfg.get("test_start")
-    if test_start:
-        split_t = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+    val_start  = data_cfg.get("val_start")
+    boundary   = test_start if (args.test_mode or not val_start) else val_start
+    if boundary:
+        split_t = int(np.searchsorted(timestamps, pd.Timestamp(boundary, tz="UTC"), side="left"))
     else:
         split_t = int(T * (1 - data_cfg.get("val_frac", 0.2)))
     split_time = timestamps[split_t]
-    logger.info("Test window: %s … end", split_time)
+
+    # Dev-mode upper bound: everything from test_start on is held-out test
+    # material and must not leak into a --test-mode-less (dev/val) eval run.
+    if val_start and test_start and not args.test_mode:
+        _vc = int(np.searchsorted(timestamps, pd.Timestamp(test_start, tz="UTC"), side="left"))
+        eval_cutoff = timestamps[_vc] if _vc < T else None
+    else:
+        eval_cutoff = None
+
+    logger.info(
+        "═══ EVAL WINDOW: %s … %s   mode=%s   stations=%d ═══",
+        split_time,
+        eval_cutoff if eval_cutoff is not None else "end",
+        "TEST" if args.test_mode else "DEV",
+        N_val,
+    )
 
     # ── Station metadata ─────────────────────────────────────────────────────
     meta_path = data_cfg.get("stations_master")
@@ -330,7 +355,7 @@ def main() -> None:
 
     # ── ICON-D2 ─────────────────────────────────────────────────────────────
     logger.info("Loading ICON-D2 runs …")
-    run_times, icond2_coords, grid_icond2_runs, _ = load_icond2_ml_runs(
+    run_times, icond2_coords, grid_icond2_runs, station_nearest_i2_all = load_icond2_ml_runs(
         nwp_path=nwp_path, station_ids=all_ids, station_coords=station_coords,
         features=icond2_features, run_hours=run_hours, next_n_grid=next_n_icond2,
         n_workers=n_workers, cutoff=run_cutoff,
@@ -348,23 +373,25 @@ def main() -> None:
     )
     logger.info("ICON-D2 wind_speed feature idx: %d (%s)", nwp_ws_feat_idx, icond2_features[nwp_ws_feat_idx])
 
-    # Nearest ICON-D2 grid point per val station
-    val_lats = lats[N_train:]
-    val_lons = lons[N_train:]
-    val_ll   = np.stack([val_lats, val_lons], axis=1)
-    i2_tree  = cKDTree(icond2_coords)
-    _, nearest_i2 = i2_tree.query(val_ll, k=1)   # (N_val,)
+    # Nearest ICON-D2 grid point per val station — reuse load_icond2_ml_runs' OWN
+    # geodesic assignment (pyproj Geod, same as evaluation.py's model path via
+    # station_nearest_grid), instead of recomputing it with a plain cKDTree on raw
+    # (lat, lon) degrees. A Euclidean degree distance does not shrink longitude by
+    # cos(latitude), so at ~54°N it can rank a grid point that is genuinely farther
+    # away (geodesic) as "nearer". Found via station 05142 (fold 0): the old
+    # cKDTree path picked a point 1519 m away over the true 1500 m nearest
+    # neighbour, moving that station's ICON-D2 RMSE by +0.775 and the fold's
+    # station-mean by +0.015 — this is what caused the D4 cross-check mismatch.
+    nearest_i2 = station_nearest_i2_all[N_train:]   # (N_val,) — same order as val_ids
 
     # ── ECMWF (optional) ─────────────────────────────────────────────────────
-    ecmwf_path       = data_cfg.get("ecmwf_path")
-    grid_ecmwf_runs  = None
-    ecmwf_coords     = None
-    nearest_e2       = None
+    ecmwf_path        = data_cfg.get("ecmwf_path")
+    station_ecmwf_nwp = None   # (T, N_all, E2) physical
     ecmwf_ws_feat_idx = 0
 
     if ecmwf_path and os.path.exists(ecmwf_path):
         logger.info("Loading ECMWF from %s …", ecmwf_path)
-        _, ecmwf_coords, grid_ecmwf_runs, _ = load_ecmwf_parquet_at_stations_and_grid(
+        station_ecmwf_nwp, _, _, _ = load_ecmwf_parquet_at_stations_and_grid(
             parquet_path=ecmwf_path,
             station_lats=lats,
             station_lons=lons,
@@ -372,17 +399,19 @@ def main() -> None:
             timestamps=timestamps,
             next_n_grid_per_station=1,
         )
+        # station_ecmwf_nwp is already resolved to each station's own nearest grid
+        # point via pyproj geodesic distance INSIDE the loader (station_nearest
+        # list, train_stgnn2.py). Use it directly — do not re-derive a "nearest"
+        # index from the deduplicated grid array with a Euclidean lat/lon cKDTree;
+        # that is exactly the bug just fixed for ICON-D2 above.
         if e2_mode == "dir_in_deg":
-            grid_ecmwf_runs, ecmwf_features_load = apply_dir_encoding(grid_ecmwf_runs, ecmwf_features_load)
-        E2 = grid_ecmwf_runs.shape[2]
+            station_ecmwf_nwp, ecmwf_features_load = apply_dir_encoding(station_ecmwf_nwp, ecmwf_features_load)
+        E2 = station_ecmwf_nwp.shape[2]
         ecmwf_ws_feat_idx = next(
             (i for i, f in enumerate(ecmwf_features_load) if f == "wind_speed_10m"),
             next((i for i, f in enumerate(ecmwf_features_load) if "wind_speed" in f), 0),
         )
-        logger.info("ECMWF: N_grid=%d  E2=%d  ws idx=%d (%s)",
-                    len(ecmwf_coords), E2, ecmwf_ws_feat_idx, ecmwf_features_load[ecmwf_ws_feat_idx])
-        e2_tree  = cKDTree(ecmwf_coords)
-        _, nearest_e2 = e2_tree.query(val_ll, k=1)   # (N_val,)
+        logger.info("ECMWF: E2=%d  ws idx=%d (%s)", E2, ecmwf_ws_feat_idx, ecmwf_features_load[ecmwf_ws_feat_idx])
     elif ecmwf_path:
         logger.warning("ecmwf_path %s not found — ECMWF skipped", ecmwf_path)
     else:
@@ -396,6 +425,8 @@ def main() -> None:
     for r_curr in range(R):
         t_run = run_times[r_curr]
         if t_run < split_time:
+            continue
+        if eval_cutoff is not None and t_run >= eval_cutoff:
             continue
         if t_run not in ts_lookup.index:
             continue
@@ -415,9 +446,16 @@ def main() -> None:
             continue
         val_run_pairs.append((r_curr, r_hist, t_run_abs))
 
-    logger.info("Val run pairs: %d", len(val_run_pairs))
+    logger.info(
+        "═══ EVAL WINDOW CONFIRMED: %s … %s   mode=%s   stations=%d   run_pairs=%d ═══",
+        split_time,
+        eval_cutoff if eval_cutoff is not None else "end",
+        "TEST" if args.test_mode else "DEV",
+        N_val,
+        len(val_run_pairs),
+    )
     if not val_run_pairs:
-        logger.error("No val run pairs — check test_start / test_end in config")
+        logger.error("No val run pairs — check val_start / test_start / test_end in config")
         sys.exit(1)
 
     target_feat_idx = measurement_cols.index(target_col)
@@ -425,19 +463,18 @@ def main() -> None:
     # ── Evaluate ─────────────────────────────────────────────────────────────
     logger.info("Evaluating NWP baselines …")
     i2_station, i2_raw, e2_station, e2_raw = evaluate_nwp_baselines(
-        val_run_pairs     = val_run_pairs,
-        val_indices       = val_indices,
-        val_ids           = val_ids,
-        meas_raw          = meas_raw,
-        grid_icond2_runs  = grid_icond2_runs,
-        grid_ecmwf_runs   = grid_ecmwf_runs,
-        target_feat_idx   = target_feat_idx,
-        nwp_ws_feat_idx   = nwp_ws_feat_idx,
-        ecmwf_ws_feat_idx = ecmwf_ws_feat_idx,
-        nearest_i2        = nearest_i2,
-        nearest_e2        = nearest_e2,
-        timestamps        = timestamps,
-        F_h               = F_h,
+        val_run_pairs      = val_run_pairs,
+        val_indices        = val_indices,
+        val_ids            = val_ids,
+        meas_raw           = meas_raw,
+        grid_icond2_runs   = grid_icond2_runs,
+        station_ecmwf_nwp  = station_ecmwf_nwp,
+        target_feat_idx    = target_feat_idx,
+        nwp_ws_feat_idx    = nwp_ws_feat_idx,
+        ecmwf_ws_feat_idx  = ecmwf_ws_feat_idx,
+        nearest_i2         = nearest_i2,
+        timestamps         = timestamps,
+        F_h                = F_h,
     )
 
     # ── Save ─────────────────────────────────────────────────────────────────
