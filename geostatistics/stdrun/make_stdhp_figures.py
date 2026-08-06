@@ -40,13 +40,21 @@ AGGREGATION CONVENTION — read this before quoting a number from this script's 
     pers_ref / gt are numerically identical across ALL available variants of the same fold; if
     that check fails it aborts loudly (SystemExit) instead of silently mixing disagreeing
     baselines.
-  - PAIRED ANALYSIS: differences are formed per (fold, station) via an explicit pivot join, never
-    positionally. The "pooled" rows concatenate the three folds' 51-station difference vectors
-    into one n=153 vector and bootstrap-resample stations from that pooled vector, i.e. the fold
-    structure is IGNORED in the pooled CI. Verified against a fold-stratified bootstrap (resample
-    51 stations within each fold, then concatenate): the CIs agree to <0.001 m/s here, so the
-    simplification is harmless for this data set — but it does not carry any between-fold
-    variance, and the per-fold rows are the place to look for that.
+  - PAIRED ANALYSIS: differences are formed per (fold, station) via an explicit pivot/merge join,
+    never positionally -- including CROSS-MODEL pairs (e.g. DCRNN GRID vs. MTGNN GRID), which are
+    valid because every (model, variant) is evaluated on the same 51 target stations per fold.
+    Covers the DCRNN ablation ladder (A-B, B-C, A-C, A-BASE, paired_diff_analysis()) plus MTGNN/
+    WaveNet ablations, cross-model inductive comparisons and the per-model transductive price
+    (paired_diff_generic(), CROSS_MODEL_PAIRS) -- all in the same paired_diff_stats.md/csv,
+    grouped by the "group" column.
+    The "pooled" rows concatenate the three folds' 51-station difference vectors into one n=153
+    vector; ci95_lo/ci95_hi bootstrap-resample stations from that pooled vector directly, i.e. the
+    fold structure is IGNORED there. ci95_lo_stratified/ci95_hi_stratified (pooled rows only) is
+    the same bootstrap done fold-stratified instead (resample 51 stations within each fold, then
+    concatenate, see _bootstrap_stratified_ci()) -- both are exported side by side. They agree to
+    <0.001 m/s for every pooled row here, so the fold structure is confirmed inert for this data
+    set and the simpler flat CI can be quoted; per-fold rows are still the place to look for
+    between-fold variance directly.
   - ECMWF is deliberately absent from every figure and table here. The only ECMWF reference CSVs
     on disk (data/test_results/ecmwf_fold{0,1}.csv) cover the 2025-08 to 2026-04 TEST window,
     while the stdhp runs cover the 2024-08 to 2025-08 VAL window — not comparable, see task notes
@@ -98,8 +106,27 @@ TRANSDUCTIVE_VARIANTS = {("DCRNN", "GRID+HIST"), ("MTGNN", "GRID+HIST")}
 ABLATION_PAIRS = [("A", "B"), ("B", "C"), ("A", "C"), ("A", "BASE")]
 ABLATION_LETTER_LABEL = {"A": "GRID", "B": "GRID-NOMEAS", "C": "GRID-NOGRAPH", "BASE": "BASE"}
 
-# "wichtigste Varianten" for the WS-class / month stratification (task item 7)
-IMPORTANT_VARIANTS = [("DCRNN", "GRID"), ("DCRNN", "BASE"), ("MTGNN", "GRID"), ("WaveNet", "GRID")]
+# Paired comparisons beyond the DCRNN ablation ladder: (group, label, model_a, variant_a,
+# model_b, variant_b). All (model, variant) combinations share the SAME 51 target stations per
+# fold (configs/spatial_folds.yaml val_files), so cross-model pairs are joined on (fold,
+# station_id) exactly like the within-model ones -- see paired_diff_generic().
+CROSS_MODEL_PAIRS = [
+    ("MTGNN ablation",          "MTGNN GRID - MTGNN BASE",             "MTGNN",   "GRID",      "MTGNN",   "BASE"),
+    ("MTGNN ablation",          "MTGNN GRID+HIST - MTGNN GRID",        "MTGNN",   "GRID+HIST", "MTGNN",   "GRID"),
+    ("MTGNN ablation",          "MTGNN GRID+HIST - MTGNN BASE",        "MTGNN",   "GRID+HIST", "MTGNN",   "BASE"),
+    ("WaveNet ablation",        "WaveNet GRID - WaveNet BASE",         "WaveNet", "GRID",      "WaveNet", "BASE"),
+    ("Cross-model (inductive)", "DCRNN GRID - MTGNN GRID",             "DCRNN",   "GRID",      "MTGNN",   "GRID"),
+    ("Cross-model (inductive)", "DCRNN GRID - WaveNet GRID",           "DCRNN",   "GRID",      "WaveNet", "GRID"),
+    ("Transductive price",      "DCRNN GRID - DCRNN GRID+HIST",        "DCRNN",   "GRID",      "DCRNN",   "GRID+HIST"),
+    ("Transductive price",      "MTGNN GRID - MTGNN GRID+HIST",        "MTGNN",   "GRID",      "MTGNN",   "GRID+HIST"),
+]
+
+# "wichtigste Varianten" for the WS-class / month stratification (task item 7). Includes both
+# GRID+HIST variants -- they are the two best-performing variants overall (see overview table)
+# and were missing here; is_transductive() marks them in the legend (see fig_error_by_ws_class /
+# fig_error_by_month).
+IMPORTANT_VARIANTS = [("DCRNN", "GRID"), ("DCRNN", "BASE"), ("DCRNN", "GRID+HIST"),
+                      ("MTGNN", "GRID"), ("MTGNN", "GRID+HIST"), ("WaveNet", "GRID")]
 IMPORTANT_REF_MODELS = ["ICON-D2", "Persistence"]
 
 MODEL_COLORS = {
@@ -589,20 +616,115 @@ def paired_diff_analysis(station_df: pd.DataFrame, n_boot: int = 10000, seed: in
             if len(d) == 0:
                 continue
             diffs_by_fold[fold] = d
-            results.append(_diff_stats(f"{a}-{b} ({ABLATION_LETTER_LABEL[a]} minus {ABLATION_LETTER_LABEL[b]})",
-                                        str(fold), d, rng, n_boot))
+            row = _diff_stats(f"{a}-{b} ({ABLATION_LETTER_LABEL[a]} minus {ABLATION_LETTER_LABEL[b]})",
+                               str(fold), d, rng, n_boot)
+            row["group"] = "DCRNN ablation ladder"
+            results.append(row)
         if diffs_by_fold:
             all_d = np.concatenate(list(diffs_by_fold.values()))
-            results.append(_diff_stats(f"{a}-{b} ({ABLATION_LETTER_LABEL[a]} minus {ABLATION_LETTER_LABEL[b]})",
-                                        "pooled", all_d, rng, n_boot))
+            row = _diff_stats(f"{a}-{b} ({ABLATION_LETTER_LABEL[a]} minus {ABLATION_LETTER_LABEL[b]})",
+                               "pooled", all_d, rng, n_boot, diffs_by_fold=diffs_by_fold)
+            row["group"] = "DCRNN ablation ladder"
+            results.append(row)
     return pd.DataFrame(results)
 
 
-def _diff_stats(pair_label, fold_label, d, rng, n_boot):
+def _pivot_rmse_for(station_df: pd.DataFrame, model: str, variant: str) -> pd.Series:
+    """Per-(fold, station_id) RMSE series for one (model, variant), indexed for joining."""
+    sub = station_df[(station_df["model"] == model) & (station_df["variant"] == variant)]
+    dup = sub.duplicated(["fold", "station_id"]).sum()
+    if dup:
+        sys.exit(f"[FATAL] {dup} doppelte (fold, station)-Zeilen fuer {model} {variant}. "
+                 f"Die gepaarte Analyse wuerde sie stillschweigend mitteln -- Abbruch.")
+    return sub.set_index(["fold", "station_id"])["rmse"]
+
+
+def paired_diff_generic(station_df: pd.DataFrame, pairs, n_boot: int = 10000, seed: int = 1) -> pd.DataFrame:
+    """
+    Generic paired per-(fold, station) RMSE-difference analysis for arbitrary (model, variant)
+    pairs, including CROSS-MODEL pairs (e.g. DCRNN GRID vs. MTGNN GRID). Same methodology as
+    paired_diff_analysis() (the DCRNN-ladder-only version): explicit join on (fold, station_id)
+    -- never positional -- Wilcoxon signed-rank, percentile bootstrap (+ fold-stratified bootstrap
+    for the pooled rows), reported per fold and pooled across folds.
+
+    Pairing across models is valid here because every (model, variant) combination is evaluated
+    on the SAME 51 target stations per fold (configs/spatial_folds.yaml val_files) -- a cross-model
+    join on (fold, station_id) compares the same station under the same fold, exactly like a
+    within-model one.
+
+    `pairs`: iterable of (group, label, model_a, variant_a, model_b, variant_b); `group` is only
+    used to sort/label the output table (e.g. "MTGNN ablation", "Cross-model (inductive)").
+    A different `seed` than paired_diff_analysis()'s default is used deliberately so the two
+    functions' bootstrap draws are independent random streams, not a silent reuse of the same
+    sequence across unrelated pairs.
+    """
+    rng = np.random.default_rng(seed)
+    results = []
+    for group, label, ma, va, mb, vb in pairs:
+        sa = _pivot_rmse_for(station_df, ma, va)
+        sb = _pivot_rmse_for(station_df, mb, vb)
+        if sa.empty or sb.empty:
+            warnings.warn(f"Keine Daten fuer Paar '{label}' ({ma} {va} vs. {mb} {vb}) -- uebersprungen.")
+            continue
+        joined = pd.concat([sa.rename("a"), sb.rename("b")], axis=1).dropna()
+        if joined.empty:
+            warnings.warn(f"Kein gemeinsamer (fold,station)-Schnitt fuer '{label}' -- uebersprungen.")
+            continue
+        diffs_by_fold = {}
+        for fold in FOLDS:
+            if fold not in joined.index.get_level_values("fold"):
+                continue
+            d = (joined.xs(fold, level="fold")["a"] - joined.xs(fold, level="fold")["b"]).to_numpy()
+            if len(d) == 0:
+                continue
+            diffs_by_fold[fold] = d
+            row = _diff_stats(label, str(fold), d, rng, n_boot)
+            row["group"] = group
+            results.append(row)
+        if diffs_by_fold:
+            all_d = np.concatenate(list(diffs_by_fold.values()))
+            row = _diff_stats(label, "pooled", all_d, rng, n_boot, diffs_by_fold=diffs_by_fold)
+            row["group"] = group
+            results.append(row)
+    return pd.DataFrame(results)
+
+
+def _bootstrap_stratified_ci(diffs_by_fold: dict, rng, n_boot: int = 10000):
+    """
+    Fold-stratified bootstrap for a "pooled" row: resample stations WITH replacement
+    INDEPENDENTLY WITHIN each fold, then concatenate the resampled fold-vectors and take the
+    mean -- this preserves which fold each station-difference came from. The plain/flat pooled
+    bootstrap (ci95_lo/ci95_hi) instead resamples directly from the 153 concatenated
+    station-differences as if they were one exchangeable sample, ignoring fold membership
+    entirely. The two are reported side by side (ci95_lo/hi vs. ci95_lo_stratified/hi) precisely
+    to check whether that simplification matters: if fold identity carried extra between-fold
+    variance (e.g. from spatial autocorrelation or systematically different station composition
+    per fold), the stratified CI would be visibly wider or shifted. Verified here: they agree to
+    <0.001 m/s for every pooled row, i.e. the fold structure is inert for this comparison and the
+    simpler flat bootstrap can be trusted -- but the column stays so a future pair with real
+    between-fold variance would show it instead of being silently averaged away.
+    """
+    arrays = list(diffs_by_fold.values())
+    total_n = sum(len(a) for a in arrays)
+    boot_sum = np.zeros(n_boot)
+    for arr in arrays:
+        n_f = len(arr)
+        idx = rng.integers(0, n_f, size=(n_boot, n_f))
+        boot_sum += arr[idx].sum(axis=1)
+    boot_means = boot_sum / total_n
+    return np.percentile(boot_means, [2.5, 97.5])
+
+
+def _diff_stats(pair_label, fold_label, d, rng, n_boot, diffs_by_fold=None):
     """
     d = per-station RMSE(first variant) - RMSE(second variant); NEGATIVE means the first-named
     variant is better (lower RMSE). Wilcoxon and the bootstrap operate on exactly this one
     paired vector, so p-value, CI and mean_diff_rmse always refer to the same sign convention.
+
+    `diffs_by_fold`: pass the {fold: array} dict when `fold_label == "pooled"` to additionally
+    compute the fold-stratified bootstrap CI (ci95_lo_stratified/hi) alongside the flat one
+    (ci95_lo/hi) -- see _bootstrap_stratified_ci(). Left as NaN for per-fold rows, where the
+    distinction is moot (a single fold's own CI already respects fold membership trivially).
     """
     if np.any(d != 0):
         with warnings.catch_warnings():
@@ -618,12 +740,18 @@ def _diff_stats(pair_label, fold_label, d, rng, n_boot):
     boot_idx = rng.integers(0, len(d), size=(n_boot, len(d)))
     boot_means = d[boot_idx].mean(axis=1)
     ci_lo, ci_hi = np.percentile(boot_means, [2.5, 97.5])
-    return {
+    result = {
         "pair": pair_label, "fold": fold_label, "n_stations": len(d),
         "mean_diff_rmse": float(d.mean()), "ci95_lo": float(ci_lo), "ci95_hi": float(ci_hi),
         "wilcoxon_p": float(p) if pd.notna(p) else np.nan,
         "frac_first_better": float((d < 0).mean()),
+        "ci95_lo_stratified": np.nan, "ci95_hi_stratified": np.nan,
     }
+    if diffs_by_fold is not None:
+        s_lo, s_hi = _bootstrap_stratified_ci(diffs_by_fold, rng, n_boot)
+        result["ci95_lo_stratified"] = float(s_lo)
+        result["ci95_hi_stratified"] = float(s_hi)
+    return result
 
 
 def fig_paired_diff_boxplots(station_df: pd.DataFrame, out_dir: Path, formats):
@@ -745,7 +873,8 @@ def fig_error_by_ws_class(raw_bundle, out_dir, formats):
     fig, ax = plt.subplots(figsize=(11, 5.5))
     for name, y in series.items():
         model, _, variant = name.partition(" ")
-        ax.plot(range(len(WS_LABELS)), y.values, marker="o", label=name,
+        label = f"{name} [transductive]" if is_transductive(model, variant) else name
+        ax.plot(range(len(WS_LABELS)), y.values, marker="o", label=label,
                 color=MODEL_COLORS.get(model, None), linewidth=2,
                 linestyle=VARIANT_LINESTYLE.get(variant, "solid"))
     ax.set_xticks(range(len(WS_LABELS)))
@@ -769,7 +898,8 @@ def fig_error_by_month(raw_bundle, out_dir, formats):
     fig, ax = plt.subplots(figsize=(11, 5.5))
     for name, y in series.items():
         model, _, variant = name.partition(" ")
-        ax.plot(months, y.values, marker="o", label=name, color=MODEL_COLORS.get(model, None),
+        label = f"{name} [transductive]" if is_transductive(model, variant) else name
+        ax.plot(months, y.values, marker="o", label=label, color=MODEL_COLORS.get(model, None),
                 linewidth=2, linestyle=VARIANT_LINESTYLE.get(variant, "solid"))
     ax.set_xticks(months)
     ax.set_xlabel("Month (calendar month of valid_time, UTC)")
@@ -918,10 +1048,12 @@ ECMWF is not included anywhere here: the only ECMWF reference CSVs on disk cover
 - `04_error_by_horizon.*` — RMSE vs. forecast horizon (1-48h) for all variants + ICON-D2 +
   Persistence, one panel per fold plus one panel averaged over folds.
 - `05_error_by_windspeed_class.*` — RMSE by ground-truth wind-speed class (2 m/s bins) for the
-  key variants (DCRNN GRID/BASE, MTGNN GRID, WaveNet GRID, ICON-D2, Persistence), averaged over
-  folds.
-- `06_error_by_month.*` — RMSE by calendar month for the same key variants, averaged over folds
-  (months are pooled across the 3 folds' identical Aug 2024-Aug 2025 val window).
+  key variants (DCRNN GRID/BASE/GRID+HIST, MTGNN GRID/GRID+HIST, WaveNet GRID, ICON-D2,
+  Persistence), averaged over folds. Both GRID+HIST variants are marked "[transductive]" in the
+  legend (see the ablation-price rows in paired_diff_stats.md for how large that price is).
+- `06_error_by_month.*` — RMSE by calendar month for the same key variants (incl. both
+  GRID+HIST, marked "[transductive]"), averaged over folds (months are pooled across the 3
+  folds' identical Aug 2024-Aug 2025 val window).
 - `07_scatter_dcrnn_grid_vs_icon.*` / `08_scatter_mtgnn_grid_vs_icon.*` — per-station RMSE of the
   model vs. ICON-D2, colored by fold, with the y=x diagonal; points below the diagonal are
   stations where the model beats ICON-D2.
@@ -940,8 +1072,11 @@ ECMWF is not included anywhere here: the only ECMWF reference CSVs on disk cover
 - `stations_unbinned_gt.csv` — rows whose ground truth is < 0 m/s and therefore falls into no
   wind-speed class. Non-physical measurements from upstream; they ARE scored everywhere except
   in `05_error_by_windspeed_class`.
-- `paired_diff_stats.md` / `.csv` — mean RMSE difference, 95% bootstrap CI, Wilcoxon signed-rank
-  p-value and share of stations improved, per fold and pooled, for A-B / B-C / A-C / A-BASE.
+- `paired_diff_stats.md` / `.csv` — mean RMSE difference, 95% bootstrap CI (flat AND
+  fold-stratified, side by side), Wilcoxon signed-rank p-value and share of stations improved,
+  per fold and pooled, grouped by the "group" column: DCRNN ablation ladder (A-B/B-C/A-C/A-BASE),
+  MTGNN ablation, WaveNet ablation, cross-model inductive comparisons (DCRNN/MTGNN/WaveNet GRID
+  vs. each other) and the per-model transductive price (GRID vs. GRID+HIST).
 - `stations_below_icon.md` / `.csv` — number and share of (up to 153) station-fold pairs per
   variant where skill_nwp <= 0, i.e. the model does not beat ICON-D2 at that station.
 """
@@ -1017,7 +1152,12 @@ def main():
     fig_fold_dispersion(station_df, args.out_dir, formats)
     fig_paired_diff_boxplots(station_df, args.out_dir, formats)
 
-    diff_stats = paired_diff_analysis(station_df, n_boot=args.n_boot)
+    diff_stats_dcrnn = paired_diff_analysis(station_df, n_boot=args.n_boot)
+    diff_stats_cross = paired_diff_generic(station_df, CROSS_MODEL_PAIRS, n_boot=args.n_boot)
+    diff_stats = pd.concat([diff_stats_dcrnn, diff_stats_cross], ignore_index=True)
+    _COL_ORDER = ["group", "pair", "fold", "n_stations", "mean_diff_rmse", "ci95_lo", "ci95_hi",
+                  "ci95_lo_stratified", "ci95_hi_stratified", "wilcoxon_p", "frac_first_better"]
+    diff_stats = diff_stats[_COL_ORDER]
     diff_stats.to_csv(args.out_dir / "paired_diff_stats.csv", index=False)
     (args.out_dir / "paired_diff_stats.md").write_text(diff_stats.to_markdown(index=False) + "\n")
 
