@@ -204,7 +204,7 @@ dcrnn:
 
       grad_accum:
         type: int
-        low: 1
+        low: 4
         high: 64
 
       horizon_decay:
