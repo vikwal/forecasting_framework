@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument('-m', '--model', type=str, default='tft')
     parser.add_argument('-c', '--config', type=str, required=True)
     parser.add_argument('-s', '--suffix', type=str, default='')
-    parser.add_argument('--hpo-study', type=str, required=True,
+    parser.add_argument('--hpo-study', type=str, default=None,
                          help='Exact Optuna study name to load best_trial params from')
     parser.add_argument('--test-mode', action='store_true', default=False,
                          help='Merge val_files into the training pool (final held-out test run)')
@@ -91,19 +91,28 @@ def main() -> None:
         config['data']['files'] = list(config['data'].get('files', [])) + list(config['data'].get('val_files', []))
         config['data']['val_files'] = []  # skip _replace_val_with_val_files, fall back to plain val_split
 
-    storage_url = os.environ.get('OPTUNA_STORAGE')
-    if not storage_url:
-        raise RuntimeError("OPTUNA_STORAGE env var must be set to load the HPO study.")
-    study = optuna.load_study(study_name=args.hpo_study, storage=storage_url)
-    best = study.best_trial
-    logger.info(f"Loaded study '{args.hpo_study}': best_trial={best.number}, "
-                f"best_value={best.value:.6f}, params={json.dumps(best.params)}")
-
-    for key in ('next_n_grid_points', 'next_n_grid_ecmwf', 'next_n_stations'):
-        if key in best.params:
-            config['params'][key] = best.params[key]
+    # --hpo-study ist optional. Ohne Studie bleiben Architektur und Preprocessing auf
+    # den Werten der Config stehen — der Trockenlauf mit Standard-Hyperparametern,
+    # analog zu geostatistics/stdrun/ bei den GNNs. Train UND Eval muessen es
+    # gemeinsam weglassen: die next_n_*-Werte gehen in die cache_id ein, und die
+    # Architekturmasse rekonstruiert der Eval-Pfad aus der Trainings-Metadatei.
+    study = None
+    best = None
+    if args.hpo_study:
+        storage_url = os.environ.get('OPTUNA_STORAGE')
+        if not storage_url:
+            raise RuntimeError("OPTUNA_STORAGE env var must be set to load the HPO study.")
+        study = optuna.load_study(study_name=args.hpo_study, storage=storage_url)
+        best = study.best_trial
+        logger.info(f"Loaded study '{args.hpo_study}': best_trial={best.number}, "
+                    f"best_value={best.value:.6f}, params={json.dumps(best.params)}")
+        for key in ('next_n_grid_points', 'next_n_grid_ecmwf', 'next_n_stations'):
+            if key in best.params:
+                config['params'][key] = best.params[key]
+    else:
+        logger.info("Kein --hpo-study: Standard-Hyperparameter aus der Config (Trockenlauf).")
     logger.info(
-        f"Preprocessing params from best trial: "
+        f"Preprocessing params ({'best trial' if best else 'Config, Trockenlauf'}): "
         f"next_n_grid_points={config['params']['next_n_grid_points']}, "
         f"next_n_grid_ecmwf={config['params']['next_n_grid_ecmwf']}, "
         f"next_n_stations={config['params']['next_n_stations']}"
@@ -196,9 +205,9 @@ def main() -> None:
         'model_tag': model_tag,
         'config_path': f'{args.config}.yaml',
         'hpo_study': args.hpo_study,
-        'best_trial_number': best.number,
-        'best_trial_value': best.value,
-        'best_trial_params': best.params,
+        'best_trial_number': best.number if best else None,
+        'best_trial_value': best.value if best else None,
+        'best_trial_params': best.params if best else None,
         'hyperparameters': hyperparameters,
         'feature_dim': config['model']['feature_dim'],
         'test_mode': args.test_mode,

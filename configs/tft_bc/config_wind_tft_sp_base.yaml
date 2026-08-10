@@ -1,33 +1,3 @@
-# TFT non-GNN benchmark, SPATIAL-CV variant — "base" (no own station history,
-# only next_n_stations neighbour context + ICON-D2/ECMWF known covariates +
-# static topo features).
-#
-# cv_mode: spatial (hpo.cv_mode below) — same CV AXIS as the DCRNN/MTGNN/WaveNet
-# studies (geostatistics/hpo_dcrnn.py, configs/spatial_folds.yaml): 3 folds with
-# an IDENTICAL time window in every fold (train < data.val_start, val in
-# [data.val_start, data.test_start)), and ROTATING TARGET (station) sets
-# instead of a fixed files/val_files split. This supersedes
-# config_wind_tft_base.yaml (temporal CV, no longer comparable to the graph
-# models — see the note there) as the actual non-GNN benchmark counterpart.
-#
-# data.files / data.val_files below are IGNORED by hpo_tft_bc.py in cv_mode=
-# spatial (it loads the full 153-station pool from hpo.spatial_folds and
-# rotates train/val roles itself, logging exactly what it ignores) — they are
-# kept here at their old (temporal) values purely as a harmless fallback/
-# documentation default, in case this file is ever pointed at with
-# cv_mode=temporal by mistake.
-#
-# Retrain path (train_cl_tft_bc.py / get_test_results_tft_bc.py): use
-# config_wind_tft_sp_base_fold{1,2,3}.yaml instead — those carry ONE fold's
-# actual train-role/target-role station split in files/val_files directly
-# (read as-is, no spatial_cv import needed there). IMPORTANT: "_foldN" here
-# means STATION fold N (which 102 stations train / which 51 are targets), NOT
-# a time-window fold like the old _foldN convention on the temporal side —
-# the time window is identical across all 3 spatial folds.
-#
-# HPO search space (12 params under hpo:) copied verbatim from
-# config_wind_tft_base.yaml so the two studies stay comparable to each other
-# on everything except the CV axis.
 data:
   path: /mnt/lambda1/nvme1/synthetic/raw/wind
   raw_station_source: true
@@ -346,18 +316,18 @@ hpo:
   val_split: null
   pruning:
     use_median_pruner: true
-    n_startup_trials: 20
+    n_startup_trials: 5
     n_warmup_steps: 1
     interval_steps: 1
     disable_pruning: false
   batch_size:
-  - 32
+  - 64
   - 256
   epochs:
   - 1
   - 100
   learning_rate:
-  - 1.0e-06
+  - 1.0e-05
   - 0.0005
   weight_decay:
   - 1.0e-07
@@ -441,6 +411,7 @@ hpo:
   - 8
   cv_mode: spatial
   spatial_folds: configs/spatial_folds.yaml
+  max_epochs_per_trial: 100
 eval:
   results_path: results/tft_bc
   eval_on_all_test_data: true

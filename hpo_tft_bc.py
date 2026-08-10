@@ -37,6 +37,9 @@ import re
 import json
 import argparse
 import copy
+import socket
+import subprocess
+from pathlib import Path as _ProvPath
 import shutil
 import time
 import fcntl
@@ -176,6 +179,30 @@ def enforce_cache_budget(cache_dir: str, cache_id: str, max_cache_gb: float, log
             json.dump(manifest, f)
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
+# Provenance — spiegelt geostatistics/hpo_dcrnn.py
+# ---------------------------------------------------------------------------
+
+def _git_commit() -> str:
+    """HEAD commit hash, or '<unknown>' outside a git checkout — never raises.
+
+    Ohne diese Zeile ist nicht rekonstruierbar, welcher Codestand einen Trial
+    erzeugt hat. Die Graphstudien tragen sie seit Runde 2; die TFT-Studien
+    hatten sie bis 2026-08-10 nicht.
+    """
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_ProvPath(__file__).parent,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except Exception:
+        return "<unknown>"
+
+
+_PROV_HOST = socket.gethostname()
+_PROV_COMMIT = _git_commit()
 
 
 def main() -> None:
@@ -322,6 +349,8 @@ def main() -> None:
     trial_counter = 0
     while completed_trials < base_config['hpo']['trials']:
         trial = study.ask()
+        trial.set_user_attr("host", _PROV_HOST)
+        trial.set_user_attr("commit", _PROV_COMMIT)
         trial_number = len_trials + trial_counter
 
         # ── Preprocessing-level params: sampled FIRST, own config copy per trial ──
@@ -334,6 +363,15 @@ def main() -> None:
         config['params']['next_n_stations'] = n_stations
 
         hyperparameters = hpo.get_hyperparameters(config=config, hpo=True, trial=trial)
+
+        # Epochenbudget explizit setzen. utils/hpo.py:670 laesst die epochs-Ziehung
+        # auskommentiert, deshalb faellt utils/tools.py:561 sonst auf den hartkodierten
+        # Default 200 zurueck — bei einer klein gezogenen Lernrate laeuft ein Fold dann
+        # ueber 130 Epochen und ein Trial ueber einen Tag. utils/hpo.py teilen sich 13
+        # weitere Skripte (hpo_cl, hpo_fl, train_cl, die Trianel-Kette), daher wird das
+        # Budget hier lokal gesetzt statt dort global. Early Stopping (patience 15)
+        # beendet frueher, das hier ist nur die Obergrenze.
+        hyperparameters['epochs'] = int(config['hpo'].get('max_epochs_per_trial', 100))
 
         existing_params = [t.params for t in study.trials]
         current_params = trial.params

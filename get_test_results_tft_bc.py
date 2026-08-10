@@ -53,7 +53,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Test-set evaluation for tft_bc models (physical units)")
     parser.add_argument('-m', '--model', type=str, default='tft')
     parser.add_argument('-c', '--config', type=str, required=True)
-    parser.add_argument('--hpo-study', type=str, required=True)
+    parser.add_argument('--eval-split', choices=('test', 'val'), default='test',
+                        help="'test': test_files im Fenster [test_start, test_end] (Default). "
+                             "'val': die val_files des Folds im Fenster [val_start, test_start), "
+                             "also das Validierungsfenster — fuer Trockenlaeufe, die den "
+                             "Testsatz unangetastet lassen sollen.")
+    parser.add_argument('--hpo-study', type=str, default=None,
+                        help='Optuna study to take best_trial params from. Omit for a standard-hyperparameter dry run — train and eval must omit it together.')
     parser.add_argument('--model-tag', type=str, required=True,
                          help='model_tag used by train_cl_tft_bc.py (models/<tag>.pt / <tag>_meta.pkl)')
     parser.add_argument('--gpu', type=int, default=None)
@@ -95,16 +101,24 @@ def main() -> None:
     if not config['data'].get('test_files'):
         raise ValueError("Config has no 'test_files' — nothing to evaluate on.")
 
-    storage_url = os.environ.get('OPTUNA_STORAGE')
-    if not storage_url:
-        raise RuntimeError("OPTUNA_STORAGE env var must be set to load the HPO study.")
-    study = optuna.load_study(study_name=args.hpo_study, storage=storage_url)
-    best = study.best_trial
-    for key in ('next_n_grid_points', 'next_n_grid_ecmwf', 'next_n_stations'):
-        if key in best.params:
-            config['params'][key] = best.params[key]
+    # --hpo-study optional, siehe train_cl_tft_bc.py. Ohne Studie stammen die
+    # next_n_*-Werte aus der Config und muessen mit denen des Trainingslaufs
+    # uebereinstimmen, sonst zeigt die cache_id auf einen anderen Datensatz.
+    study = None
+    best = None
+    if args.hpo_study:
+        storage_url = os.environ.get('OPTUNA_STORAGE')
+        if not storage_url:
+            raise RuntimeError("OPTUNA_STORAGE env var must be set to load the HPO study.")
+        study = optuna.load_study(study_name=args.hpo_study, storage=storage_url)
+        best = study.best_trial
+        for key in ('next_n_grid_points', 'next_n_grid_ecmwf', 'next_n_stations'):
+            if key in best.params:
+                config['params'][key] = best.params[key]
+    else:
+        logger.info("Kein --hpo-study: Preprocessing-Parameter aus der Config (Trockenlauf).")
     logger.info(
-        f"Preprocessing params from best trial: "
+        f"Preprocessing params ({'best trial' if best else 'Config, Trockenlauf'}): "
         f"next_n_grid_points={config['params']['next_n_grid_points']}, "
         f"next_n_grid_ecmwf={config['params']['next_n_grid_ecmwf']}, "
         f"next_n_stations={config['params']['next_n_stations']}"
@@ -115,8 +129,11 @@ def main() -> None:
         metadata = pickle.load(f)
     hyperparameters = metadata['hyperparameters']
     config['model']['feature_dim'] = metadata['feature_dim']
-    logger.info(f"Loaded metadata from {meta_path} (best_trial={metadata['best_trial_number']}, "
-                f"best_value={metadata['best_trial_value']:.6f})")
+    if metadata.get('best_trial_number') is not None:
+        logger.info(f"Loaded metadata from {meta_path} (best_trial={metadata['best_trial_number']}, "
+                    f"best_value={metadata['best_trial_value']:.6f})")
+    else:
+        logger.info(f"Loaded metadata from {meta_path} (Trockenlauf, keine HPO-Studie)")
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     if args.gpu is not None and torch.cuda.is_available():
@@ -197,16 +214,40 @@ def main() -> None:
         f"has_target_feature_scaler={hasattr(scaler_x, '_ff_target_feature_scaler')})"
     )
 
-    # Neighbour pool at test time: every station in the experiment. The test stations'
-    # own measurements are model INPUTS here (their future values are what gets scored),
-    # and in deployment the full observation network is available — so unlike training
-    # (files only) and validation (files + val_files), nothing has to be withheld.
-    # Set before get_data: the neighbour merge happens during loading.
-    config['data']['neighbor_pool'] = (list(config['data'].get('files', []))
-                                       + list(config['data'].get('val_files', []))
-                                       + list(config['data'].get('test_files', [])))
-    logger.info(f"Neighbour pool for test stations: "
-                f"{len(config['data']['neighbor_pool'])} stations (files + val_files + test_files)")
+    # --- Auswertungsfenster festlegen (NACH der cache_id-Berechnung!) ---
+    # test_start geht in DataCache._get_config_hash ein. Es hier zu aendern ist nur
+    # deshalb unbedenklich, weil train_cache_id oben bereits berechnet und der
+    # scaler_x daraus schon geladen ist.
+    if args.eval_split == 'val':
+        val_start = config['data'].get('val_start')
+        if not val_start:
+            raise ValueError("--eval-split val braucht data.val_start in der Config.")
+        if not config['data'].get('val_files'):
+            raise ValueError("--eval-split val braucht data.val_files in der Config.")
+        eval_start, eval_end = str(val_start), str(config['data']['test_start'])
+        config['data']['test_files'] = list(config['data']['val_files'])
+        config['data']['test_start'] = eval_start
+        config['data']['test_end'] = eval_end
+        # Nur die Trainingsstationen des Folds als Nachbarn — dieselbe Menge, die
+        # create_or_load_preprocessed_data_spatial den Zielstationen im Training
+        # zugestanden hat. Sonst saehe die Auswertung mehr als die Validierung.
+        config['data']['neighbor_pool'] = list(config['data'].get('files', []))
+        logger.info(
+            f"--eval-split val: {len(config['data']['test_files'])} Zielstationen des Folds "
+            f"im Fenster {eval_start} .. {eval_end}; Nachbar-Pool "
+            f"{len(config['data']['neighbor_pool'])} Trainingsstationen (train-role only)"
+        )
+    else:
+        # Neighbour pool at test time: every station in the experiment. The test stations'
+        # own measurements are model INPUTS here (their future values are what gets scored),
+        # and in deployment the full observation network is available — so unlike training
+        # (files only) and validation (files + val_files), nothing has to be withheld.
+        # Set before get_data: the neighbour merge happens during loading.
+        config['data']['neighbor_pool'] = (list(config['data'].get('files', []))
+                                           + list(config['data'].get('val_files', []))
+                                           + list(config['data'].get('test_files', [])))
+        logger.info(f"Neighbour pool for test stations: "
+                    f"{len(config['data']['neighbor_pool'])} stations (files + val_files + test_files)")
 
     test_dfs = preprocessing.get_data(
         data_dir=config['data']['path'],
@@ -310,6 +351,7 @@ def main() -> None:
     result = {
         'model_tag': args.model_tag,
         'config_path': f'{args.config}.yaml',
+        'eval_split': args.eval_split,
         'hpo_study': args.hpo_study,
         'test_start': str(config['data']['test_start']),
         'test_end': str(config['data']['test_end']),
