@@ -206,6 +206,10 @@ def build_fixture(
         ecmwf_altitudes=ecmwf_alts,
         station_ids=all_ids,
     )
+    # Required for nwp_aggregation="idw_alt" (DCRNN.__init__ hard-fails
+    # otherwise); a harmless no-op for every other aggregation. Mirrors
+    # train_dcrnn.py / get_test_results_dcrnn.py / hpo_dcrnn.py.
+    model_cfg.attach_nwp_geometry(base_graph)
 
     # ── synthetic, seeded tensors with production shapes ───────────────
     T = H_hist + H_fore + 8
