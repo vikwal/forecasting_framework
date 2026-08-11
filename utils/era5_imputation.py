@@ -1,11 +1,14 @@
 """
 utils/era5_imputation.py — ERA5-reanalysis-based imputation for wind_speed.
 
-Replaces Regression-Kriging as the primary gap-filling source for missing
-wind_speed measurements. Established by the read-only comparison analysis in
-docs/imputation_era5_comparison.md (per-station OLS on four ERA5-derived
-features beats Kriging by ~19% RMSE on 20034 artificially-hidden but truly
-observed station-hours) and the composite-vs-pure-OLS measurement in
+The SOLE imputation path for wind_speed. Regression-Kriging and the KNN
+imputer are no longer used for wind_speed anywhere in this module or at its
+call sites (docs/imputation_era5_only.md) — replaces the earlier two-stage
+setup (docs/imputation_era5_switch.md) that still fell back to KNN for
+stations/hours outside ERA5 coverage. Established by the read-only comparison
+analysis in docs/imputation_era5_comparison.md (per-station OLS on four
+ERA5-derived features beats Kriging by ~19% RMSE on 20034 artificially-hidden
+but truly observed station-hours) and the composite-vs-pure-OLS measurement in
 docs/imputation_era5_switch.md, which did NOT find a clear win for a
 blended OLS/quantile-mapping estimator -- so this module implements pure
 per-station Linear Regression only, per that measurement's fallback rule.
@@ -13,20 +16,36 @@ per-station Linear Regression only, per that measurement's fallback rule.
 wind_direction is explicitly NOT covered here: the comparison analysis found
 raw ERA5 direction loses to the existing KNN imputer in every wind class
 (31.5 deg vs 9.1 deg mean error) -- direction imputation stays on the KNN
-path (utils/imputation.load_knn_imputation / apply_knn_imputation).
+path (utils/imputation.load_knn_imputation / apply_knn_imputation), wired
+unchanged at each call site.
 
-Fallback chain (see docs/imputation_era5_switch.md):
-    1. ERA5 + per-station OLS correction, wherever ERA5 covers the station/hour.
-    2. Otherwise: existing KNN imputer (unchanged, wired at each call site).
+Data source: a local per-station Parquet cache
+(/mnt/lambda1/nvme1/synthetic/era5_wind_cache/Station_<sid>.parquet), NOT
+Postgres. Built once by mirroring public.era5_wind for the 151 pool stations
+it covers, plus GRIB-extracted data for the 2 pool stations absent from
+era5_wind ('03196', '15813' -- see docs/imputation_era5_only.md section 1-2
+for the calibration that established nearest-grid-point as the reproducing
+extraction method, and section 2 for the extraction itself). Every cache
+file carries the same 9 columns: u_wind_10m, v_wind_10m, u_wind_100m,
+v_wind_100m, wind_gust_10m, friction_wind, temp_2m, pressure, dew_point_2m
+-- a DatetimeIndex named 'timestamp', tz-aware UTC, hourly. Only the first
+four of the wind-related columns are used as OLS features here (ERA5_FEATURES
+below); temp_2m/pressure/dew_point_2m are present in the cache for future use
+but deliberately NOT added to the feature set by this change (would be a
+design decision outside this task's scope -- flagged, not made).
 
-Two things ERA5 does not cover, both handled by the KNN fallback:
-    - stations absent from public.era5_wind (as of the comparison analysis:
-      '03196', '15813' among the 153-station pool -- but this module makes
-      no station-list assumption; whichever stations the query returns rows
-      for are considered covered, so a growing era5_wind table is picked up
-      automatically without a code change)
-    - hours after ERA5_COVERAGE_END (public.era5_wind currently ends
-      2026-06-30 23:00 UTC; raw station measurements extend past that)
+NO FALLBACK for wind_speed (docs/imputation_era5_only.md):
+    - stations absent from the cache (none currently -- the cache was built
+      to cover the full 153-station pool from configs/mtgnn/stdhp/
+      config_wind_mtgnn_nwp_stdhp_fold1.yaml; this module makes no
+      station-list assumption, so a station missing its cache file simply
+      contributes no ERA5 predictions, same as before)
+    - hours after ERA5_COVERAGE_END (the cache currently ends 2026-06-30
+      23:00 UTC for all 153 stations; raw station measurements can extend
+      past that) are DELIBERATELY left NaN. This is intentional, not a bug:
+      the session that requested this change verified it costs zero
+      train/val run-pairs under the fold1 config (test_end=2026-03-31 caps
+      the loaded window well before ERA5's end).
 """
 from __future__ import annotations
 
@@ -36,116 +55,134 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import psycopg2
 from sklearn.linear_model import LinearRegression
 
 logger = logging.getLogger(__name__)
 
-# Feature order exactly as in docs/imputation_era5_comparison.md section 2(b).
+# Feature order exactly as in docs/imputation_era5_comparison.md section 2(b)
+# -- UNCHANGED by the cache switch (see module docstring: the cache carries
+# three additional columns not used here, on purpose).
 ERA5_FEATURES = ["mag10", "ratio_100_10", "friction_wind", "wind_gust_10m"]
 
-# public.era5_wind coverage end at the time of the comparison analysis
-# (docs/imputation_era5_comparison.md section 1.2: 2023-07-01 00:00 --
-# 2026-06-30 23:00 UTC). Hours after this never have ERA5 rows; kept as an
-# explicit constant only for diagnostics/logging, not as a hard filter --
-# the SQL query and the per-timestamp merge already yield NaN for anything
-# not actually present in the table, ERA5_COVERAGE_END never needs to be
-# "correct" for correctness, only for the diagnostic breakdown.
+# Per-station Parquet cache built by docs/imputation_era5_only.md step 3.
+# One file per pool station: Station_<sid>.parquet, DatetimeIndex 'timestamp'
+# (UTC, hourly), columns = RAW_CACHE_COLUMNS below.
+ERA5_CACHE_DIR = "/mnt/lambda1/nvme1/synthetic/era5_wind_cache"
+
+RAW_CACHE_COLUMNS = [
+    "u_wind_10m", "v_wind_10m", "u_wind_100m", "v_wind_100m",
+    "wind_gust_10m", "friction_wind", "temp_2m", "pressure", "dew_point_2m",
+]
+
+# Cache coverage end (docs/imputation_era5_only.md step 3: identical across
+# all 153 stations -- 151 mirror public.era5_wind's end, the 2 GRIB-extracted
+# stations were extracted for the GRIB archive's own end, which coincides).
+# Kept as an explicit constant only for diagnostics/logging, not as a hard
+# filter -- reading each station's own cached index already yields nothing
+# past what's actually cached, ERA5_COVERAGE_END never needs to be "correct"
+# for correctness, only for the diagnostic breakdown.
 ERA5_COVERAGE_END = pd.Timestamp("2026-06-30 23:00:00", tz="UTC")
 
-# Same physical plausibility guard as the Kriging/KNN imputation paths
-# (docs/imputation_plausibility_guard.md): absolute ceiling for an hourly
-# wind-speed mean at 10 m height, not a station-relative bound. Applied here
-# because an OLS extrapolation can overshoot just like Kriging/IDW can.
+# Same physical plausibility guard as the (now-removed) Kriging/KNN
+# wind_speed imputation paths (docs/imputation_plausibility_guard.md):
+# absolute ceiling for an hourly wind-speed mean at 10 m height, not a
+# station-relative bound. Applied here because an OLS extrapolation can
+# overshoot just like Kriging/IDW could.
 WIND_SPEED_LOWER_BOUND = 0.0
 WIND_SPEED_UPPER_BOUND = 40.0
 
 # Stations with fewer than this many observed+ERA5-covered fit hours don't
-# get an ERA5 model (falls back to KNN for all of that station's hours).
-# Reuses the same "<30 points" floor the comparison analysis already applied
-# to its monthly-stratified quantile mapping (section 2c) rather than
-# inventing a new threshold.
+# get an ERA5 model (their hours simply stay NaN -- no fallback, see module
+# docstring). Reuses the same "<30 points" floor the comparison analysis
+# already applied to its monthly-stratified quantile mapping (section 2c)
+# rather than inventing a new threshold.
 MIN_FIT_ROWS = 30
-
-
-def _to_naive_utc(ts) -> pd.Timestamp:
-    """era5_wind.timestamp is stored tz-naive but is UTC-content (verified by
-    the comparison-analysis session via an offset test) -- query bounds must
-    be naive too, so tz-aware bounds are stripped after converting to UTC."""
-    ts = pd.Timestamp(ts)
-    if ts.tzinfo is not None:
-        ts = ts.tz_convert("UTC").tz_localize(None)
-    return ts
 
 
 def load_era5_wind_features(
     station_ids: List[str],
     start: Optional[pd.Timestamp] = None,
     end: Optional[pd.Timestamp] = None,
-    db_url: Optional[str] = None,
+    cache_dir: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Load public.era5_wind for *station_ids* and compute the derived features.
+    """Load the per-station ERA5 Parquet cache for *station_ids* and compute
+    the derived features. Replaces the former direct public.era5_wind query
+    (docs/imputation_era5_switch.md) -- no Postgres connection is made here
+    anymore.
 
     Parameters
     ----------
     station_ids : station IDs (any zero-padding; normalised to 5 digits here).
     start, end  : optional inclusive UTC timestamp bounds.
-    db_url      : overrides WEATHER_DB_URL if given.
+    cache_dir   : overrides ERA5_CACHE_DIR if given.
 
     Returns
     -------
     DataFrame with columns ['station_id', 'timestamp'] + ERA5_FEATURES,
     'timestamp' tz-aware UTC, 'station_id' zero-padded to 5 digits. Empty
-    (but correctly-columned) if station_ids is empty or the query returns
-    no rows.
+    (but correctly-columned) if station_ids is empty or no cache files are
+    found for any of them.
     """
     cols = ["station_id", "timestamp"] + ERA5_FEATURES
     if not station_ids:
         return pd.DataFrame(columns=cols)
 
     sids = sorted({str(s).zfill(5) for s in station_ids})
-    url = db_url or os.environ.get("WEATHER_DB_URL")
-    if not url:
-        raise ValueError(
-            "WEATHER_DB_URL environment variable not set -- required to load "
-            "public.era5_wind for ERA5-based wind_speed imputation."
+    cdir = cache_dir or ERA5_CACHE_DIR
+
+    start_utc = pd.Timestamp(start).tz_convert("UTC") if start is not None and pd.Timestamp(start).tzinfo else (
+        pd.Timestamp(start, tz="UTC") if start is not None else None
+    )
+    end_utc = pd.Timestamp(end).tz_convert("UTC") if end is not None and pd.Timestamp(end).tzinfo else (
+        pd.Timestamp(end, tz="UTC") if end is not None else None
+    )
+
+    frames = []
+    n_missing_files = 0
+    for sid in sids:
+        path = os.path.join(cdir, f"Station_{sid}.parquet")
+        if not os.path.isfile(path):
+            n_missing_files += 1
+            continue
+        df = pd.read_parquet(path, columns=["u_wind_10m", "v_wind_10m", "u_wind_100m", "v_wind_100m",
+                                             "wind_gust_10m", "friction_wind"])
+        idx = df.index
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        else:
+            idx = idx.tz_convert("UTC")
+        df.index = idx
+        if start_utc is not None:
+            df = df[df.index >= start_utc]
+        if end_utc is not None:
+            df = df[df.index <= end_utc]
+        if df.empty:
+            continue
+        df = df.reset_index().rename(columns={"index": "timestamp"})
+        if "timestamp" not in df.columns:
+            df = df.rename(columns={df.columns[0]: "timestamp"})
+        df.insert(0, "station_id", sid)
+        frames.append(df)
+
+    if n_missing_files:
+        logger.info(
+            "ERA5 cache: %d/%d requested station(s) have no cache file under %s "
+            "(no ERA5 predictions for those -- stays NaN, no fallback).",
+            n_missing_files, len(sids), cdir,
         )
 
-    where = ["station_id IN ({})".format(",".join(f"'{s}'" for s in sids))]
-    params: list = []
-    if start is not None:
-        where.append("timestamp >= %s")
-        params.append(_to_naive_utc(start))
-    if end is not None:
-        where.append("timestamp <= %s")
-        params.append(_to_naive_utc(end))
-    query = f"""
-        SELECT station_id, timestamp, u_wind_10m, v_wind_10m, u_wind_100m, v_wind_100m,
-               wind_gust_10m, friction_wind
-        FROM public.era5_wind
-        WHERE {' AND '.join(where)}
-    """
-
-    conn = psycopg2.connect(url)
-    try:
-        df = pd.read_sql(query, conn, params=params or None)
-    finally:
-        conn.close()
-
-    if df.empty:
+    if not frames:
         return pd.DataFrame(columns=cols)
 
-    df["station_id"] = df["station_id"].astype(str).str.zfill(5)
-    ts = pd.to_datetime(df["timestamp"])
-    df["timestamp"] = ts.dt.tz_localize("UTC") if ts.dt.tz is None else ts.dt.tz_convert("UTC")
+    out = pd.concat(frames, axis=0, ignore_index=True)
 
-    mag10 = np.hypot(df["u_wind_10m"].to_numpy(dtype=float), df["v_wind_10m"].to_numpy(dtype=float))
-    mag100 = np.hypot(df["u_wind_100m"].to_numpy(dtype=float), df["v_wind_100m"].to_numpy(dtype=float))
-    df["mag10"] = mag10
-    df["ratio_100_10"] = mag100 / np.maximum(mag10, 0.1)
+    mag10 = np.hypot(out["u_wind_10m"].to_numpy(dtype=float), out["v_wind_10m"].to_numpy(dtype=float))
+    mag100 = np.hypot(out["u_wind_100m"].to_numpy(dtype=float), out["v_wind_100m"].to_numpy(dtype=float))
+    out["mag10"] = mag10
+    out["ratio_100_10"] = mag100 / np.maximum(mag10, 0.1)
     # wind_gust_10m, friction_wind already present as raw columns.
 
-    return df[cols]
+    return out[cols]
 
 
 def fit_station_ols(
@@ -232,8 +269,9 @@ def predict_station_ols(
 
 
 def _apply_plausibility_guard(pred: np.ndarray) -> np.ndarray:
-    """Same guard as Kriging/KNN (docs/imputation_plausibility_guard.md):
-    negative -> 0.0, > 40.0 -> 40.0. NaN passes through untouched."""
+    """Same guard as the (now-removed) Kriging/KNN wind_speed path
+    (docs/imputation_plausibility_guard.md): negative -> 0.0, > 40.0 -> 40.0.
+    NaN passes through untouched."""
     finite = ~np.isnan(pred)
     neg_mask = finite & (pred < WIND_SPEED_LOWER_BOUND)
     hi_mask = finite & (pred > WIND_SPEED_UPPER_BOUND)
@@ -259,13 +297,19 @@ def load_era5_imputation(
     meas_raw: np.ndarray,
     measurement_cols: List[str],
     target_col: str = "wind_speed",
-    db_url: Optional[str] = None,
+    cache_dir: Optional[str] = None,
     min_fit_rows: int = MIN_FIT_ROWS,
 ) -> Tuple[np.ndarray, pd.DataFrame, Dict[str, int]]:
     """High-level entry point: fit + apply per-station ERA5 OLS imputation
-    for *target_col*, aligned to (T, N) like load_interpol_imputation /
-    load_knn_imputation, so it slots into apply_interpol_imputation()
-    UNCHANGED at call sites -- only the array passed in changes.
+    for *target_col*, aligned to (T, N) like the removed
+    load_interpol_imputation / load_knn_imputation wind_speed paths, so it
+    slots into apply_interpol_imputation() UNCHANGED at call sites -- only
+    the array passed in changes.
+
+    This is now the ONLY imputation source for wind_speed -- call sites must
+    NOT layer a KNN (or any other) fallback on top of this function's output
+    for target_col='wind_speed' (docs/imputation_era5_only.md). Cells this
+    function leaves NaN are meant to stay NaN.
 
     Parameters
     ----------
@@ -278,12 +322,12 @@ def load_era5_imputation(
     target_col        : which column to impute (only 'wind_speed' is
                          meaningful; ERA5 direction is deliberately unused,
                          see module docstring).
-    db_url            : overrides WEATHER_DB_URL if given.
+    cache_dir         : overrides ERA5_CACHE_DIR if given.
     min_fit_rows      : passed through to fit_station_ols.
 
     Returns
     -------
-    era5_pred : (T, N) float32, NaN wherever ERA5 doesn't cover the
+    era5_pred : (T, N) float32, NaN wherever the cache doesn't cover the
                 station/hour or the station had too few fit rows.
     coefs     : per-station coefficient audit table (see fit_station_ols).
     diag      : {'n_stations_fitted', 'n_stations_no_era5_rows',
@@ -299,7 +343,7 @@ def load_era5_imputation(
     assert T == len(timestamps)
 
     era5_df = load_era5_wind_features(
-        station_ids, start=timestamps[0], end=timestamps[-1], db_url=db_url,
+        station_ids, start=timestamps[0], end=timestamps[-1], cache_dir=cache_dir,
     )
 
     stations_with_era5 = set(era5_df["station_id"].unique().tolist())
@@ -346,8 +390,8 @@ def load_era5_imputation(
         "n_cells_still_missing": n_cells_missing_total - n_cells_filled,
     }
     logger.info(
-        "ERA5 imputation '%s': %d/%d stations fitted (%d without ERA5 rows, %d below "
-        "min_fit_rows=%d) -- filled %d/%d missing cells, %d remain for KNN fallback.",
+        "ERA5 imputation '%s': %d/%d stations fitted (%d without ERA5 cache rows, %d below "
+        "min_fit_rows=%d) -- filled %d/%d missing cells, %d remain NaN (no fallback).",
         target_col, diag["n_stations_fitted"], N, diag["n_stations_no_era5_rows"],
         diag["n_stations_below_min_fit_rows"], min_fit_rows,
         diag["n_cells_filled"], diag["n_cells_missing_total"], diag["n_cells_still_missing"],

@@ -1077,7 +1077,25 @@ def create_or_load_preprocessed_data_spatial(config: Dict,
 # Regression-Kriging with ERA5-based per-station OLS as the primary
 # wind_speed imputation source, KNN unchanged as the fallback. See
 # docs/imputation_era5_switch.md.
-IMPUTATION_GUARD_VERSION = 2
+#
+# 2 -> 3 on 2026-08-11 (same day, follow-up change): utils/era5_imputation.py
+# now reads the ERA5 wind features from a local Parquet cache
+# (/mnt/lambda1/nvme1/synthetic/era5_wind_cache/Station_<sid>.parquet)
+# instead of querying public.era5_wind directly, AND the KNN fallback for
+# target_col='wind_speed' was removed at every call site (train_dcrnn.py,
+# hpo_dcrnn.py, train_mtgnn.py, hpo_mtgnn.py, train_wavenet.py,
+# hpo_wavenet.py, get_test_results_mtgnn.py, get_test_results_wavenet.py,
+# evaluate_reference.py, baselines/dataset.py -- get_test_results_dcrnn.py
+# already had no such fallback). Neither change is visible to this key
+# through interpol_fingerprint/knnimputer_fingerprint/path-as-string above
+# (the cache directory is not referenced by any data_cfg path this key
+# hashes), so without this bump a cache entry built under guard version 2
+# would keep being served unchanged -- silently stale Postgres-sourced,
+# KNN-backfilled wind_speed tensors instead of the new Parquet-cache-only,
+# no-fallback ones. wind_direction (still KNN, unchanged) is unaffected in
+# value, but every cache entry's meas_raw blob is versioned as a whole, so
+# the bump applies to it too. See docs/imputation_era5_only.md.
+IMPUTATION_GUARD_VERSION = 3
 
 
 def _imputation_dir_fingerprint(path: str) -> str:

@@ -540,22 +540,16 @@ def main() -> None:
             nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
             logger.info("ERA5 imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, target_col)
 
-        # Fallback KNN for target_col (ERA5-uncovered stations/hours)
+        # NO KNN fallback for target_col (wind_speed): ERA5 + per-station OLS
+        # is the sole imputation source now (docs/imputation_era5_only.md).
+        # Hours/stations ERA5 does not cover stay NaN by design.
         remaining_nan = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
         if remaining_nan > 0:
-            knnimputer_path_fb = data_cfg.get("knnimputer_path")
-            if knnimputer_path_fb:
-                logger.info(
-                    "ERA5 left %d NaN in '%s' — KNN fallback from %s …",
-                    remaining_nan, target_col, knnimputer_path_fb,
-                )
-                knn_fb = load_knn_imputation(knnimputer_path_fb, target_col, all_ids, timestamps, freq=freq)
-                meas_raw = apply_knn_imputation(meas_raw, knn_fb, measurement_cols, target_col)
-                logger.info(
-                    "KNN fallback: %d → %d NaN in '%s'",
-                    remaining_nan, int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum()),
-                    target_col,
-                )
+            logger.info(
+                "ERA5 left %d NaN in '%s' -- left as NaN, no fallback "
+                "(docs/imputation_era5_only.md).",
+                remaining_nan, target_col,
+            )
 
         # Secondary-column KNN imputation (e.g. wind_direction, dhi, …)
         knnimputer_path = data_cfg.get("knnimputer_path")

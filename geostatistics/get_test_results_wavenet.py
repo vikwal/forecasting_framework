@@ -237,6 +237,8 @@ def main() -> None:
     knnimputer_path = data_cfg.get("knnimputer_path")
     if knnimputer_path:
         for col in measurement_cols:
+            if col == target_col:
+                continue  # wind_speed: ERA5-only, NO KNN fallback (docs/imputation_era5_only.md)
             if int(np.isnan(meas_raw[:, :, measurement_cols.index(col)]).sum()) == 0:
                 continue
             knn_arr = load_knn_imputation(knnimputer_path, col, all_ids, timestamps, freq=freq)

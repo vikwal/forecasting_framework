@@ -534,25 +534,18 @@ def main() -> None:
         nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
         logger.info("ERA5 imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, target_col)
 
-        # Fallback: fill remaining NaN in target_col via KNN imputation
-        # (stations/hours ERA5 doesn't cover -- see era5_diag for the breakdown).
+        # NO KNN fallback for target_col (wind_speed): ERA5 + per-station OLS
+        # is the sole imputation source now (docs/imputation_era5_only.md).
+        # Hours/stations ERA5 does not cover stay NaN by design -- see
+        # era5_diag for the breakdown (n_stations_no_era5_rows,
+        # n_stations_below_min_fit_rows, n_cells_still_missing).
         remaining_nan = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
         if remaining_nan > 0:
-            knnimputer_path = data_cfg.get("knnimputer_path")
-            if knnimputer_path:
-                logger.info(
-                    "ERA5 left %d NaN in '%s' (no ERA5 coverage for that station/hour). "
-                    "Attempting KNN fallback from %s …",
-                    remaining_nan, target_col, knnimputer_path,
-                )
-                knn_ws = load_knn_imputation(knnimputer_path, target_col, all_ids, timestamps, freq=freq)
-                nan_before_knn = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
-                meas_raw = apply_knn_imputation(meas_raw, knn_ws, measurement_cols, target_col)
-                nan_after_knn = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
-                logger.info(
-                    "KNN fallback imputation: %d NaN → %d NaN in '%s'",
-                    nan_before_knn, nan_after_knn, target_col,
-                )
+            logger.info(
+                "ERA5 left %d NaN in '%s' (no ERA5 coverage for that station/hour) -- "
+                "left as NaN, no fallback (docs/imputation_era5_only.md).",
+                remaining_nan, target_col,
+            )
 
     # Secondary-column KNN imputation (e.g. wind_direction, dhi, …)
     knnimputer_path = data_cfg.get("knnimputer_path")
