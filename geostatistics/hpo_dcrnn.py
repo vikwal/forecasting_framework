@@ -1406,11 +1406,34 @@ def main() -> None:
                 "just above (now routed into this log file, see _setup_logging)."
             )
 
+    _stop_files = [Path(".hpo_stop")]
+    if args.suffix:
+        _stop_files.append(Path(f".hpo_stop_{args.suffix}"))
+
+    def _stop_on_flag(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        """Graceful shutdown between trials.
+
+        Touch ``.hpo_stop`` (every worker) or ``.hpo_stop_<suffix>`` (one worker
+        group) in the repo root.  ``study.stop()`` makes optimize() return after
+        the CURRENT trial has finished, so nothing is thrown away.  Killing the
+        process instead loses the running trial (up to ~10 GPU-hours, see the
+        Trial-58 entry in logs/hpo_dcrnn_wind_dcrnn_r1.log) and leaves a RUNNING
+        zombie behind until Optuna's heartbeat marks it FAIL.
+        """
+        for _f in _stop_files:
+            if _f.exists():
+                logger.warning(
+                    "stop flag %s present -- finishing after trial %d, then exiting cleanly",
+                    _f, trial.number,
+                )
+                study.stop()
+                return
+
     while remaining > 0:
         try:
             study.optimize(
                 objective, n_trials=remaining, catch=(Exception,),
-                callbacks=[_abort_on_repeated_failure],
+                callbacks=[_abort_on_repeated_failure, _stop_on_flag],
             )
             break
         except _NoTrialCompletedError:
