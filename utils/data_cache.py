@@ -1056,6 +1056,49 @@ def create_or_load_preprocessed_data_spatial(config: Dict,
 # GNNCache — memory-mapped caching for DCRNN / STGNN2 data
 # ---------------------------------------------------------------------------
 
+# Bump whenever the imputation *guard* logic in geostatistics/run_spatial_
+# interpolation.py or geostatistics/regen_knn_imputation.py changes in a way
+# that can change values without touching any file's bytes in a way the
+# fingerprint below would catch on its own (it always does, since a code
+# change implies a re-run implies new file mtimes/sizes -- this constant is
+# defense-in-depth for the case where someone reasons about the guard version
+# explicitly, e.g. in a report or a manual cache-bust). See
+# docs/imputation_plausibility_guard.md.
+IMPUTATION_GUARD_VERSION = 1
+
+
+def _imputation_dir_fingerprint(path: str) -> str:
+    """Cheap, content-blind fingerprint of an imputation-cache directory.
+
+    Computed purely from filesystem metadata (file count, size, mtime) --
+    never opens/reads the files themselves -- so it is fast enough to run on
+    every make_key() call, yet changes whenever a file under *path* is added,
+    removed, or rewritten (as happened on 2026-08-10 when the interpolation/
+    KNN-imputation generators were re-run: the string-keyed cache below did
+    not change and the campaign kept reading stale, pre-regen tensors --
+    see docs/imputation_plausibility_guard.md).
+
+    Returns "missing:<path>" if *path* does not exist or is not a directory,
+    so a not-yet-materialized path still yields a stable, distinct key.
+    """
+    if not path or not os.path.isdir(path):
+        return f"missing:{path}"
+    entries = []
+    for root, _dirs, files in os.walk(path):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            try:
+                st = os.stat(fpath)
+            except OSError:
+                continue
+            rel = os.path.relpath(fpath, path)
+            entries.append((rel, st.st_size, int(st.st_mtime_ns)))
+    entries.sort()
+    import json as _json
+    digest = hashlib.md5(_json.dumps(entries).encode()).hexdigest()[:16]
+    return f"{len(entries)}:{digest}"
+
+
 class GNNCache:
     """
     Disk-based cache for large GNN tensors (ICON-D2, ECMWF, measurements).
@@ -1111,6 +1154,16 @@ class GNNCache:
             "test_end":         str(data_cfg.get("test_end", "")),
             "interpol_path":    str(data_cfg.get("interpol_path", "")),
             "knnimputer_path":  str(data_cfg.get("knnimputer_path", "")),
+            # Content-blind fingerprints of the two imputation-cache
+            # directories, plus the guard-version constant -- without these,
+            # a regeneration of interpol_path/knnimputer_path (or a change to
+            # the plausibility guard applied while writing them) is invisible
+            # to this key, since interpol_path/knnimputer_path above are only
+            # hashed as *strings* (the path, not its contents). See
+            # docs/imputation_plausibility_guard.md.
+            "interpol_fingerprint":   _imputation_dir_fingerprint(str(data_cfg.get("interpol_path", ""))),
+            "knnimputer_fingerprint": _imputation_dir_fingerprint(str(data_cfg.get("knnimputer_path", ""))),
+            "imputation_guard_version": IMPUTATION_GUARD_VERSION,
             "icond2_features":  sorted(dcrnn_cfg.get("icond2_features", [])),
             "ecmwf_features":   sorted(dcrnn_cfg.get("ecmwf_features", [])),
             "meas_features":    sorted(dcrnn_cfg.get("measurement_features", [])),

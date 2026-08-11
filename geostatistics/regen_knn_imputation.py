@@ -38,6 +38,13 @@ CACHE_DIR = "/mnt/lambda1/nvme1/synthetic/knnimputer/wind"
 EXCLUDE = {"14138"}
 KNN_K = 10
 
+# Plausibility guard (see docs/imputation_plausibility_guard.md). Absolute
+# physical ceiling for an hourly wind-speed mean at 10 m height -- NOT a
+# station-relative bound (a station-relative bound was tested and found to
+# flag harmless values instead). Applied to wind_speed only; wind_direction
+# is an angle and is never speed-clipped.
+WIND_SPEED_UPPER_BOUND = 40.0
+
 
 def main() -> None:
     station_ids = sorted(
@@ -80,6 +87,27 @@ def main() -> None:
     imputer = KNNImputer(n_neighbors=KNN_K)
     ws_imputed = imputer.fit_transform(ws_pivot.values)
     ws_pivot = pd.DataFrame(ws_imputed, index=ws_pivot.index, columns=ws_pivot.columns)
+
+    # --- Plausibility guard (sole correction point; raw measurements and
+    # their loader are never touched) -------------------------------------
+    # Negative values are pure artefacts of the KNNImputer's linear
+    # averaging: across all 204 raw measurement files (31,568,998 values)
+    # there is not a single negative raw wind speed. Clipped to exactly 0.0.
+    ws_vals = ws_pivot.to_numpy(dtype=float)
+    neg_mask = ws_vals < 0.0
+    hi_mask = ws_vals > WIND_SPEED_UPPER_BOUND
+    n_neg = int(np.count_nonzero(neg_mask))
+    n_hi = int(np.count_nonzero(hi_mask))
+    if n_neg:
+        ws_vals[neg_mask] = 0.0
+    if n_hi:
+        ws_vals[hi_mask] = WIND_SPEED_UPPER_BOUND
+    logger.warning(
+        "Plausibility guard on wind_speed: clipped %d value(s) < 0 -> 0.0, "
+        "%d value(s) > %.1f -> %.1f",
+        n_neg, n_hi, WIND_SPEED_UPPER_BOUND, WIND_SPEED_UPPER_BOUND,
+    )
+    ws_pivot = pd.DataFrame(ws_vals, index=ws_pivot.index, columns=ws_pivot.columns)
     ws_pivot.to_parquet(ws_cache)
     logger.info("Saved -> %s", ws_cache)
 
@@ -111,6 +139,25 @@ def main() -> None:
     sin_imp, cos_imp = imputed_sc[:, :len(station_ids)], imputed_sc[:, len(station_ids):]
     dir_imp = np.rad2deg(np.arctan2(sin_imp, cos_imp)) % 360
     dir_pivot = pd.DataFrame(dir_imp, index=dir_pivot.index, columns=dir_pivot.columns)
+
+    # --- Plausibility guard: wind DIRECTION is an angle, not a speed --
+    # no upper-bound speed clipping here. Only normalize to [0, 360) and
+    # count violations instead of silently trusting the %360 above (that
+    # is exactly the kind of silent correction that caused the original
+    # bug in the wind-speed columns).
+    dir_vals = dir_pivot.to_numpy(dtype=float)
+    finite = ~np.isnan(dir_vals)
+    below = finite & (dir_vals < 0.0)
+    above = finite & (dir_vals >= 360.0)
+    n_below = int(np.count_nonzero(below))
+    n_above = int(np.count_nonzero(above))
+    dir_vals = np.mod(dir_vals, 360.0)  # no-op for values already in [0, 360)
+    logger.warning(
+        "Plausibility guard on wind_direction: %d value(s) < 0 deg, "
+        "%d value(s) >= 360 deg -> normalized to [0, 360)",
+        n_below, n_above,
+    )
+    dir_pivot = pd.DataFrame(dir_vals, index=dir_pivot.index, columns=dir_pivot.columns)
     dir_pivot.to_parquet(dir_cache)
     logger.info("Saved -> %s", dir_cache)
 

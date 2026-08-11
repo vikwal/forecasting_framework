@@ -1088,6 +1088,40 @@ def main() -> None:
     )
     predictions = predictions.merge(raw_obs_long, on=["timestamp", "station_id"], how="left")
 
+    # --- Plausibility guard (sole correction point; raw measurements and
+    # load_station_measurements() are never touched) ---------------------
+    # Negative values are pure artefacts of the interpolation/kriging math:
+    # across all 204 raw measurement files (31,568,998 values) there is not
+    # a single negative raw wind speed — see docs/imputation_plausibility_guard.md.
+    # They are clipped to exactly 0.0.
+    #
+    # The upper bound guards against numerically unstable extrapolation
+    # (kriging/IDW can overshoot far beyond any neighbour's value). It is an
+    # absolute physical ceiling for an hourly wind-speed mean at 10 m height,
+    # NOT a station-relative bound (a station-relative bound was tested and
+    # found to flag harmless values instead). Configurable via
+    # interpolation.wind_speed_upper_bound; default 40.0 m/s.
+    # wind_speed_raw / wind_speed_observed are left untouched.
+    wind_speed_upper_bound = float(interp_cfg.get("wind_speed_upper_bound", 40.0))
+    for col in ("rk_pred", "idw_pred", "ok_pred"):
+        if col not in predictions.columns:
+            continue
+        vals = predictions[col].to_numpy(dtype=float)
+        neg_mask = vals < 0.0
+        hi_mask = vals > wind_speed_upper_bound
+        n_neg = int(np.count_nonzero(neg_mask))
+        n_hi = int(np.count_nonzero(hi_mask))
+        if n_neg:
+            vals[neg_mask] = 0.0
+        if n_hi:
+            vals[hi_mask] = wind_speed_upper_bound
+        logger.warning(
+            "Plausibility guard on '%s': clipped %d value(s) < 0 -> 0.0, "
+            "%d value(s) > %.1f -> %.1f",
+            col, n_neg, n_hi, wind_speed_upper_bound, wind_speed_upper_bound,
+        )
+        predictions[col] = vals
+
     # 5. Save raw predictions (combined)
     pred_path = os.path.join(output_dir, f"{prefix}_loo_predictions.csv")
     predictions.to_csv(pred_path, index=False)
