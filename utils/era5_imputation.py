@@ -67,7 +67,18 @@ ERA5_FEATURES = ["mag10", "ratio_100_10", "friction_wind", "wind_gust_10m"]
 # Per-station Parquet cache built by docs/imputation_era5_only.md step 3.
 # One file per pool station: Station_<sid>.parquet, DatetimeIndex 'timestamp'
 # (UTC, hourly), columns = RAW_CACHE_COLUMNS below.
-ERA5_CACHE_DIR = "/mnt/lambda1/nvme1/synthetic/era5_wind_cache"
+# Die Ablage ist EIN Speicher, aber unter zwei Pfadkonventionen sichtbar:
+# l1 ist der Besitzer und sieht sie nativ als /mnt/nvme1, l2 und ws mounten sie
+# per NFS als /mnt/lambda1/nvme1. Der Config-Pfad-Rewrite auf l1 erfasst nur
+# configs/, nicht Python-Konstanten — deshalb hier zur Laufzeit aufloesen.
+_ERA5_CACHE_CANDIDATES = (
+    "/mnt/lambda1/nvme1/synthetic/era5_wind_cache",   # l2, ws
+    "/mnt/nvme1/synthetic/era5_wind_cache",           # l1
+)
+ERA5_CACHE_DIR = next(
+    (c for c in _ERA5_CACHE_CANDIDATES if os.path.isdir(c)),
+    _ERA5_CACHE_CANDIDATES[0],
+)
 
 RAW_CACHE_COLUMNS = [
     "u_wind_10m", "v_wind_10m", "u_wind_100m", "v_wind_100m",
