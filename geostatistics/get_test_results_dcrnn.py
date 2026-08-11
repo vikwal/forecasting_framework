@@ -52,6 +52,7 @@ from geostatistics.train_stgnn2 import (
     load_knn_imputation,
     apply_knn_imputation,
 )
+from utils.era5_imputation import load_era5_imputation
 from geostatistics.train_dcrnn import resolve_feature_mode, encode_circular_measurements, apply_dir_encoding
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.stgnn import HeterogeneousGraphBuilder
@@ -263,8 +264,11 @@ def main() -> None:
     rk_pred = None   # kept for the optional Kriging lag feature below
     interpol_path = data_cfg.get("interpol_path")
     if interpol_path:
-        rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)
-        meas_raw = apply_interpol_imputation(meas_raw, rk_pred, measurement_cols, target_col)
+        rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)  # kept: Kriging lag feature elsewhere / no longer used for imputation itself
+        era5_pred, era5_coefs, era5_diag = load_era5_imputation(
+            all_ids, timestamps, meas_raw, measurement_cols, target_col,
+        )
+        meas_raw = apply_interpol_imputation(meas_raw, era5_pred, measurement_cols, target_col)
     
     knnimputer_path = data_cfg.get("knnimputer_path")
     if knnimputer_path and "wind_direction" in measurement_cols:

@@ -91,6 +91,17 @@ def load_station_measurements(
     """
     Load per-station measurement CSVs and return a (T, N, M) array.
 
+    ``wind_direction`` is an angle in degrees and is resampled with a
+    circular mean: sin/cos of the 10-min degree values are averaged
+    separately and recombined with ``arctan2``, result taken modulo 360.
+    A plain arithmetic mean of degrees is wrong across the 0/360 wrap
+    (e.g. mean(350, 10) = 180 instead of the correct 0) -- this mirrors the
+    convention already used by geostatistics/regen_knn_imputation.py for the
+    same physical quantity. Every other column keeps the arithmetic mean.
+    An hour with zero valid 10-min readings stays NaN for every column,
+    including wind_direction (skipna semantics of the sin/cos means match
+    the skipna semantics of the plain .mean() used elsewhere).
+
     Returns
     -------
     meas :       (T, N, M) float32, NaN where data is missing
@@ -105,13 +116,21 @@ def load_station_measurements(
             df = pd.read_parquet(fpath, columns=[col])
             df.index = pd.to_datetime(df.index, utc=True)
             dfs.append(df[col].rename(sid))
+        raw = pd.concat(dfs, axis=1).sort_index()
         # closed="left", label="left": [00:00, freq) → first bin, etc.
-        pivot = (
-            pd.concat(dfs, axis=1)
-            .sort_index()
-            .resample(freq, closed="left", label="left")
-            .mean()
-        )
+        if col == "wind_direction":
+            rad = np.deg2rad(raw.values)
+            sin_df = pd.DataFrame(np.sin(rad), index=raw.index, columns=raw.columns)
+            cos_df = pd.DataFrame(np.cos(rad), index=raw.index, columns=raw.columns)
+            sin_pivot = sin_df.resample(freq, closed="left", label="left").mean()
+            cos_pivot = cos_df.resample(freq, closed="left", label="left").mean()
+            pivot = pd.DataFrame(
+                np.rad2deg(np.arctan2(sin_pivot.values, cos_pivot.values)) % 360,
+                index=sin_pivot.index, columns=sin_pivot.columns,
+            )
+            pivot[sin_pivot.isna() | cos_pivot.isna()] = np.nan
+        else:
+            pivot = raw.resample(freq, closed="left", label="left").mean()
         if common_index is None:
             common_index = pivot.index
         pivots.append(pivot.values.astype(np.float32))

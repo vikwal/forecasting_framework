@@ -94,6 +94,7 @@ from geostatistics.train_stgnn2 import (
     apply_knn_imputation,
     require_nwp_elevation_env,
 )
+from utils.era5_imputation import load_era5_imputation
 from geostatistics.train_mtgnn import (
     _train_epoch,
     _val_epoch,
@@ -579,8 +580,11 @@ def main() -> None:
         rk_pred = None
         interpol_path = data_cfg.get("interpol_path")
         if interpol_path:
-            rk_pred  = load_interpol_imputation(interpol_path, all_ids, timestamps)
-            meas_raw = apply_interpol_imputation(meas_raw, rk_pred, measurement_cols, target_col)
+            rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)  # rk_pred no longer used for imputation itself (kept: harmless, no other consumer in this script)
+            era5_pred, era5_coefs, era5_diag = load_era5_imputation(
+                all_ids, timestamps, meas_raw, measurement_cols, target_col,
+            )
+            meas_raw = apply_interpol_imputation(meas_raw, era5_pred, measurement_cols, target_col)
 
         knnimputer_path = data_cfg.get("knnimputer_path")
         if knnimputer_path:

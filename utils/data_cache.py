@@ -1064,7 +1064,20 @@ def create_or_load_preprocessed_data_spatial(config: Dict,
 # defense-in-depth for the case where someone reasons about the guard version
 # explicitly, e.g. in a report or a manual cache-bust). See
 # docs/imputation_plausibility_guard.md.
-IMPUTATION_GUARD_VERSION = 1
+#
+# Also bump whenever a change alters meas_raw's values through a path this
+# key does NOT otherwise fingerprint -- e.g. code that reads directly from
+# raw station files (data_cfg["path"], hashed above only as a *string*, not
+# content-fingerprinted like interpol_path/knnimputer_path) or from a live
+# DB table (no file fingerprint possible at all). 1 -> 2 on 2026-08-11 for
+# exactly two such changes, landed together on purpose so they invalidate
+# old caches in one shot: (1) geostatistics/train_stgnn2.load_station_
+# measurements now resamples wind_direction with a circular (sin/cos) mean
+# instead of a naive degree mean; (2) utils/era5_imputation.py replaces
+# Regression-Kriging with ERA5-based per-station OLS as the primary
+# wind_speed imputation source, KNN unchanged as the fallback. See
+# docs/imputation_era5_switch.md.
+IMPUTATION_GUARD_VERSION = 2
 
 
 def _imputation_dir_fingerprint(path: str) -> str:

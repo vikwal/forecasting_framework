@@ -103,6 +103,7 @@ from geostatistics.train_stgnn2 import (
     load_knn_imputation,
     apply_knn_imputation,
 )
+from utils.era5_imputation import load_era5_imputation
 
 # ── DCRNN-specific imports ───────────────────────────────────────────────────
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
@@ -516,24 +517,31 @@ def main() -> None:
 
     interpolate_history = dcrnn_cfg.get("interpolate_history", False)
 
-    # Wind speed imputation via regression-kriging predictions
+    # Wind speed imputation: ERA5 per-station OLS correction is the primary
+    # source (docs/imputation_era5_switch.md); Kriging (rk_pred) is kept
+    # loaded ONLY for the optional Kriging lag feature further below and is
+    # no longer used to fill meas_raw -- see docs/imputation_era5_switch.md.
     rk_pred = None   # kept for optional Kriging lag feature below
     interpol_path = data_cfg.get("interpol_path")
     if interpol_path:
-        logger.info("Loading interpolation (rk_pred) for imputation from %s …", interpol_path)
+        logger.info("Loading interpolation (rk_pred) — kept for Kriging lag feature only, from %s …", interpol_path)
         rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)  # noqa: kept for Kriging lag feature
         nan_before = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
-        meas_raw = apply_interpol_imputation(meas_raw, rk_pred, measurement_cols, target_col)
+        era5_pred, era5_coefs, era5_diag = load_era5_imputation(
+            all_ids, timestamps, meas_raw, measurement_cols, target_col,
+        )
+        meas_raw = apply_interpol_imputation(meas_raw, era5_pred, measurement_cols, target_col)
         nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
-        logger.info("Imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, target_col)
+        logger.info("ERA5 imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, target_col)
 
         # Fallback: fill remaining NaN in target_col via KNN imputation
+        # (stations/hours ERA5 doesn't cover -- see era5_diag for the breakdown).
         remaining_nan = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
         if remaining_nan > 0:
             knnimputer_path = data_cfg.get("knnimputer_path")
             if knnimputer_path:
                 logger.info(
-                    "Kriging left %d NaN in '%s' (e.g. before NWP start time). "
+                    "ERA5 left %d NaN in '%s' (no ERA5 coverage for that station/hour). "
                     "Attempting KNN fallback from %s …",
                     remaining_nan, target_col, knnimputer_path,
                 )
