@@ -286,3 +286,38 @@ NICHT geloescht oder angefasst.
 - Ursache der Run-Paar-Differenz (6.1) nicht ermittelt — vermutlich
   Datendrift bei ICON-D2 oder Rohmessdaten zwischen der Referenzmessung und
   diesem Lauf, ausserhalb des Auftragsumfangs nicht weiter verfolgt.
+
+### 6.7 l1: era5_wind_cache unter dem hartcodierten Pfad nicht erreichbar
+
+`utils/era5_imputation.py`s `ERA5_CACHE_DIR` ist ein hartcodierter
+Python-Konstantenwert (`/mnt/lambda1/nvme1/synthetic/era5_wind_cache`, wie im
+Auftrag vorgegeben), keine YAML-Config-Angabe. Der bestehende
+Pfad-Rewrite-Mechanismus fuer l1 (sed ueber `configs/**/*.yaml`) erfasst nur
+YAML-Werte, nicht diese Konstante. Auf l1 selbst liegt die Cache-NVMe nativ
+unter `/mnt/nvme1` (`/dev/nvme1n1p1`, l1 IST der Speicherbesitzer); ein Pfad
+`/mnt/lambda1` existiert dort nicht (`/mnt` gehoert `root`, Modus `755`, kein
+Schreibzugriff fuer `viktorwalter` — ein Symlink `/mnt/lambda1/nvme1` ->
+`/mnt/nvme1` liesse sich nur mit Root-Rechten anlegen, die hier nicht
+vorliegen). Der Cache selbst IST auf l1 vollstaendig vorhanden und korrekt
+(unter `/mnt/nvme1/synthetic/era5_wind_cache/`, 153 Dateien, Zeitstempel
+11.08. 14:28) — nur der hartcodierte Pfad in `era5_imputation.py` findet ihn
+dort nicht. **Auf l2 und ws (beide mounten l1s NVMe per NFS unter
+`/mnt/lambda1/nvme1`) funktioniert der hartcodierte Pfad unveraendert.**
+Nicht selbstaendig behoben (waere entweder ein Root-Eingriff auf l1 oder eine
+Code-Design-Entscheidung — Konfigurierbarkeit ueber Env-Var/Config-Key —,
+beides ausserhalb des vorgegebenen Auftragsumfangs). **Gemeldet als Blocker
+fuer produktive MTGNN/DCRNN/WaveNet-Laeufe auf l1**, bis entweder Root den
+Symlink anlegt oder der Pfad konfigurierbar gemacht wird.
+
+## 7. Commit-Hashes je Host
+
+Alle drei Hosts stehen auf demselben Commit
+`69878081ffb555a7f7c9138741e69664120e4171` (`6987808`, Branch
+`fix/mtgnn-topo-static-dim`) — per `git push origin` von l2 aus, dann
+`git pull` auf l1/ws (beides Fast-Forward, keine Merge-Konflikte):
+
+| Host | Commit | Lokaler Zustand nach dem Pull |
+|---|---|---|
+| l2 (`~/Work/forecasting_framework`) | `69878081ffb555a7f7c9138741e69664120e4171` | sauber (Commit-Ursprung) |
+| l1 (`~/Work/forecasting_framework`) | `69878081ffb555a7f7c9138741e69664120e4171` | 151 Dateien lokal ueberschrieben (Pfad-Rewrite `/mnt/lambda1/nvme1/` -> `/mnt/nvme1/`; Kontrollzeile 0 vor dem `checkout` verifiziert — 1730 geaenderte Diff-Zeilen, alle 1730 enthalten einen `/mnt/`-Pfad, 0 Nicht-Pfad-Zeilen). Siehe 6.7 fuer die verbleibende `era5_wind_cache`-Erreichbarkeitsluecke. |
+| ws (`~/Work/forecasting_framework`, erreicht ueber `wsvpn`/ProxyJump l2 — direktes `ws` = 10.166.32.253 nicht erreichbar, zweiter SSH-Config-Eintrag `ws` = 10.166.32.252 alias `wsvpn` war der erreichbare) | `69878081ffb555a7f7c9138741e69664120e4171` | sauber, kein lokaler Diff, kein Pfad-Rewrite noetig (mountet bereits unter `/mnt/lambda1/nvme1/`) |
