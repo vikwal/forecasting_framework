@@ -139,7 +139,10 @@ dcrnn:
   hpo:
     cv_mode: spatial
     spatial_folds: 'configs/spatial_folds.yaml'
-    trials: 60    # reduziertes Budget fuer die Ablation (A: 150) — siehe docs/ablations_verification_results.md
+    trials: 150   # 2026-08-11 von 60 angehoben: D' muss dasselbe Suchbudget haben wie
+                  # A, BASE, B und C, sonst ist der Leitervergleich durch unterschiedliche
+                  # Budgets verzerrt (B und C wurden am 2026-08-10 aus demselben Grund
+                  # von 60 auf 150 gesetzt).
     studies_path: studies/
     tensorboard_monitoring: true
     pruner: median
