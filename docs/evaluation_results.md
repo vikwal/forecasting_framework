@@ -1,16 +1,22 @@
 # Auswertung der HPO-Kampagne: §3b und Vorprüfungen
 
 **Erstellt:** 2026-08-17 · Auftrag: `docs/prompt_evaluation_kickoff.md`. Basis:
-`forecasting_framework` auf `l2` (Arbeitsbaum, **nicht committet**, HEAD `4f832ec` vom
-2026-08-12, siehe §6), Optuna in Postgres `optuna_db` auf `l2`.
+`forecasting_framework` auf `l2`, Branch `fix/mtgnn-topo-static-dim`, Commit
+**`e15d778`** (Wind-Anteil, siehe §9.6; vorher HEAD `4f832ec` vom 2026-08-12 plus
+uncommitteter Arbeitsbaum, siehe §6). Optuna in Postgres `optuna_db` auf `l2`.
 
 **Was dieses Dokument abschließt:** §3b (HPO-Analyse der Gitterpunktzahl) vollständig,
-plus die Vorprüfungen aus §7 des Auftrags. **Was offen bleibt:** §3a (die Retrains) ist
-nicht gerechnet. Es hängt an FRAGE 1 (Val-Fenster kontaminiert), an der GPU-Frage aus §5
-und an dem Befund N1 aus §4 dieses Dokuments. Es sind **keine** Haupttabellenzahlen
-erzeugt worden.
+die Vorprüfungen aus §7 des Auftrags, sowie die Entscheidungen zu allen fünf OFFENEN
+FRAGEN und deren Umsetzung (§9). Der Befund N1 ist gefixt (§9.2), die Kampagne ist auf
+`l2` zurückgefahren (§9.3), der Wind-Codestand ist committet (§9.6).
 
-Alle Zahlen unten sind selbst nachgerechnet, nicht aus Vorgängerdokumenten übernommen.
+**Was offen bleibt:** §3a (die Retrains) ist **nicht gerechnet**. Es sind **keine**
+Haupttabellenzahlen erzeugt worden. Blockierend ist allein noch GPU-Kapazität: die
+freigegebenen Worker beenden zuerst ihren laufenden Trial. Das verifizierte Rezept für
+die Retrains steht in §10.
+
+Alle Zahlen unten sind selbst nachgerechnet, nicht aus Vorgängerdokumenten oder aus
+Aussagen von Unteragenten übernommen.
 
 ---
 
@@ -21,12 +27,16 @@ Alle Zahlen unten sind selbst nachgerechnet, nicht aus Vorgängerdokumenten übe
 | `/tmp/hpo_param_analysis.py` (l2) | §3b, erster Durchgang: Randverteilung und Zielwert je Parameterwert |
 | `/tmp/hpo_param_robust.py` (l2) | §3b, zweiter Durchgang: Robustheit der Korrelation, Optuna-Wichtigkeiten |
 | `/tmp/check_loader_consistency.py` (l2, l1) | Querprüfung der Messdatenlader zwischen den Hosts (§5) |
+| `/tmp/n1_magnitude.py` (l2) | Größe der N1-Skaliererabweichung je Fold und Kanal (§9.2) |
+| `/tmp/apply_n1_fix.py` (l2, l1, ws) | Anwendung des N1-Fixes mit Exact-Match-Absicherung |
 | `/tmp/hpo_param_summary.csv`, `/tmp/hpo_param_robust.csv` (l2) | Ergebnistabellen der beiden Durchgänge |
+| `geostatistics/get_test_results_dcrnn.py` | N1-Fix, committet in `e15d778` |
+| `~/hpo_keeper_plan.json` (l2) | auf 2 Sollworker reduziert, Sicherung `.bak-20260817-eval` |
 | `docs/evaluation_results.md` | dieses Dokument |
 
-Die drei Skripte liegen bewusst unter `/tmp`, weil sie reine Diagnose sind und der
-Arbeitsbaum ohnehin schon 20 uncommittete Dateien trägt (§6). Bei Bedarf gehören sie
-nach `archiv/hpo_analysis/`, analog zu `archiv/baselines_verification/`.
+Die Diagnoseskripte liegen unter `/tmp`. Für dauerhafte Reproduzierbarkeit gehören sie
+nach `archiv/hpo_analysis/`, analog zu `archiv/baselines_verification/`; das ist bewusst
+noch nicht geschehen, weil der Arbeitsbaum ohnehin noch 40 uncommittete Einträge trägt.
 
 ---
 
@@ -249,14 +259,14 @@ Seite.** Nachgelesen im Code:
 - `hpo_dcrnn.py:409-419`: im räumlichen CV-Modus ist `all_ids = station_pool(...)` und
   `N_train = len(all_ids)`, also **153**. Zeile 694 fittet
   `stat_scaler.fit(raw_static[:N_train])`, damit auf allen 153 Stationen.
-- `train_dcrnn.py:868`: `stat_scaler.fit(raw_static if (val_start and not args.test_mode)
+- `train_dcrnn.py:882`: `stat_scaler.fit(raw_static if (val_start and not args.test_mode)
   else raw_static[:N_train])`, im Spatial-CV-Fall also ebenfalls auf allen 153. Der Code
   trägt dafür einen ausformulierten Kommentar mit Begründung (Review-Kürzel M5) und den
   Hinweis, dass `--test-mode` bewusst beim Train-only-Fit bleibt, weil dort die
   Teststationen an `all_ids` angehängt werden. **Train und HPO sind also konsistent.**
-- `get_test_results_dcrnn.py:236-250` und `:427`: ohne `--test-mode` ist
-  `train_ids = data_cfg["files"]`, also `N_train = 102`, und Zeile 427 fittet
-  `stat_scaler.fit(raw_static[:N_train])` auf **102**.
+- `get_test_results_dcrnn.py:236-250` und `:427` (vor dem Fix, nach dem Fix `:436`):
+  ohne `--test-mode` ist `train_ids = data_cfg["files"]`, also `N_train = 102`, und die
+  Zeile fittete `stat_scaler.fit(raw_static[:N_train])` auf **102**.
 
 **Die Inkonsistenz sitzt allein im Auswertungsskript**, und zwar genau im
 Entwicklungsmodus, also in dem Pfad, den die Retrains aus §3a brauchen (51 nie gesehene
@@ -265,13 +275,13 @@ anderen Mittelwerten und Streuungen normiert, als es im Training gesehen hat. Di
 Vorhersagen sind dann nicht falsch berechnet, sondern das Modell wird außerhalb seines
 Eingaberaums betrieben.
 
-Der Fix ist eine Zeile, gespiegelt aus `train_dcrnn.py:868`: im Spatial-CV-Fall (also
+Der Fix ist eine Zeile, gespiegelt aus `train_dcrnn.py:882`: im Spatial-CV-Fall (also
 wenn `val_start` gesetzt und nicht `--test-mode`) auf ganz `raw_static` fitten. Ich habe
 **nichts geändert**, weil der Auftrag verlangt, das vor der Zahlenerzeugung zu klären,
 und weil dieselbe Datei im laufenden Betrieb steht.
 
 Bemerkenswert daneben: die direkt anschließenden topographischen Merkmale werden in
-`get_test_results_dcrnn.py:447-450` **absichtlich** mit `n_train=N_train`, also auf 102,
+`get_test_results_dcrnn.py` in `load_topo_station_features(...)` **absichtlich** mit `n_train=N_train`, also auf 102,
 normiert, mit Kommentar „Fitting on all_ids would normalise the topography of the
 held-out stations with their own statistics". Für `lat`/`lon`/`alt` gilt dieses Argument
 nicht, weil Koordinaten bei einem induktiven Modell immer bekannte Eingaben sind, genau
@@ -409,7 +419,7 @@ ausgeführt.
 
 Der Einwand des Nutzers war, dass die statischen Merkmale öffentliche topographische
 Daten sind und ein vorab auf einer repräsentativen Standortmenge gefitteter Skalierer
-vertretbar wäre. Das trifft zu und ist genau das, was `train_dcrnn.py:868` tut. Der
+vertretbar wäre. Das trifft zu und ist genau das, was `train_dcrnn.py:882` tut. Der
 Punkt von N1 ist ein anderer: **Training und Auswertung benutzten verschiedene
 Skalierer**, das Modell wurde also außerhalb seines Eingaberaums betrieben. Gemessen
 über die 51 Zielstationen je Fold, Verschiebung in Einheiten der Trainingsstreuung
@@ -437,7 +447,7 @@ Geändert auf **allen drei Hosts**, je eine Anweisung in
 stat_scaler.fit(raw_static if (val_start and not args.test_mode) else raw_static[:N_train])
 ```
 
-Gespiegelt aus `train_dcrnn.py:868`. `--test-mode` bleibt bewusst beim Train-only-Fit,
+Gespiegelt aus `train_dcrnn.py:882`. `--test-mode` bleibt bewusst beim Train-only-Fit,
 weil dort die Teststationen an `all_ids` hängen und ihre Aufnahme echte Leckage wäre.
 `load_topo_station_features(..., n_train=N_train)` bleibt **unverändert** auf 102, das
 ist an dieser Stelle Absicht. Sicherung je Host unter
@@ -482,7 +492,7 @@ genau die drei vorhergesagten Worker, verifiziert über `ps`:
 | `hpo_dcrnn_wind_dcrnn_nwp_hist_n1` | dcrnn_nwp_hist | Kollateral, Halter ersetzt ihn als `n3` |
 
 Die bestehenden Stop-Dateien r1, r4, r5, r8 sind unangetastet. Jeder Worker beendet
-seinen laufenden Trial noch (`study.stop()` in `_stop_on_flag`, `hpo_dcrnn.py:1427`),
+seinen laufenden Trial noch (`study.stop()` in `_stop_on_flag`, `hpo_dcrnn.py:1428`),
 es geht keine GPU-Zeit verloren. Folge: `dcrnn_base` endet bei 111, `dcrnn_nograph` bei
 101 COMPLETE. Die Kollateralkosten sind gemessen und klein: der Datencache ist
 geschrieben (Schlüssel `06e46a74ffca0fce`), ein Worker mit Cache-HIT brauchte 68 s bis
@@ -557,3 +567,60 @@ dass keine davon in der Staging-Area lag.
 **Offen:** `l1` und `ws` tragen weiter den älteren, uncommitteten Stand (§5). Für die
 Retrains ist das unerheblich, solange sie auf `l2` laufen. Wer sie auf `l1` rechnet, muss
 den Stand vorher gleichziehen.
+
+---
+
+## 10. Verifiziertes Rezept für die Retrains (§3a), noch nicht ausgeführt
+
+Die Hyperparameter müssen **nicht** in YAML materialisiert werden, anders als beim
+stdhp-Trockenlauf. `train_dcrnn.py` lädt sie direkt aus Optuna:
+
+```bash
+cd /home/viktor/Work/forecasting_framework
+source frcst/bin/activate
+eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)"
+CUDA_VISIBLE_DEVICES=<gpu> python geostatistics/train_dcrnn.py \
+    --config configs/dcrnn/config_wind_<arm>_fold<N>.yaml --hpo-study auto
+```
+
+Geprüft, nicht angenommen:
+
+- **Die Studienauflösung stimmt.** `train_dcrnn.py:341` entfernt mit
+  `re.sub(r'_fold\d+$', '', config_stem)` das Fold-Suffix, `:356` baut daraus
+  `cl_m-dcrnn_out-48_freq-1h_<stem>`. Für alle drei Arme wurde die Studie testweise
+  geladen und liefert genau den Trial aus §9.4:
+
+  | Config | aufgelöste Studie | Trial | Wert |
+  |---|---|---|---|
+  | `config_wind_dcrnn_fold1.yaml` | `…_wind_dcrnn` | #192 | 1.1741 |
+  | `config_wind_dcrnn_base_fold1.yaml` | `…_wind_dcrnn_base` | #111 | 1.2242 |
+  | `config_wind_dcrnn_idw_alt_fold1.yaml` | `…_wind_dcrnn_idw_alt` | #109 | 1.1819 |
+
+- **Die geladenen Parameter deckenden sich mit §3b.** `study.best_params` liefert
+  `next_n_icond2` 4 / 3 / 7 für dcrnn / base / idw_alt, genau die Werte, die in §3.3 als
+  „bester Trial" ausgewiesen sind. Das ist eine unabhängige Gegenprobe des
+  Analyseskripts gegen Optunas eigene Bestenauswahl.
+- **`nwp_out_dim` wird nachgerechnet** (`train_dcrnn.py:384-387`), weil es nie in
+  `best_params` steht, sondern nach dem Sampling aus `nwp_heads * nwp_out_per_head`
+  abgeleitet wird. Ein handgeschriebenes YAML hätte hier still eine falsche Weite gesetzt.
+- **Alle neun Fold-Configs sind korrekt**: je `files` 102, `val_files` 51,
+  `val_start` 2024-08-01, `test_start` 2025-08-01. Das deckt sich mit §2 des Auftrags.
+  Die veralteten Dateien liegen ausschließlich unter `configs/*/test/` (§7) und werden
+  hier nicht benutzt.
+- **`train_dcrnn.py` hat kein `--gpu`**, die GPU wird über `CUDA_VISIBLE_DEVICES`
+  gewählt (`:335` nimmt schlicht `cuda`).
+- Provenienz wird mitgeschrieben: das Ergebnis-`.pkl` enthält `hpo_study_name` und
+  `hpo_best_params` (`train_dcrnn.py:1191-1192`).
+
+Auswertung danach je Lauf mit `geostatistics/get_test_results_dcrnn.py`, **ohne**
+`--test-mode` (Entwicklungsmodus, 51 nie gesehene Zielstationen je Fold), also genau der
+Pfad, für den N1 gefixt wurde.
+
+**Vor dem Start noch zu tun:**
+
+1. `dcrnn_base` erneut abfragen: #135 und #136 laufen aus und können 1.2242 unterbieten
+   (§9.4).
+2. Abnahmekriterium prüfen: **2909** Laufpaare (nicht 2933, §6 des Auftrags), aufgeteilt
+   in Trainings- und Val-Paare je Fold. Weicht die Zahl ab, stimmt etwas nicht.
+3. Kapazität abwarten, bis die in §9.3 markierten Worker ihren laufenden Trial beendet
+   haben.
