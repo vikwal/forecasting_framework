@@ -738,3 +738,104 @@ val-RMSE 1.1816, plausibel neben dem gepoolten HPO-Bestwert 1.1741.
 2. Auswertung je Lauf mit `get_test_results_dcrnn.py`, ohne `--test-mode`, per Station
    und gefiltert.
 3. Die Ergebnistabellen in getrennten Blöcken nach §9.5.
+
+---
+
+## 12. Zweiter ECMWF-Vorfall am 2026-08-17 abends, und Neuaufsetzen der Retrains
+
+### 12.1 Was passiert ist
+
+Zwischen **18:30 und 18:43** wurden **alle 759** ECMWF-Wind-Parquets unter
+`/mnt/nvme1/ecmwf/parquet/SL` neu geschrieben, von uid 1003 (`meghnanegi`), also
+derselben fremden Pipeline wie beim Vorfall vom 2026-08-15. Das geschah mitten in den
+laufenden Retrains, unangekündigt.
+
+Anders als am 15.08. ist der Bestand dadurch **besser** geworden, nicht kaputt. Geprüft
+an einer Stichprobe von 25 der 759 Dateien:
+
+- alle zehn Zielspalten vorhanden, **keine NaN**,
+- einheitlich 112 984 Zeilen je Datei,
+- Abdeckung durchgehend **2023-07-01 bis 2026-03-02 21:00**.
+
+Das 192-Stunden-Loch am Anfang der Zeitachse existiert damit nicht mehr. **FRAGE 3 des
+Auftrags erledigt sich dadurch von selbst**: die acht Tage müssen nicht nachexportiert
+werden, sie sind da. Die verbleibenden 723 NaN-Zeitstempel sind ausschließlich der
+Schwanz ab 2026-03-02 22:00, wo die Messzeitachse über das ECMWF-Ende hinausläuft; sie
+liegen außerhalb des Laufpaar-Fensters.
+
+### 12.2 Der Schaden war Vergleichbarkeit, nicht Datenqualität
+
+Die Läufe zerfielen dadurch in zwei Datenstände, erkennbar am Fingerabdruck in jedem Log:
+
+| Fingerabdruck | Laufpaare | Läufe |
+|---|---|---|
+| 915 betroffene Zeitstempel, 24 ausgeschlossen | 2909 | `dcrnn` fold1, fold2, `dcrnn_base` fold3 (erster Zyklus) |
+| 723 betroffene, 0 ausgeschlossen | 2933 | `dcrnn` fold3, `dcrnn_idw_alt` fold1 |
+
+Damit gibt es kampagnenweit jetzt einen **dritten** Datenstand: vor dem 2026-08-17 2933,
+zwischen 15:33 und 18:30 2909, seit 18:43 wieder 2933 auf besserer Grundlage. Jeder
+HPO-Worker, der ab jetzt startet, rechnet auf Stand drei.
+
+**Entscheidung des Nutzers:** auf dem neuen Stand vereinheitlichen, die betroffenen
+Läufe wiederholen. Kein Einfrieren des Eingangs durch einen schreibgeschützten Snapshot
+(ausdrücklich abgelehnt); als Rest-Absicherung schreibt jeder Lauf seinen
+Datenstand-Fingerabdruck ins Log, eine erneute Verschiebung bliebe also wenigstens
+nachträglich nachweisbar. Das Prüfskript vergleicht diesen Fingerabdruck über alle neun
+Läufe und schlägt bei Abweichung an.
+
+### 12.3 Eigener Fehler: run_retrain.sh im laufenden Betrieb geändert
+
+`dcrnn` fold3 und `dcrnn_base` fold3 zeigten je **zwei vollständige Trainingszyklen**
+innerhalb eines einzigen Aufrufs (je eine START- und ENDE-Marke, aber zwei
+`Device: cuda`, zwei `Training complete` und zwei Ergebnis-pkl).
+
+Ursache ist nicht das Trainingsskript: `train_dcrnn.py` hat genau einen `main()`-Aufruf
+unter `if __name__ == "__main__"`. Ursache war, dass ich `run_retrain.sh` um **18:54:39**
+um die Skip-Marker-Prüfung erweitert habe, während beide Läufe (seit 18:21 bzw. 18:35)
+liefen. **Bash liest Skriptdateien fortlaufend statt sie vorab zu puffern**; durch das
+Einfügen von vier Zeilen am Dateianfang verschoben sich alle folgenden Bytes, und die
+bereits laufenden Instanzen lasen nach der Rückkehr von Python an einem verschobenen
+Offset weiter und führten den Python-Aufruf erneut aus. `fold1` (bis 18:20) und `fold2`
+(bis 18:35:23) waren vorher fertig und blieben unberührt.
+
+**Regel daraus:** `run_retrain.sh` und `retrain_queue.sh` nicht anfassen, solange Jobs
+laufen. Wenn eine Änderung nötig ist, unter neuem Dateinamen ablegen und die
+Warteschlange neu starten. Das Prüfskript zählt die Zyklen jetzt im Wrapper-Log mit und
+meldet jeden Lauf mit mehr als einem Zyklus.
+
+### 12.4 Stand nach dem Neuaufsetzen, 19:40
+
+Verworfen und nach `archiv/retrain_verworfen_20260817_gemischte_basis/` verschoben
+(Logs, Modelle, pkl): `dcrnn` fold1, fold2, fold3 und `dcrnn_base` fold3. Das Verschieben
+war nötig, weil `run_retrain.sh` mit `>>` an bestehende Logs anhängt und die Modellnamen
+identisch sind; ohne Aufräumen hätten alte und neue Läufe im selben Log gestanden.
+
+| Host | GPU | Läufe | Stand |
+|---|---|---|---|
+| `ws` | 0 | `dcrnn` fold1, fold2, fold3 | neu gestartet 19:39 |
+| `ws` | 1 | `dcrnn_base` fold1, fold2, fold3 | neu gestartet 19:39 |
+| `l1` | 6 | `dcrnn_idw_alt` fold1 (fertig), fold2, fold3 | läuft seit 18:55 |
+
+`dcrnn_idw_alt` fold1 ist bereits vollständig geprüft: ein Zyklus, 24 Epochen,
+bester val-RMSE 1.1407, Trial #109, Laufpaare 1473/1460, Modell 2.0 MB mit 44 Tensoren
+ohne NaN, pkl vorhanden.
+
+### 12.5 Warum l1 überhaupt mitrechnet
+
+Auf Vorschlag des Nutzers, weil GPU 6 dort frei war (560 MiB von 49 GB, 14 % Last).
+Geprüft, bevor dort etwas gerechnet wurde:
+
+- l1 hat eine **eigene Historie**: HEAD `3d041b7` („fix(nwp): ECMWF-NaN…"), gemeinsamer
+  Vorfahr `4f832ec`. Genau ein Extra-Commit, der die vier Dateien aus §7 des Auftrags
+  enthält, die auf `l2` im Arbeitsbaum lagen und in `e15d778` eingegangen sind.
+- Die drei Trainingsskripte auf l1 haben denselben NaN-Fix bekommen wie auf l2
+  (Exact-Match-Patch, `ast.parse`, `pyflakes` ohne undefinierte Namen).
+- `train_stgnn2.py` wurde auf l1 **bewusst nicht** angefasst. Die HPO-Worker importieren
+  `train_{dcrnn,mtgnn,wavenet}.py` nachweislich nicht (`grep -c` = 0 in allen drei
+  HPO-Skripten), wohl aber `train_stgnn2.py` (`hpo_dcrnn.py:68, 670, 827`). Der Patch
+  ist für die laufende Kampagne damit unsichtbar.
+- l1s `idw_alt`-Fold-Configs sind lokal pfad-umgeschrieben (`/mnt/nvme1`), tragen aber
+  dieselben Stationen: Prüfsummen der sortierten Stationslisten stimmen mit `ws` überein
+  (fold1 `b9409aec8f5a8763`, fold2 `13fa75321a554108`, fold3 `03bc05381938c4df`).
+- l1 und ws sehen **dieselbe** Datei-Ablage: l1s IP ist 10.166.32.238, ws mountet
+  `10.166.32.238:/mnt/nvme1`. Der Unterschied kam nicht vom Host, sondern vom Zeitpunkt.
