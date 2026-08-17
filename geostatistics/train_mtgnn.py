@@ -636,6 +636,28 @@ def main() -> None:
     logger.info("Run pairs — train: %d  val: %d  skipped: %d (grid-NaN: %d)",
                 len(train_run_pairs), len(val_run_pairs), skipped, skipped_grid_nan)
 
+    # ── ECMWF-NaN: betroffene Run-Paare ausschliessen ────────────────────
+    # Gegenstueck zum ICON-Block darueber, aber auf der Zeitachse statt auf der
+    # Laufachse. Ohne diesen Filter macht jeder Batch, der die 192 NaN-Stunden
+    # am Anfang der Zeitachse beruehrt, den Verlust zu NaN. Gespiegelt aus
+    # hpo_dcrnn.py:824-830; Begruendung und Vorgeschichte an der Funktion.
+    _ecmwf_nan_arrays = [a for a in (grid_ecmwf_scaled,) if a is not None]
+    if _ecmwf_nan_arrays:
+        from geostatistics.train_stgnn2 import exclude_run_pairs_with_ecmwf_nan
+        _n_tr_before, _n_va_before = len(train_run_pairs), len(val_run_pairs)
+        train_run_pairs = exclude_run_pairs_with_ecmwf_nan(
+            train_run_pairs, _ecmwf_nan_arrays, timestamps, H, F_h,
+        )
+        val_run_pairs = exclude_run_pairs_with_ecmwf_nan(
+            val_run_pairs, _ecmwf_nan_arrays, timestamps, H, F_h,
+        )
+        if (_n_tr_before - len(train_run_pairs)) or (_n_va_before - len(val_run_pairs)):
+            logger.info(
+                "Run pairs after ECMWF-NaN exclusion — train: %d (-%d)  val: %d (-%d)",
+                len(train_run_pairs), _n_tr_before - len(train_run_pairs),
+                len(val_run_pairs),   _n_va_before - len(val_run_pairs),
+            )
+
     # ------------------------------------------------------------------
     # HomoSampler
     # ------------------------------------------------------------------

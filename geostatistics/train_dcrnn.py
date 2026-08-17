@@ -750,14 +750,28 @@ def main() -> None:
                 )
             logger.info("ECMWF grid nodes: %d", len(ecmwf_coords))
 
-            ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp).sum())
-            ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp).sum())
+            # Nur das Fenster pruefen, das ueberhaupt Run-Paare liefern kann
+            # (audit_t, dieselbe Grenze wie beim Messwert-Audit weiter oben).
+            # Frueher ein harter Abbruch. Seit 2026-08-17 uebernimmt
+            # exclude_run_pairs_with_ecmwf_nan die betroffenen Run-Paare und
+            # bricht selbst ab, wenn mehr als 10 % wegfallen. Gespiegelt aus
+            # hpo_dcrnn.py:637-656: der neue ECMWF-Bestand beginnt am
+            # 2023-08-01, die Zeitachse am 2023-07-24, also stehen 192 h NaN am
+            # Anfang. Ein Rand-Loch soll das Retrain nicht am Starten hindern.
+            ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp[:audit_t]).sum())
+            ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp[:audit_t]).sum())
             if ecmwf_nan_station > 0 or ecmwf_nan_grid > 0:
-                raise ValueError(
-                    f"ECMWF data contains NaN after loading — "
-                    f"station array: {ecmwf_nan_station} NaN, "
-                    f"grid array: {ecmwf_nan_grid} NaN. "
-                    f"Fix the ECMWF data pipeline before training."
+                logger.warning(
+                    "ECMWF data contains NaN in the pre-test window — "
+                    "station array: %d NaN, grid array: %d NaN. "
+                    "Affected run pairs will be excluded.",
+                    ecmwf_nan_station, ecmwf_nan_grid,
+                )
+            _ecmwf_beyond = int(np.isnan(station_ecmwf_nwp[audit_t:]).sum())
+            if _ecmwf_beyond > 0:
+                logger.info(
+                    "ECMWF: %d NaN jenseits des Run-Paar-Fensters "
+                    "(nicht verwendet — OK).", _ecmwf_beyond,
                 )
         else:
             logger.warning(f"Parquet file {ecmwf_parquet_file} not found. Using fallbacks...")
@@ -973,6 +987,28 @@ def main() -> None:
         "Run pairs — train: %d  val: %d  skipped: %d (grid-NaN: %d)",
         len(train_run_pairs), len(val_run_pairs), skipped, skipped_grid_nan,
     )
+
+    # ── ECMWF-NaN: betroffene Run-Paare ausschliessen ────────────────────
+    # Gegenstueck zum ICON-Block darueber, aber auf der Zeitachse statt auf der
+    # Laufachse. Ohne diesen Filter macht jeder Batch, der die 192 NaN-Stunden
+    # am Anfang der Zeitachse beruehrt, den Verlust zu NaN. Gespiegelt aus
+    # hpo_dcrnn.py:824-830; Begruendung und Vorgeschichte an der Funktion.
+    _ecmwf_nan_arrays = [a for a in (station_ecmwf_nwp, ecmwf_nwp,) if a is not None]
+    if _ecmwf_nan_arrays:
+        from geostatistics.train_stgnn2 import exclude_run_pairs_with_ecmwf_nan
+        _n_tr_before, _n_va_before = len(train_run_pairs), len(val_run_pairs)
+        train_run_pairs = exclude_run_pairs_with_ecmwf_nan(
+            train_run_pairs, _ecmwf_nan_arrays, timestamps, H, F_h,
+        )
+        val_run_pairs = exclude_run_pairs_with_ecmwf_nan(
+            val_run_pairs, _ecmwf_nan_arrays, timestamps, H, F_h,
+        )
+        if (_n_tr_before - len(train_run_pairs)) or (_n_va_before - len(val_run_pairs)):
+            logger.info(
+                "Run pairs after ECMWF-NaN exclusion — train: %d (-%d)  val: %d (-%d)",
+                len(train_run_pairs), _n_tr_before - len(train_run_pairs),
+                len(val_run_pairs),   _n_va_before - len(val_run_pairs),
+            )
 
     # ------------------------------------------------------------------
     # DCRNN config
