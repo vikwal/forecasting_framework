@@ -624,3 +624,117 @@ Pfad, für den N1 gefixt wurde.
    in Trainings- und Val-Paare je Fold. Weicht die Zahl ab, stimmt etwas nicht.
 3. Kapazität abwarten, bis die in §9.3 markierten Worker ihren laufenden Trial beendet
    haben.
+
+---
+
+## 11. Der zweite Blocker: ECMWF-NaN im Retrain-Pfad, und die Retrains laufen
+
+### 11.1 Befund
+
+Die Umstellung vom 2026-08-17 (`exclude_run_pairs_with_ecmwf_nan`) war **nur** in den
+drei HPO-Skripten gelandet. Der Retrain-Pfad war damit blockiert beziehungsweise still
+falsch. Nachgezählt, je Datei die Zahl der Aufrufstellen vor dem Fix:
+
+| Datei | Aufrufe | Verhalten vor dem Fix |
+|---|---|---|
+| `hpo_dcrnn.py` | 3 | Warnung im Vor-Test-Fenster, Ausschluss aktiv |
+| `hpo_mtgnn.py`, `hpo_wavenet.py` | je 2 | dito |
+| `train_dcrnn.py` | **0** | **harter Abbruch** „ECMWF data contains NaN after loading" |
+| `train_mtgnn.py`, `train_wavenet.py` | **0** | **kein Wächter, kein Ausschluss**, also stille NaN-Verluste |
+| `get_test_results_*.py` | 0 | unkritisch, siehe unten |
+
+`train_dcrnn.py` prüfte das **ganze** Array. Die Zeitachse beginnt am 2023-07-24, der neu
+exportierte ECMWF-Bestand erst am 2023-08-01, also stehen 192 h NaN am Anfang, und der
+Wächter feuerte, bevor überhaupt ein Training startete. `train_mtgnn.py` und
+`train_wavenet.py` waren der schlechtere Fall: sie hätten die betroffenen Laufpaare
+mitgenommen und still NaN-Verluste erzeugt, genau der Vorfall, den der Docstring der
+Funktion beschreibt.
+
+Der **Auswertungspfad braucht keine Änderung**: `get_test_results_dcrnn.py` hat gar
+keinen ECMWF-Wächter, und die betroffenen Laufpaare liegen alle am Anfang der Zeitachse,
+also im Trainingsfenster. Das Val-Fenster ab 2024-08-01 ist unberührt. Das war eine
+Vorhersage und ist unten gemessen bestätigt.
+
+### 11.2 Fix, Commit d501225
+
+Alle drei Trainingsskripte angeglichen, gespiegelt aus `hpo_dcrnn.py:637-656` und
+`:824-830`:
+
+1. In `train_dcrnn.py` der harte `raise` zur Warnung, und nur noch über das Fenster bis
+   `audit_t`, also den Bereich, der überhaupt Laufpaare liefern kann.
+2. In allen drei Skripten `exclude_run_pairs_with_ecmwf_nan` getrennt für
+   `train_run_pairs` und `val_run_pairs`. Die Funktion bricht selbst ab, wenn mehr als
+   10 % wegfallen, ein großflächiger Datenverlust bleibt also laut.
+
+Angewandt mit Exact-Match-Absicherung (`/tmp/apply_ecmwf_nan_fix.py`), Sicherungen unter
+`/tmp/train_{dcrnn,mtgnn,wavenet}.py.bak-ecmwfnan`, `ast.parse` je Datei, und `pyflakes`
+über alle drei: keine undefinierten Namen, nur die schon vorher vorhandenen
+Unused-Import-Warnungen.
+
+### 11.3 Abnahmekriterium erfüllt, am Lauf gemessen
+
+Der erste Retrain (`dcrnn` GRID, fold1, auf `ws`) bestätigt die Zahlen aus §2 und §6 des
+Auftrags **exakt**:
+
+```
+Run pairs — train: 1473  val: 1460  skipped: 960 (grid-NaN: 0)
+Excluded 24 of 1473 run pairs due to NaN in ECMWF data
+Excluded  0 of 1460 run pairs due to NaN in ECMWF data
+Run pairs after ECMWF-NaN exclusion — train: 1449 (-24)  val: 1460 (-0)
+```
+
+1473 + 1460 = **2933** wie im Auftrag, minus **24** = **2909**, also 0.82 %. Und die 24
+liegen wie vorhergesagt vollständig im Trainingsfenster (`val: -0`).
+
+Weitere Bestätigungen aus demselben Log: `--hpo-study auto` löst die Studie korrekt auf
+(„HPO study 'cl_m-dcrnn_out-48_freq-1h_wind_dcrnn' — best val_loss=1.174097
+(trial #192)"), und die HPO-Parameter greifen tatsächlich (ICON-D2 wird mit
+`4 grid pts` geladen, also `next_n_icond2=4` aus Trial #192).
+
+Nebenbefund: `train_dcrnn.py` benutzt **keinen** `GNNCache`, anders als die HPO-Skripte.
+Der Datenaufbau dauert etwa 100 s je Lauf und wird nicht zwischengespeichert; die
+befürchteten neun Cache-Verzeichnisse à 3 GB entstehen also nicht.
+
+### 11.4 Wo die Retrains laufen
+
+Auf `ws` (2× RTX 4090), auf Vorschlag des Nutzers, weil die GPUs dort nur zu 30 bis 50 %
+belegt waren, während alle vier A100 auf `l2` bei 97 bis 99 % lagen. Geprüft vor dem
+Start:
+
+- `train_dcrnn.py:866` und `get_test_results_dcrnn.py:436` tragen auf `ws` **beide** den
+  153er-Fit, Trainings- und Auswertungsseite sind dort also konsistent (N1).
+- `/mnt/lambda1/nvme1` existiert auf `ws` (NFS von 10.166.32.238), kein Pfad-Rewrite
+  nötig; der ist `l1`-spezifisch.
+- Speicher reicht mit Abstand: ein Lauf belegt etwa 4.6 GB von 24.5 GB.
+- `pvlib 0.13.1` und `geopy` sind im `frcst`-Venv auf `ws` vorhanden, `utils/solar.py`
+  ist also importierbar. Das war nicht selbstverständlich, weil der Wind-Pfad seit dem
+  Solar-Umbau auf Modulebene `from utils import solar` macht.
+
+**Codestand auf `ws`:** auf `d501225` gebracht. Der direkte `git fetch` von GitHub
+scheiterte auf `ws` mit HTTP 500, deshalb über ein `git bundle` von `l2`. Die lokalen
+Änderungen auf `ws` liegen in `stash@{0}` („ws-local pre-sync 20260817"), die
+untracked-Dateien einschließlich `.hpo_stop_r9` sind unangetastet. Der Branch
+`fix/mtgnn-topo-static-dim` ist auf `origin` gepusht (`4f832ec..d501225`).
+
+**Ablaufplan**, zwei Warteschlangen à eine GPU (`~/retrain_queue.sh`, Einzellauf
+`~/run_retrain.sh`, Logs `logs/retrain_<arm>_fold<N>.log` und
+`logs/retrain_queue_gpu<G>.log`):
+
+| GPU | Reihenfolge |
+|---|---|
+| 1 | `dcrnn` fold1 (läuft), dann `dcrnn_base` fold3, `dcrnn_idw_alt` fold1, fold2, fold3 |
+| 0 | `dcrnn` fold2, fold3, `dcrnn_base` fold1, fold2 |
+
+Etwa 60 s je Epoche, `max_epochs` 200 mit `patience` 15. Epoche 1 von fold1 liefert
+val-RMSE 1.1816, plausibel neben dem gepoolten HPO-Bestwert 1.1741.
+
+**Noch zu erledigen, wenn die Läufe durch sind:**
+
+1. `dcrnn_base`: prüfen, ob #135 oder #136 den Wert 1.2242 unterboten haben. Die
+   Warteschlange zieht die Hyperparameter erst beim Start des jeweiligen Laufs aus
+   Optuna, die drei `dcrnn_base`-Folds können also einen anderen Trial erwischen als
+   #111. Das ist im Log jedes Laufs festgehalten und muss vor der Tabelle abgeglichen
+   werden, damit alle drei Folds denselben Trial benutzen.
+2. Auswertung je Lauf mit `get_test_results_dcrnn.py`, ohne `--test-mode`, per Station
+   und gefiltert.
+3. Die Ergebnistabellen in getrennten Blöcken nach §9.5.
