@@ -67,9 +67,16 @@ class DataCache:
             'files': sorted(config['data'].get('files', [])),
             'val_files': sorted(config['data'].get('val_files', [])),
             'freq': config['data']['freq'],
-            'target_col': config['data']['target_col'],
+            'target_col': preprocessing.get_target_cols(config),
             'test_start': config['data'].get('test_start', None),
             'features': features,
+            # Solar-spezifisch: verändern das Ergebnis von preprocess_solar_icond2,
+            # müssen also in den Cache-Schlüssel.
+            'use_case': config['data'].get('use_case', None),
+            'target_transform': config['params'].get('target_transform', None),
+            'icond2_features': config['params'].get('icond2_features', None),
+            'measurement_time_label': config['params'].get('measurement_time_label', None),
+            'max_nan_frac': config['params'].get('max_nan_frac', None),
             'next_n_grid_points': config['params']['next_n_grid_points'],
             'get_next_grid_points_method': config['params'].get('get_next_grid_points_method', None),
             'next_n_grid_ecmwf': config['params'].get('next_n_grid_ecmwf', None),
@@ -461,7 +468,8 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
     """
     from sklearn.preprocessing import StandardScaler
 
-    target_col = config['data']['target_col']
+    target_cols = preprocessing.get_target_cols(config)
+    target_col = target_cols[0]
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
     history_length = config['model']['lookback']
 
@@ -497,6 +505,7 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
             data=df,
             train_frac=config['data']['train_frac'],
             train_start=pd.Timestamp(config['data'].get('train_start', None)),
+            train_end=pd.Timestamp(config['data'].get('train_end', None)),
             test_start=cutoff,
             test_end=pd.Timestamp(config['data'].get('test_end', None)),
             t_0=t_0,
@@ -505,7 +514,7 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
             logger.warning(f"global scaler_x: station {key} contributed no training rows — skipped.")
             continue
 
-        df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+        df_train_x = df_train.drop(columns=target_cols, errors='ignore')
 
         # A silently differing column set (e.g. a neighbour station missing a feature,
         # which preprocess_synth_wind_icond2 only logs a warning for) would make
@@ -522,8 +531,8 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
             )
 
         scaler.partial_fit(df_train_x.values)
-        if target_col in df_train.columns:
-            target_feature_scaler.partial_fit(df_train[[target_col]].values)
+        if all(c in df_train.columns for c in target_cols):
+            target_feature_scaler.partial_fit(df_train[target_cols].values)
         n_stations += 1
         n_rows += len(df_train_x)
         del df_train, df_train_x
@@ -542,9 +551,14 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
     scaler._ff_feature_cols = ref_cols
     if hasattr(target_feature_scaler, 'mean_'):
         scaler._ff_target_feature_scaler = target_feature_scaler
+        # Spaltenliste mitgeben: prepare_data_for_tft übergibt transform() ein blankes
+        # ndarray, sklearn prüft dort nur die Spaltenanzahl — bei mehreren Zielspalten
+        # würde eine abweichende Reihenfolge sonst still falsch skaliert.
+        scaler._ff_target_feature_cols = list(target_cols)
         logger.info(
-            f"Fitted global scaler for '{target_col}' used as an input feature: "
-            f"mean={target_feature_scaler.mean_[0]:.4f} scale={target_feature_scaler.scale_[0]:.4f} "
+            f"Fitted global scaler for {target_cols} used as input feature(s): "
+            f"mean={np.round(target_feature_scaler.mean_, 4).tolist()} "
+            f"scale={np.round(target_feature_scaler.scale_, 4).tolist()} "
             "(applies to the 'hist' variant's own-history column; y stays raw)."
         )
     return scaler
@@ -595,7 +609,7 @@ def _replace_val_with_val_files(combined_kfolds, config, features, logger):
             known_cols=features['known'],
             observed_cols=features['observed'],
             static_cols=features['static'],
-            target_col=config['data']['target_col']
+            target_col=preprocessing.get_target_cols(config)[0]
         )
         if prepared_data is None:
             continue
@@ -780,7 +794,7 @@ def create_or_load_preprocessed_data(config: Dict,
                 known_cols=features['known'],
                 observed_cols=features['observed'],
                 static_cols=features['static'],
-                target_col=config['data']['target_col']
+                target_col=preprocessing.get_target_cols(config)[0]
             )
             prepared_datasets.append(prepared_data)
 
@@ -931,7 +945,7 @@ def _build_spatial_fold_data(fold_config: Dict, features: Dict, logger) -> Tuple
         prepared_data, _ = preprocessing.pipeline(
             data=df, config=fold_config, known_cols=features['known'],
             observed_cols=features['observed'], static_cols=features['static'],
-            target_col=fold_config['data']['target_col'])
+            target_col=preprocessing.get_target_cols(fold_config)[0])
         if prepared_data is not None:
             prepared_train.append(prepared_data)
 
@@ -955,7 +969,7 @@ def _build_spatial_fold_data(fold_config: Dict, features: Dict, logger) -> Tuple
         prepared_data, _ = preprocessing.pipeline(
             data=df, config=fold_config, known_cols=features['known'],
             observed_cols=features['observed'], static_cols=features['static'],
-            target_col=fold_config['data']['target_col'])
+            target_col=preprocessing.get_target_cols(fold_config)[0])
         if prepared_data is not None:
             prepared_val.append(prepared_data)
 

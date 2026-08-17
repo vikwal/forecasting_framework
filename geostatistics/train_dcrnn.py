@@ -104,6 +104,7 @@ from geostatistics.train_stgnn2 import (
     apply_knn_imputation,
 )
 from utils.era5_imputation import load_era5_imputation
+from geostatistics.shared.resolution import freq_to_hours
 
 # ── DCRNN-specific imports ───────────────────────────────────────────────────
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
@@ -489,8 +490,7 @@ def main() -> None:
     F_h = dcrnn_cfg.get("forecast_horizon")
 
     freq   = data_cfg.get("freq", "1h")
-    _freq_h_map = {"1h": 1.0, "1H": 1.0, "30min": 0.5, "30T": 0.5, "15min": 0.25, "15T": 0.25}
-    freq_h = _freq_h_map.get(freq, 1.0)
+    freq_h = freq_to_hours(freq, data_cfg.get("use_case", "wind"))
 
     # ------------------------------------------------------------------
     # Station measurements  (T, N_all, M)  — identical to stgnn2
@@ -501,7 +501,10 @@ def main() -> None:
 
     logger.info("Loading station measurements …")
     meas_raw, timestamps = load_station_measurements(
-        data_path, all_ids, cols=measurement_cols, freq=freq
+        data_path, all_ids, cols=measurement_cols, freq=freq,
+        use_case=data_cfg.get("use_case", "wind"),
+        stations_master=data_cfg.get("stations_master"),
+        time_label=cfg.get("params", {}).get("measurement_time_label", "right"),
     )
 
     # Truncate to test_end + 2 days before imputation so NaN counts reflect
@@ -635,6 +638,18 @@ def main() -> None:
                 "continuing with %d train + %d val stations: %s",
                 audit_end, len(bad_ids), N_train, N_val, bad_ids,
             )
+            if not all_ids:
+                # Ohne diesen Abbruch läuft der leere Stationssatz bis in den
+                # NWP-Loader und scheitert dort mit einem irreführenden
+                # FileNotFoundError auf das SL-Verzeichnis.
+                raise ValueError(
+                    f"NaN audit (up to {audit_end}): handle_nans='drop' hat ALLE "
+                    f"{len(bad_ids)} Stationen entfernt — es bleibt nichts zum Trainieren. "
+                    "Beim Solar-Use-Case ist das der Normalfall: praktisch jede DWD-"
+                    "Solarstation hat mindestens eine Lücke. Erst die Lücken füllen "
+                    "(data.interpol_path / data.knnimputer_path bzw. "
+                    "geostatistics/run_solar_interpolation.py), dann erneut trainieren."
+                )
         else:
             raise ValueError(
                 f"NaN audit failed (up to {audit_end}): {len(bad_ids)} station(s) still have "
@@ -677,6 +692,7 @@ def main() -> None:
                 n_workers=n_workers,
                 cutoff=run_cutoff,
                 freq_h=freq_h,
+                sub_hourly_fill=cfg.get("params", {}).get("sub_hourly_fill", "ffill"),
             )
     else:
         logger.info("Loading ICON-D2 ML runs (hours %s) …", list(run_hours))

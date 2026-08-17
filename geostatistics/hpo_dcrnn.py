@@ -79,6 +79,7 @@ from geostatistics.train_stgnn2 import (
     require_nwp_elevation_env,
 )
 from utils.era5_imputation import load_era5_imputation
+from geostatistics.shared.resolution import freq_to_hours
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.dcrnn.training import DCRNNTrainer
 from geostatistics.spatial_cv import (
@@ -302,8 +303,7 @@ def main() -> None:
     dcrnn_cfg = cfg.get("dcrnn", {})
 
     freq   = data_cfg.get("freq", "1h")
-    _freq_h_map = {"1h": 1.0, "1H": 1.0, "30min": 0.5, "30T": 0.5, "15min": 0.25, "15T": 0.25}
-    freq_h = _freq_h_map.get(freq, 1.0)
+    freq_h = freq_to_hours(freq, data_cfg.get("use_case", "wind"))
     H_fore_tmp = dcrnn_cfg.get("forecast_horizon", 48)
     # Mirror hpo_cl.py naming: cl_m-{model}_out-{output_dim}_freq-{freq}_{config}{suffix}
     study_name = f"cl_m-dcrnn_out-{H_fore_tmp}_freq-{freq}_{hpo_stem}"
@@ -639,10 +639,15 @@ def main() -> None:
             ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp[:split_t]).sum())
             ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp[:split_t]).sum())
             if ecmwf_nan_station > 0 or ecmwf_nan_grid > 0:
-                raise ValueError(
-                    f"ECMWF data contains NaN in training window — "
-                    f"station array: {ecmwf_nan_station} NaN, "
-                    f"grid array: {ecmwf_nan_grid} NaN."
+                # Frueher ein harter Abbruch. Seit 2026-08-17 uebernimmt
+                # exclude_run_pairs_with_ecmwf_nan die betroffenen Run-Paare und
+                # bricht selbst ab, wenn zu viele wegfallen. Ein Rand-Loch in der
+                # Zeitachse soll den Worker nicht mehr am Starten hindern.
+                logger.warning(
+                    "ECMWF data contains NaN in training window — "
+                    "station array: %d NaN, grid array: %d NaN. "
+                    "Affected run pairs will be excluded.",
+                    ecmwf_nan_station, ecmwf_nan_grid,
                 )
             _beyond = int(np.isnan(station_ecmwf_nwp[split_t:]).sum())
             if _beyond > 0:
@@ -815,6 +820,14 @@ def main() -> None:
             "Excluded %d run pairs due to NaN in ICON-D2 grid data (%d run(s) affected).",
             n_before - len(all_run_pairs), len(_grid_nan_runs),
         )
+
+    # ── ECMWF-NaN: betroffene Run-Paare ausschliessen ────────────────────
+    # Gegenstueck zum ICON-Block darueber, aber auf der Zeitachse statt auf der
+    # Laufachse. Begruendung und Vorgeschichte stehen an der Funktion.
+    from geostatistics.train_stgnn2 import exclude_run_pairs_with_ecmwf_nan
+    all_run_pairs = exclude_run_pairs_with_ecmwf_nan(
+        all_run_pairs, [station_ecmwf_nwp, ecmwf_nwp], timestamps, H, F_h,
+    )
 
     logger.info("Total pre-test run pairs available for CV: %d", len(all_run_pairs))
 

@@ -59,6 +59,7 @@ from geostatistics.stgnn.training.sampler import TrainingSampler
 from geostatistics.stgnn.training.trainer import InductiveTrainer
 from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.evaluation import evaluate as run_evaluation, find_ws_feat_idx
+from utils import solar
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,14 +83,64 @@ def load_yaml(path: str) -> dict:
 # Station measurements
 # ---------------------------------------------------------------------------
 
+def _solar_sample_seconds(index: pd.DatetimeIndex) -> float:
+    """Abtastintervall der Rohdaten in Sekunden (10 min bei den DWD-Solardateien)."""
+    deltas = index.to_series().diff().dropna()
+    if deltas.empty:
+        return 600.0
+    seconds = float(deltas.mode().iloc[0].total_seconds())
+    return seconds if seconds > 0 else 600.0
+
+
+def _solar_to_w_per_m2(df: pd.DataFrame) -> pd.DataFrame:
+    """J/cm² je Messintervall → W/m² für ghi/dhi."""
+    factor = 1e4 / _solar_sample_seconds(df.index)
+    df = df.copy()
+    for col in ("ghi", "dhi"):
+        if col in df.columns:
+            df[col] = df[col] * factor
+    return df
+
+
+@lru_cache(maxsize=1)
+def _station_coords_table(stations_master: str) -> pd.DataFrame:
+    return pd.read_csv(stations_master, dtype={"station_id": str}).set_index("station_id")
+
+
+def _solar_dni(df: pd.DataFrame, station_id: str, stations_master: str | None) -> pd.Series:
+    """DNI = (ghi − dhi) / cos θz, über pvlib (Nullsetzung bei θz > 88°)."""
+    if not stations_master:
+        raise ValueError(
+            "use_case='solar' mit measurement_features='dni' braucht data.stations_master "
+            "(Stationskoordinaten für den Sonnenstand)."
+        )
+    import pvlib
+
+    row = _station_coords_table(stations_master).loc[station_id]
+    solpos = pvlib.solarposition.get_solarposition(
+        df.index, float(row["latitude"]), float(row["longitude"]),
+        altitude=float(row["station_height"]),
+    )
+    dni = pvlib.irradiance.dni(ghi=df["ghi"], dhi=df["dhi"], zenith=solpos["zenith"])
+    return pd.Series(dni, index=df.index).fillna(0.0).clip(lower=0)
+
+
 def load_station_measurements(
     data_path: str,
     station_ids: list[str],
     cols: list[str],
     freq: str = "1h",
+    use_case: str = "wind",
+    stations_master: str | None = None,
+    time_label: str = "right",
 ) -> tuple[np.ndarray, pd.DatetimeIndex]:
     """
     Load per-station measurement CSVs and return a (T, N, M) array.
+
+    ``use_case='solar'`` schaltet die Solar-Semantik zu: ``ghi``/``dhi`` werden von
+    J/cm² je Messintervall auf W/m² umgerechnet, und die abgeleiteten Spalten ``bhi``
+    (= ghi − dhi) sowie ``dni`` (= bhi / cos θz) stehen zusätzlich zur Verfügung.
+    ``dni`` benötigt Stationskoordinaten, also ``stations_master``.
 
     ``wind_direction`` is an angle in degrees and is resampled with a
     circular mean: sin/cos of the 10-min degree values are averaged
@@ -102,35 +153,77 @@ def load_station_measurements(
     including wind_direction (skipna semantics of the sin/cos means match
     the skipna semantics of the plain .mean() used elsewhere).
 
+    ``freq`` feiner als 1 h ist nur für Solar möglich (ICON-D2 SL ist nativ
+    15-minütig, ML nur stündlich). Weil das 10-min-Messraster nicht in 15-min-
+    Intervalle nestet, läuft die Aggregation dann über
+    ``solar.resample_interval_mean`` (flächengewichtet über das 5-min-Feinraster)
+    statt über ein einfaches ``.mean()``. Bei ``freq='1h'`` sind beide identisch.
+
+    ``time_label='right'`` (Default, nur Solar) verschiebt die DWD-Rohzeitstempel um
+    ein Messintervall zurück, weil sie das Intervall*ende* markieren. Ohne das wäre
+    der GNN-Pfad um 10 min gegen den CL-Pfad versetzt — siehe
+    ``utils.solar.load_station_measurements``.
+
     Returns
     -------
     meas :       (T, N, M) float32, NaN where data is missing
     timestamps : DatetimeIndex (UTC) at the given freq
     """
+    # Solar: ghi/dhi liegen als J/cm² je Messintervall vor und müssen vor dem
+    # Resampling auf W/m² umgerechnet werden, sonst sind Ziel und ICON-D2-Prognose
+    # (W/m²) um Faktor ~16.7 gegeneinander verschoben. bhi/dni sind keine Rohspalten,
+    # sondern aus ghi/dhi abgeleitet.
+    solar_mode = use_case == "solar"
+    read_col = {"bhi": ["ghi", "dhi"], "dni": ["ghi", "dhi"]} if solar_mode else {}
+
     pivots = []
     common_index = None
     for col in cols:
         dfs = []
         for sid in station_ids:
             fpath = os.path.join(data_path, f"Station_{sid}.parquet")
-            df = pd.read_parquet(fpath, columns=[col])
+            src_cols = read_col.get(col, [col])
+            df = pd.read_parquet(fpath, columns=src_cols)
             df.index = pd.to_datetime(df.index, utc=True)
-            dfs.append(df[col].rename(sid))
+            if solar_mode:
+                df = _solar_to_w_per_m2(df)
+                if col == "bhi":
+                    series = (df["ghi"] - df["dhi"]).clip(lower=0)
+                elif col == "dni":
+                    series = _solar_dni(df, sid, stations_master)
+                else:
+                    series = df[col]
+            else:
+                series = df[col]
+            dfs.append(series.rename(sid))
         raw = pd.concat(dfs, axis=1).sort_index()
-        # closed="left", label="left": [00:00, freq) → first bin, etc.
+        sample_seconds = solar.infer_sample_seconds(raw.index)
+        if solar_mode:
+            if time_label == "right":
+                raw.index = raw.index - pd.Timedelta(seconds=sample_seconds)
+            elif time_label != "left":
+                raise ValueError(
+                    f"time_label muss 'left' oder 'right' sein, nicht '{time_label}'"
+                )
+
+        def _agg(frame: pd.DataFrame) -> pd.DataFrame:
+            # closed="left", label="left": [00:00, freq) → first bin, etc.
+            return solar.resample_interval_mean(frame, freq, sample_seconds,
+                                                max_nan_frac=1.0)
+
         if col == "wind_direction":
             rad = np.deg2rad(raw.values)
             sin_df = pd.DataFrame(np.sin(rad), index=raw.index, columns=raw.columns)
             cos_df = pd.DataFrame(np.cos(rad), index=raw.index, columns=raw.columns)
-            sin_pivot = sin_df.resample(freq, closed="left", label="left").mean()
-            cos_pivot = cos_df.resample(freq, closed="left", label="left").mean()
+            sin_pivot = _agg(sin_df)
+            cos_pivot = _agg(cos_df)
             pivot = pd.DataFrame(
                 np.rad2deg(np.arctan2(sin_pivot.values, cos_pivot.values)) % 360,
                 index=sin_pivot.index, columns=sin_pivot.columns,
             )
             pivot[sin_pivot.isna() | cos_pivot.isna()] = np.nan
         else:
-            pivot = raw.resample(freq, closed="left", label="left").mean()
+            pivot = _agg(raw)
         if common_index is None:
             common_index = pivot.index
         pivots.append(pivot.values.astype(np.float32))
@@ -1611,3 +1704,68 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def exclude_run_pairs_with_ecmwf_nan(
+    all_run_pairs: list[tuple[int, int, int]],
+    ecmwf_arrays: list,
+    timestamps: pd.DatetimeIndex,
+    H: int,
+    F_h: int,
+    max_drop_frac: float = 0.10,
+) -> list[tuple[int, int, int]]:
+    """Drop run pairs whose window touches a NaN in the ECMWF tensors.
+
+    Counterpart to the ICON-D2 exclusion in the hpo_* scripts, which filters on
+    the RUN axis. ECMWF is indexed by timestamp, so this filter runs over
+    ``t_run_abs`` and uses the same window ``[t - H, t + F_h)`` that
+    ``_build_all_run_pairs`` already applies to ``meas_nan_any``.
+
+    Background: the ECMWF loading path has no NaN check of its own. On
+    2026-08-15 a foreign pipeline overwrote the wind columns with NULL and the
+    resulting tensor was NaN throughout; three workers trained on it without any
+    error and only left NaN metrics behind (Optuna recorded them as pruned or
+    failed). The 2026-08-17 re-export covers 2023-08-01..2026-02-28 while the
+    time axis starts 2023-07-24, so 192 h of NaN remain at the front. Without
+    this filter every batch touching them turns the loss into NaN.
+
+    Raises if more than *max_drop_frac* of the pairs would be dropped, so a
+    wholesale data loss stays loud instead of silently emptying the pool.
+    """
+    masks = []
+    for arr in ecmwf_arrays:
+        if arr is None or getattr(arr, "ndim", 0) != 3:
+            continue
+        if arr.shape[1] == 0 or arr.shape[2] == 0:
+            continue
+        masks.append(np.isnan(arr).any(axis=(1, 2)))
+    if not masks:
+        return all_run_pairs
+
+    nan_any = np.logical_or.reduce(masks)
+    if not nan_any.any():
+        logger.info("ECMWF NaN audit: no missing values \u2713")
+        return all_run_pairs
+
+    kept = [
+        (rc, rh, t) for rc, rh, t in all_run_pairs
+        if not nan_any[max(t - H, 0): t + F_h].any()
+    ]
+    dropped = len(all_run_pairs) - len(kept)
+    idx = np.where(nan_any)[0]
+    span = f"{timestamps[idx[0]]} .. {timestamps[idx[-1]]}"
+    frac = dropped / len(all_run_pairs) if all_run_pairs else 0.0
+    if frac > max_drop_frac:
+        raise ValueError(
+            f"ECMWF data contains NaN at {int(nan_any.sum())} of {len(nan_any)} "
+            f"timestamps ({span}); that would drop {dropped} of "
+            f"{len(all_run_pairs)} run pairs ({100 * frac:.1f} % > "
+            f"{100 * max_drop_frac:.0f} %). Refusing to train on a partial ECMWF "
+            f"archive \u2014 check the parquet export."
+        )
+    logger.warning(
+        "Excluded %d of %d run pairs due to NaN in ECMWF data "
+        "(%d of %d timestamps affected, %s).",
+        dropped, len(all_run_pairs), int(nan_any.sum()), len(nan_any), span,
+    )
+    return kept

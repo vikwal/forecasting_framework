@@ -95,6 +95,7 @@ from geostatistics.train_stgnn2 import (
     require_nwp_elevation_env,
 )
 from utils.era5_imputation import load_era5_imputation
+from geostatistics.shared.resolution import freq_to_hours
 from geostatistics.train_mtgnn import (
     _train_epoch,
     _val_epoch,
@@ -363,8 +364,7 @@ def main() -> None:
     )
 
     freq     = data_cfg.get("freq", "1h")
-    _fmap    = {"1h": 1.0, "1H": 1.0, "30min": 0.5, "30T": 0.5, "15min": 0.25, "15T": 0.25}
-    freq_h   = _fmap.get(freq, 1.0)
+    freq_h   = freq_to_hours(freq, data_cfg.get("use_case", "wind"))
     F_h_base = mcfg.get("forecast_horizon", 48)
 
     study_name = f"cl_m-mtgnn_out-{F_h_base}_freq-{freq}_{hpo_stem}"
@@ -567,6 +567,9 @@ def main() -> None:
         logger.info("Loading station measurements …")
         meas_raw, timestamps = load_station_measurements(
             data_path, all_ids, cols=measurement_cols, freq=freq,
+            use_case=data_cfg.get("use_case", "wind"),
+            stations_master=data_cfg.get("stations_master"),
+            time_label=cfg.get("params", {}).get("measurement_time_label", "right"),
         )
 
         if run_cutoff is not None:
@@ -610,6 +613,7 @@ def main() -> None:
                 features=icond2_features, run_hours=run_hours,
                 next_n_grid=next_n_icond2, n_workers=n_workers,
                 cutoff=run_cutoff, freq_h=freq_h,
+                sub_hourly_fill=cfg.get("params", {}).get("sub_hourly_fill", "ffill"),
             )
         else:
             run_times, icond2_coords, grid_icond2_runs, _ = load_icond2_ml_runs(
@@ -686,6 +690,14 @@ def main() -> None:
             "Excluded %d run pairs due to NaN in ICON-D2 grid data (%d run(s) affected).",
             _n_before - len(all_run_pairs), len(_grid_nan_runs),
         )
+
+    # ── ECMWF-NaN: betroffene Run-Paare ausschliessen ────────────────────
+    # Gegenstueck zum ICON-Block darueber, aber auf der Zeitachse statt auf der
+    # Laufachse. Begruendung und Vorgeschichte stehen an der Funktion.
+    from geostatistics.train_stgnn2 import exclude_run_pairs_with_ecmwf_nan
+    all_run_pairs = exclude_run_pairs_with_ecmwf_nan(
+        all_run_pairs, [grid_ecmwf_raw], timestamps, H, F_h,
+    )
 
     # ── NWP-Knotenhoehen fuer die Kantenattribute ───────────────────────────
     # Distanz/Azimut allein wuerden reichen, um die Permutationsinvarianz der

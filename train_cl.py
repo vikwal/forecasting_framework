@@ -40,11 +40,16 @@ def main() -> None:
     parser.add_argument('-c', '--config', type=str, help='Select config')
     parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix for study name (default: empty)')
     parser.add_argument('--save_model', action='store_true', default=False, help='Save trained model to models directory (default: False)')
+    parser.add_argument('--save-predictions', action='store_true', default=False,
+                        help='Vorhersagen je Station/Zielgroesse mit ins Ergebnis-Pickle legen '
+                             '(noetig fuer den Vergleich verschiedener Zeitraster auf gemeinsamem Raster)')
     parser.add_argument('--test-mode', action='store_true', default=False,
                         help='Final evaluation mode: trains on files+val_files, evaluates on test_files')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
+    # Sammelbehaelter fuer --save-predictions: {(station, zielgroesse): {pred/true/baselines}}
+    _predictions: dict = {}
     suffix = ''
     if args.suffix:
         suffix = f'_{args.suffix}'
@@ -181,7 +186,7 @@ def main() -> None:
         logging.info("Loaded %d val stations, %d training stations.", len(val_dfs), len(dfs))
 
     # ── NaN audit ────────────────────────────────────────────────────────────
-    target_col_data = config['data'].get('target_col', 'power')
+    target_col_data = preprocessing.get_target_cols(config)[0]
     handle_nans = config.get('data', {}).get('handle_nans', 'warn')
     _all_dfs = {**dfs, **(val_dfs or {})}
     _nan_stations = [k for k, df in _all_dfs.items()
@@ -325,9 +330,13 @@ def main() -> None:
             # Reset scalers for each period when retraining (fresh start each time)
             global_scaler_x = StandardScaler()
             global_scaler_y = StandardScaler()
-            target_col = period_config['data']['target_col']
-            fit_scaler_y = target_col != 'power'  # power is pre-normalised to [0,1]
+            # Multi-Target: target_cols hat Vorrang vor target_col (get_target_cols ist
+            # die einzige Stelle, an der das aufgeloest wird). Solar faehrt mit
+            # ['ghi', 'dhi'] ohne target_col — ein direkter Zugriff bricht dort ab.
+            target_cols = preprocessing.get_target_cols(period_config)
+            fit_scaler_y = any(c != 'power' for c in target_cols)  # power is pre-normalised to [0,1]
 
+            _skipped_scaler = []
             for key, df in tqdm(dfs.items(), desc="Fitting Global Scaler"):
                 df_temp = df.copy()
 
@@ -345,28 +354,59 @@ def main() -> None:
                                 target_col=new_col
                             )
                             # Drop the original column if it's not the target and not known
-                            if new_col != target_col and new_col not in features['known']:
+                            if new_col not in target_cols and new_col not in features['known']:
                                 df_temp.drop(new_col, axis=1, inplace=True, errors='ignore')
 
                 t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
                 df_train, _ = preprocessing.split_data(
                     data=df_temp,
                     train_frac=period_config['data']['train_frac'],
+                    train_start=pd.Timestamp(period_config['data'].get('train_start'), tz='UTC'),
+                    train_end=pd.Timestamp(period_config['data'].get('train_end'), tz='UTC'),
                     test_start=pd.Timestamp(period_config['data']['test_start'], tz='UTC'),
                     test_end=pd.Timestamp(period_config['data']['test_end'], tz='UTC'),
                     t_0=t_0
                 )
 
+                # Stationen ohne Trainingsdaten ueberspringen statt abzubrechen.
+                # Mit einem kurzen Trainingsfenster (data.train_end) faellt jede Station
+                # heraus, deren Messreihe erst danach beginnt — bei einem spaeteren
+                # test_start hatte dieselbe Station noch Daten. StandardScaler.partial_fit
+                # wirft dort sonst "Found array with 0 sample(s)" und reisst den ganzen
+                # Lauf mit. Dieselbe Logik wie preprocessing.EmptySplitError im Generator.
+                if len(df_train) == 0:
+                    _skipped_scaler.append(os.path.basename(key))
+                    del df_temp, df_train
+                    gc.collect()
+                    continue
+
                 # Fit X scaler (exclude target)
-                df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                df_train_x = df_train.drop(columns=target_cols, errors='ignore')
                 global_scaler_x.partial_fit(df_train_x.values)
 
                 # Fit Y scaler on target column
-                if fit_scaler_y and target_col in df_train.columns:
-                    global_scaler_y.partial_fit(df_train[[target_col]].values)
+                _present = [c for c in target_cols if c in df_train.columns]
+                if fit_scaler_y and len(_present) == len(target_cols):
+                    global_scaler_y.partial_fit(df_train[target_cols].values)
 
                 del df_temp, df_train, df_train_x
                 gc.collect()
+
+            if _skipped_scaler:
+                logging.warning(
+                    "%d von %d Stationen ohne Trainingsdaten im Fenster "
+                    "%s..%s uebersprungen: %s%s",
+                    len(_skipped_scaler), len(dfs),
+                    period_config['data'].get('train_start'),
+                    period_config['data'].get('train_end')
+                    or period_config['data'].get('test_start'),
+                    _skipped_scaler[:8], " …" if len(_skipped_scaler) > 8 else "")
+            if len(_skipped_scaler) == len(dfs):
+                raise ValueError(
+                    "Keine einzige Station hat Trainingsdaten im konfigurierten Fenster "
+                    f"({period_config['data'].get('train_start')} bis "
+                    f"{period_config['data'].get('train_end')}). "
+                    "data.train_start/train_end pruefen.")
 
             logging.debug("Global scalers fitted.")
 
@@ -589,9 +629,14 @@ def main() -> None:
                     park_id=park_key,
                     synth_dir=None,
                     get_physical_persistence=False,
-                    target_col=period_config['data']['target_col'],
+                    target_col=preprocessing.get_target_cols(period_config)[0],
+                    target_cols=preprocessing.get_target_cols(period_config),
+                    nwp_baseline_col=period_config.get('params', {}).get('nwp_baseline_col'),
+                    nwp_residual=period_config.get('params', {}).get('target_transform') == 'nwp_residual',
+                    target_transform=period_config.get('params', {}).get('target_transform', 'none'),
                     evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
-                    device=device
+                    device=device,
+                    collect=_predictions if args.save_predictions else None,
                 )
             park_eval['key'] = park_key
             eval_results.append(park_eval)
@@ -649,7 +694,7 @@ def main() -> None:
                 period_scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}_{period_n}.pkl')
                 with open(period_scaler_path, 'wb') as f:
                     pickle.dump(global_scaler_x, f)
-                if config['data']['target_col'] != 'power':
+                if any(c != 'power' for c in preprocessing.get_target_cols(config)):
                     with open(period_scaler_path.replace('scaler_', 'scaler_y_'), 'wb') as f:
                         pickle.dump(global_scaler_y, f)
                 logging.info(f"Period {period_n} scaler saved to: {period_scaler_path}")
@@ -673,7 +718,7 @@ def main() -> None:
             pickle.dump(global_scaler_x, f)
         logging.info(f"Scaler saved to: {scaler_path}")
 
-        if config['data']['target_col'] != 'power':
+        if any(c != 'power' for c in preprocessing.get_target_cols(config)):
             scaler_y_path = scaler_path.replace('scaler_', 'scaler_y_')
             with open(scaler_y_path, 'wb') as f:
                 pickle.dump(global_scaler_y, f)
@@ -713,7 +758,8 @@ def main() -> None:
             'history': all_histories if all_histories else None,  # List of dictionaries, or None if eval-only
             'evaluation': evaluation,
             'individual_evaluations': all_evaluations,
-            'test_dates': test_periods
+            'test_dates': test_periods,
+            'predictions': _predictions if args.save_predictions else None,
         }
     else:
         # Single training run (backward compatible)
@@ -724,7 +770,8 @@ def main() -> None:
             'config': config,
             'history': history_result,  # Single dictionary or None
             'evaluation': evaluation,
-            'test_dates': test_periods
+            'test_dates': test_periods,
+            'predictions': _predictions if args.save_predictions else None,
         }
 
     # Save results

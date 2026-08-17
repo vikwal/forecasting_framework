@@ -325,8 +325,11 @@ def main() -> None:
 
         # Phase 1: Fit local scalers for all clients
         if should_train:
-            target_col = period_config['data']['target_col']
-            fit_scaler_y = target_col != 'power'  # power is pre-normalised to [0, 1]
+            # Multi-Target: target_cols hat Vorrang vor target_col — siehe
+            # preprocessing.get_target_cols(). Solar faehrt mit ['ghi', 'dhi'] ohne
+            # target_col, ein direkter Zugriff bricht dort ab.
+            target_cols = preprocessing.get_target_cols(period_config)
+            fit_scaler_y = any(c != 'power' for c in target_cols)  # power is pre-normalised to [0, 1]
 
             for client_id, client_info in tqdm(clients_data.items(), desc="Fitting scalers", unit="client"):
                 logging.debug(f"Preparing data for client: {client_id}")
@@ -349,7 +352,7 @@ def main() -> None:
                                     lag_in_col=period_config['data']['lag_in_col'],
                                     target_col=new_col
                                 )
-                                if new_col != target_col and new_col not in features['known']:
+                                if new_col not in target_cols and new_col not in features['known']:
                                     df_temp.drop(new_col, axis=1, inplace=True, errors='ignore')
 
                     t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
@@ -362,11 +365,12 @@ def main() -> None:
                     )
 
                     # Fit Y scaler on target before dropping it
-                    if fit_scaler_y and target_col in df_train.columns:
-                        scaler_y.partial_fit(df_train[[target_col]].values)
+                    _present = [c for c in target_cols if c in df_train.columns]
+                    if fit_scaler_y and len(_present) == len(target_cols):
+                        scaler_y.partial_fit(df_train[target_cols].values)
 
                     # Fit X scaler on all features except target
-                    df_train_x = df_train.drop(columns=[target_col], errors='ignore')
+                    df_train_x = df_train.drop(columns=target_cols, errors='ignore')
                     scaler_x.partial_fit(df_train_x.values)
 
                     del df_temp, df_train, df_train_x
@@ -693,7 +697,9 @@ def main() -> None:
                     park_id=park_key,
                     synth_dir=None,
                     get_physical_persistence=False,
-                    target_col=period_config['data']['target_col'],
+                    target_col=preprocessing.get_target_cols(period_config)[0],
+                    target_cols=preprocessing.get_target_cols(period_config),
+                    nwp_baseline_col=period_config.get('params', {}).get('nwp_baseline_col'),
                     evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
                     device=device
                 )
@@ -733,7 +739,9 @@ def main() -> None:
                     park_id=park_key,
                     synth_dir=None,
                     get_physical_persistence=False,
-                    target_col=period_config['data']['target_col'],
+                    target_col=preprocessing.get_target_cols(period_config)[0],
+                    target_cols=preprocessing.get_target_cols(period_config),
+                    nwp_baseline_col=period_config.get('params', {}).get('nwp_baseline_col'),
                     evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
                     device=device
                 )

@@ -36,6 +36,8 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from geostatistics.shared.nwp_baseline import nwp_baseline_feature_idx
+from geostatistics.shared.resolution import freq_to_hours
 from geostatistics.train_stgnn2 import (
     load_yaml,
     load_station_measurements,
@@ -188,8 +190,7 @@ def main() -> None:
     F_h = mcfg.get("forecast_horizon", 48)
 
     freq   = data_cfg.get("freq", "1h")
-    _freq_h_map = {"1h": 1.0, "1H": 1.0, "30min": 0.5, "30T": 0.5, "15min": 0.25, "15T": 0.25}
-    freq_h = _freq_h_map.get(freq, 1.0)
+    freq_h = freq_to_hours(freq, data_cfg.get("use_case", "wind"))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Device: %s", device)
@@ -215,7 +216,12 @@ def main() -> None:
     run_cutoff = pd.Timestamp(test_end, tz="UTC") if test_end else None
 
     logger.info("Loading station measurements …")
-    meas_raw, timestamps = load_station_measurements(data_path, all_ids, cols=measurement_cols, freq=freq)
+    meas_raw, timestamps = load_station_measurements(
+        data_path, all_ids, cols=measurement_cols, freq=freq,
+        use_case=data_cfg.get("use_case", "wind"),
+        stations_master=data_cfg.get("stations_master"),
+        time_label=cfg.get("params", {}).get("measurement_time_label", "right"),
+    )
 
     if run_cutoff is not None:
         meas_cutoff = run_cutoff + pd.Timedelta(days=2)
@@ -312,6 +318,7 @@ def main() -> None:
             nwp_path=nwp_path, station_ids=all_ids, station_coords=station_coords,
             features=icond2_features, run_hours=run_hours, next_n_grid=next_n_icond2,
             n_workers=n_workers, cutoff=run_cutoff, freq_h=freq_h,
+            sub_hourly_fill=cfg.get("params", {}).get("sub_hourly_fill", "ffill"),
         )
     else:
         run_times, icond2_coords, grid_icond2_runs, _ = load_icond2_ml_runs(
@@ -372,10 +379,7 @@ def main() -> None:
     target_scale    = float(meas_scaler.std_[target_feat_idx] + meas_scaler.eps)
     target_mean     = float(meas_scaler.mean_[target_feat_idx])
 
-    nwp_ws_feat_idx = next(
-        (i for i, f in enumerate(icond2_features) if f == "wind_speed_10m"),
-        next((i for i, f in enumerate(icond2_features) if "wind_speed" in f), 0)
-    )
+    nwp_ws_feat_idx = nwp_baseline_feature_idx(icond2_features, target_col)
 
     # ── Run pairs (test / val window only) ───────────────────────────────────
     logger.info("Identifying test run pairs …")

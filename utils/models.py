@@ -8,6 +8,32 @@ import torch.nn.functional as F
 from typing import Dict, Tuple, Optional, Any
 
 
+def _shape_predictions(predictions: torch.Tensor,
+                       num_targets: int,
+                       num_quantiles: int) -> torch.Tensor:
+    """Bringt die flache Ausgabeschicht (batch, horizon, n_targets*n_quantiles)
+    in die vom Rest des Frameworks erwartete Form.
+
+    * 1 Ziel,  1 Quantil  → ``(batch, horizon)``            (bisheriges Verhalten)
+    * 1 Ziel,  Q Quantile → ``(batch, horizon, Q)``         (bisheriges Verhalten)
+    * T Ziele, 1 Quantil  → ``(batch, horizon, T)``
+    * T Ziele, Q Quantile → ``(batch, horizon, T, Q)``
+    """
+    if num_targets == 1:
+        return predictions.squeeze(-1) if num_quantiles == 1 else predictions
+    batch, horizon, _ = predictions.shape
+    predictions = predictions.view(batch, horizon, num_targets, num_quantiles)
+    return predictions.squeeze(-1) if num_quantiles == 1 else predictions
+
+
+def _num_targets(config: Dict[str, Any]) -> int:
+    """Anzahl der Zielspalten aus ``data.target_cols`` (Default 1)."""
+    cols = config.get('data', {}).get('target_cols')
+    if not cols:
+        return 1
+    return len(cols) if isinstance(cols, (list, tuple)) else 1
+
+
 def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Module:
     """
     Factory function to create PyTorch models based on config.
@@ -33,6 +59,7 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             static_embedding_dim=hyperparameters.get('static_embedding_dim', None),
             rnn_type=config['model']['tft'].get('rnn_type', 'lstm'),
             num_quantiles=num_quantiles,
+            num_targets=_num_targets(config),
         )
         return model
 
@@ -46,7 +73,8 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             conv_type='cnn',
             rnn_type='lstm',
             bidirectional=False,
-            hyperparameters=hyperparameters
+            hyperparameters=hyperparameters,
+            num_targets=_num_targets(config),
         )
         return model
 
@@ -60,7 +88,8 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             conv_type='tcn',
             rnn_type='gru',
             bidirectional=False,
-            hyperparameters=hyperparameters
+            hyperparameters=hyperparameters,
+            num_targets=_num_targets(config),
         )
         return model
 
@@ -87,6 +116,7 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             n_tcn_layers=hyperparameters.get('n_cnn_layers', 3),
             increase_filters=hyperparameters.get('increase_filters', False),
             num_quantiles=num_quantiles,
+            num_targets=_num_targets(config),
         )
         return model
 
@@ -531,6 +561,7 @@ class TFT(nn.Module):
         static_embedding_dim: Optional[int] = None,
         rnn_type: str = 'lstm',
         num_quantiles: int = 1,
+        num_targets: int = 1,
     ):
         super().__init__()
 
@@ -543,6 +574,7 @@ class TFT(nn.Module):
         self.num_lstm_layers = num_lstm_layers
         self.rnn_type = rnn_type.lower()
         self.num_quantiles = num_quantiles
+        self.num_targets = num_targets
 
         # Use separate embedding dimension for static features if specified
         # Otherwise use same as hidden_dim (backward compatible)
@@ -644,7 +676,10 @@ class TFT(nn.Module):
 
         # Output projection: num_quantiles=1 → deterministic point forecast (MSE)
         #                    num_quantiles>1 → probabilistic quantile forecast (pinball loss)
-        self.output_layer = nn.Linear(hidden_dim, num_quantiles)
+        #                    num_targets>1  → gemeinsame Vorhersage mehrerer Zielgrößen
+        #                                     (z. B. ghi + dhi), die sich Encoder und
+        #                                     Attention teilen.
+        self.output_layer = nn.Linear(hidden_dim, num_targets * num_quantiles)
 
     def forward(self, observed, known, static=None, return_attention_weights=False):
         """Forward pass of TFT.
@@ -788,9 +823,8 @@ class TFT(nn.Module):
 
         # Extract future part and project
         future_output = final_output[:, self.lookback:, :]
-        predictions = self.output_layer(future_output)  # (batch, horizon, num_quantiles)
-        if self.num_quantiles == 1:
-            predictions = predictions.squeeze(-1)       # (batch, horizon) — deterministic
+        predictions = self.output_layer(future_output)  # (batch, horizon, n_targets*n_quantiles)
+        predictions = _shape_predictions(predictions, self.num_targets, self.num_quantiles)
 
         # Return with attention weights if requested
         if return_attention_weights:
@@ -846,6 +880,7 @@ class TCN_TFT(nn.Module):
         n_tcn_layers: int = 3,
         increase_filters: bool = False,
         num_quantiles: int = 1,
+        num_targets: int = 1,
     ):
         super().__init__()
 
@@ -858,6 +893,7 @@ class TCN_TFT(nn.Module):
         self.num_lstm_layers = num_lstm_layers
         self.static_embedding_dim = static_embedding_dim if static_embedding_dim is not None else hidden_dim
         self.num_quantiles = num_quantiles
+        self.num_targets = num_targets
 
         # === Stage 1: TCN Feature Extractors ===
         # TCN layers run at tcn_filters capacity (from model.cnn).
@@ -950,7 +986,7 @@ class TCN_TFT(nn.Module):
 
         self.output_gate  = GLU(hidden_dim)   # no dropout, matches TFT
         self.output_ln    = nn.LayerNorm(hidden_dim)
-        self.output_layer = nn.Linear(hidden_dim, num_quantiles)
+        self.output_layer = nn.Linear(hidden_dim, num_targets * num_quantiles)
 
     def _apply_tcn(self, tcn: nn.Sequential, x: torch.Tensor) -> torch.Tensor:
         """(batch, time, features) → TCN → project → (batch, time, hidden_dim)"""
@@ -1050,9 +1086,8 @@ class TCN_TFT(nn.Module):
 
         predictions = self.output_layer(
             final_output[:, self.lookback:, :]
-        )  # (batch, horizon, num_quantiles)
-        if self.num_quantiles == 1:
-            predictions = predictions.squeeze(-1)  # (batch, horizon) — deterministic
+        )  # (batch, horizon, n_targets*n_quantiles)
+        predictions = _shape_predictions(predictions, self.num_targets, self.num_quantiles)
 
         if return_attention_weights:
             return predictions, {
@@ -1078,12 +1113,18 @@ class CNNRNN(nn.Module):
         conv_type: str,
         rnn_type: str,
         bidirectional: bool,
-        hyperparameters: Dict[str, Any]
+        hyperparameters: Dict[str, Any],
+        num_targets: int = 1,
     ):
         super().__init__()
 
         self.n_features = n_features
-        self.output_dim = output_dim
+        # output_dim ist der Vorhersagehorizont. Bei mehreren Zielgrößen gibt die
+        # Ausgabeschicht horizon*n_targets Werte aus, die in forward() auf
+        # (batch, horizon, n_targets) umgeformt werden.
+        self.horizon = output_dim
+        self.num_targets = num_targets
+        self.output_dim = output_dim * num_targets
         self.conv_type = conv_type
         self.rnn_type = rnn_type
         self.bidirectional = bidirectional
@@ -1148,7 +1189,7 @@ class CNNRNN(nn.Module):
             self.output_fc = None  # Will be created in forward pass
         else:
             rnn_output_size = self.units * 2 if bidirectional else self.units
-            self.output_fc = nn.Linear(rnn_output_size, output_dim)
+            self.output_fc = nn.Linear(rnn_output_size, self.output_dim)
 
     def forward(self, x):
         # x shape: (batch, time, features)
@@ -1188,4 +1229,6 @@ class CNNRNN(nn.Module):
             last_output = rnn_output[:, -1, :]
             output = self.output_fc(last_output)
 
+        if self.num_targets > 1:
+            output = output.view(-1, self.horizon, self.num_targets)
         return output

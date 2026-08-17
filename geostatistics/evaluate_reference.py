@@ -38,6 +38,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from geostatistics.shared.nwp_baseline import nwp_baseline_feature_idx
+from geostatistics.shared.resolution import freq_to_hours
 from geostatistics.train_stgnn2 import (
     load_yaml,
     load_station_measurements,
@@ -265,7 +267,7 @@ def main() -> None:
     H   = mcfg.get("history_length",   48)
     F_h = mcfg.get("forecast_horizon", 48)
     freq   = data_cfg.get("freq", "1h")
-    freq_h = {"1h": 1.0, "1H": 1.0, "30min": 0.5, "30T": 0.5}.get(freq, 1.0)
+    freq_h = freq_to_hours(freq, data_cfg.get("use_case", "wind"))
 
     ecmwf_features_load = (
         args.ecmwf_features.split(",") if args.ecmwf_features
@@ -373,11 +375,8 @@ def main() -> None:
     R       = len(run_times)
     logger.info("ICON-D2: R=%d  N_grid=%d  I2=%d  n_leads=%d", R, len(icond2_coords), I2, n_leads)
 
-    nwp_ws_feat_idx = next(
-        (i for i, f in enumerate(icond2_features) if f == "wind_speed_10m"),
-        next((i for i, f in enumerate(icond2_features) if "wind_speed" in f), 0),
-    )
-    logger.info("ICON-D2 wind_speed feature idx: %d (%s)", nwp_ws_feat_idx, icond2_features[nwp_ws_feat_idx])
+    nwp_ws_feat_idx = nwp_baseline_feature_idx(icond2_features, target_col)
+    logger.info("ICON-D2 NWP-Baselinefeature: idx %d (%s)", nwp_ws_feat_idx, icond2_features[nwp_ws_feat_idx])
 
     # Nearest ICON-D2 grid point per val station — reuse load_icond2_ml_runs' OWN
     # geodesic assignment (pyproj Geod, same as evaluation.py's model path via

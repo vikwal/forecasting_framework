@@ -257,7 +257,15 @@ def main() -> None:
     nwp_path  = data_cfg.get("nwp_path")
     
     logger.info("Loading station measurements …")
-    meas_raw, timestamps = load_station_measurements(data_path, all_ids, cols=measurement_cols)
+    meas_raw, timestamps = load_station_measurements(
+        data_path, all_ids, cols=measurement_cols,
+        # freq muss dasselbe sein wie in train_dcrnn.py, sonst wertet dieses Skript
+        # ein auf z. B. 30-min-Schritten trainiertes Modell gegen ein Stundenraster aus.
+        freq=data_cfg.get("freq", "1h"),
+        use_case=data_cfg.get("use_case", "wind"),
+        stations_master=data_cfg.get("stations_master"),
+        time_label=cfg.get("params", {}).get("measurement_time_label", "right"),
+    )
     T = len(timestamps)
 
     # Imputation (if paths present)
@@ -416,7 +424,16 @@ def main() -> None:
 
     stat_scaler = StandardScaler()
     raw_static  = np.stack([lats, lons, alts], axis=1).astype(np.float32)
-    stat_scaler.fit(raw_static[:N_train])
+    # N1: im Spatial-CV-Fall auf dem vollen 153-Stationen-Pool fitten, genau wie
+    # train_dcrnn.py:868 und hpo_dcrnn.py:694. Vorher normierte die Auswertung
+    # lat/lon/alt mit den Statistiken der 102 Trainingsstationen des Folds, waehrend
+    # der Checkpoint mit denen aller 153 trainiert wurde. Gemessen verschiebt das die
+    # Hoehe der Zielstationen in spatial_fold3 um bis zu 2.6 Sigma (Streuung 252 statt
+    # 332 m), in fold1 und fold2 unter 0.2 Sigma. Koordinaten und Hoehe sind bei einem
+    # induktiven Modell immer bekannte Eingaben, keine Messung, daher keine Leckage.
+    # --test-mode bleibt beim Train-only-Fit: dort haengen die Teststationen an
+    # all_ids, ihre Aufnahme in den Fit waere echte Leckage.
+    stat_scaler.fit(raw_static if (val_start and not args.test_mode) else raw_static[:N_train])
     station_static_scaled = stat_scaler.transform(raw_static)
 
     # Absolute topographic node features, appended after lat/lon/alt — literal

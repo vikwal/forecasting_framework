@@ -27,6 +27,55 @@ from . import meteo
 from . import db_connector
 
 
+
+
+class EmptySplitError(ValueError):
+    """Eine Station deckt Trainings- oder Testzeitraum nicht ab.
+
+    Eigener Typ, damit ``tools.create_data_generator`` genau diesen Fall
+    ueberspringen kann, ohne echte Konfigurationsfehler mitzuverschlucken.
+    """
+
+
+def nwp_baseline_prefixes(value, default: str | None = None) -> list[str]:
+    """``params.nwp_baseline_col`` zu einer Liste von Spaltenpraefixen normalisieren.
+
+    Der Schluessel darf ein einzelner Spaltenname (eine Zielgroesse), ein Dict
+    ``{Zielgroesse: Spalte}`` (mehrere Zielgroessen) oder ``None`` sein. Ohne diese
+    Normalisierung behandeln die Konsumenten den Wert als String und brechen beim
+    Dict ab bzw. behalten nur eine der Baselinespalten.
+    """
+    if isinstance(value, dict):
+        out = [str(v) for v in value.values() if v]
+    elif isinstance(value, (list, tuple)):
+        out = [str(v) for v in value if v]
+    elif value:
+        out = [str(value)]
+    else:
+        out = []
+    if not out and default:
+        out = [default]
+    return list(dict.fromkeys(out))
+
+
+def get_target_cols(config: dict, default: str = 'power') -> List[str]:
+    """Zielspalten einer Config als Liste.
+
+    ``data.target_cols`` (Liste) hat Vorrang vor ``data.target_col`` (Einzelwert).
+    Mehrere Zielspalten führen zu Modellausgaben der Form
+    ``(n_samples, horizon, n_targets)``; bei genau einer Zielspalte bleibt die
+    bisherige Form ``(n_samples, horizon)`` erhalten, damit alle Single-Target-Pfade
+    unverändert weiterlaufen.
+    """
+    data_cfg = config.get('data', {}) if config else {}
+    cols = data_cfg.get('target_cols')
+    if cols:
+        if isinstance(cols, (list, tuple)):
+            return [str(c) for c in cols]
+        return [str(cols)]
+    return [str(data_cfg.get('target_col', default))]
+
+
 def _get_data_from_config_files(config: dict,
                                 freq: str,
                                 features: dict = None,
@@ -87,7 +136,10 @@ def _get_data_from_config_files(config: dict,
     use_parallel_db = icond2_source == 'database' and len(files) > 1
     n_db_workers = min(10, len(files))
 
-    _raw_station_mode = data_config.get('raw_station_source', False)
+    # data.use_case explizit ('wind' | 'solar'); ohne Angabe wird wie bisher aus dem
+    # Pfad geraten. Solar liest immer die rohen Station_<id>.parquet-Dateien.
+    _use_case = str(data_config.get('use_case', '')).lower()
+    _raw_station_mode = data_config.get('raw_station_source', False) or _use_case == 'solar'
 
     def _process_file(file_idx_file):
         file_idx, file = file_idx_file
@@ -114,10 +166,21 @@ def _get_data_from_config_files(config: dict,
                 logging.warning(f"Station {station_id} not found in assignments CSV. "
                                 f"Falling back to seed {file_config['params']['random_seed']}")
 
-            _is_wind = 'wind' in base_path.lower()
-            _is_pv = 'pv' in base_path.lower() or 'solar' in base_path.lower()
+            if _use_case:
+                _is_wind = _use_case == 'wind'
+                _is_solar = _use_case == 'solar'
+                _is_pv = _use_case == 'pv'
+            else:
+                _is_wind = 'wind' in base_path.lower()
+                _is_solar = False
+                _is_pv = 'pv' in base_path.lower() or 'solar' in base_path.lower()
 
-            if _is_wind:
+            if _is_solar:
+                from . import solar as _solar
+                df = _solar.preprocess_solar_icond2(path=file_path, config=file_config,
+                                                    freq=freq,
+                                                    features=features.copy() if features else None)
+            elif _is_wind:
                 if 'open-meteo' in config['data']['nwp_path']:
                     df = preprocess_synth_wind_openmeteo(path=file_path, config=file_config,
                                                          freq=freq, features=features.copy() if features else None,
@@ -297,15 +360,26 @@ def split_data(data: pd.DataFrame,
                train_start: pd.Timestamp = None,
                test_start: pd.Timestamp = None,
                test_end: pd.Timestamp = None,
-               t_0: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
+               t_0: int = 0,
+               train_end: pd.Timestamp = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Splits data into train and test sets.
+
+    Die vier Grenzen ``train_start``/``train_end``/``test_start``/``test_end`` legen
+    beide Zeitraeume unabhaengig fest. Wird ``train_end`` weggelassen, ergibt es sich
+    wie bisher aus ``test_start`` — Training laeuft dann unmittelbar bis zum Testbeginn.
+    Explizit gesetzt erlaubt es eine Luecke zwischen den Zeitraeumen, etwa um den
+    Lookback des ersten Testfensters nicht aus Trainingsdaten zu speisen.
     """
     df = data.copy()
     index = data.index
 
     # Split data into train and test sets
-    if test_start:
+    if train_end is not None and not pd.isna(train_end):
+        train_end = pd.Timestamp(train_end)
+        if not test_start:
+            test_start = train_end + pd.Timedelta(hours=0.25)
+    elif test_start:
         train_end = test_start - pd.Timedelta(hours=0.25)
     else:
         train_periods = int(len(df) * train_frac)-1
@@ -328,9 +402,12 @@ def split_data(data: pd.DataFrame,
         else:
             ts_train_start = data.index.get_level_values('starttime').min()
 
-        df_train = df[(df.index.get_level_values('starttime') < ts_test_start) &
+        # Trainingsende an ts_train_end, nicht an ts_test_start: ohne explizites
+        # train_end sind beide identisch (train_end = test_start - 15 min), mit
+        # explizitem train_end darf zwischen den Zeitraeumen eine Luecke bleiben.
+        df_train = df[(df.index.get_level_values('starttime') <= ts_train_end) &
                       (df.index.get_level_values('starttime') >= ts_train_start)]
-        df_test = df[(df.index.get_level_values('starttime') > ts_train_end) &
+        df_test = df[(df.index.get_level_values('starttime') >= ts_test_start) &
                      (df.index.get_level_values('starttime') <= ts_test_end)]
 
     else:
@@ -365,6 +442,15 @@ def pipeline(data: pd.DataFrame,
         _dbg.write(f'after_knn: {list(df.columns)} ecmwf={_ecmwf_after}\n')
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
 
+    # Multi-Target: data.target_cols hat Vorrang. Alle Aufrufer reichen ohnehin
+    # config['data']['target_col'] durch, die Ableitung aus der Config ist also
+    # verhaltensgleich und deckt zusätzlich den Mehrziel-Fall ab.
+    target_cols = get_target_cols(config, default=target_col)
+    if len(target_cols) > 1:
+        target_col = target_cols
+    elif target_cols:
+        target_col = target_cols[0]
+
     if config['model']['name'] in ('tft', 'tcn-tft'):
         #logging.debug(f'Features ready for prepare_data(): {df.columns.to_list()}')
         # wind_speed is deliberately NOT standardised (it used to be forced to True).
@@ -384,13 +470,15 @@ def pipeline(data: pd.DataFrame,
                                              static_cols=static_cols,
                                              train_frac=config['data']['train_frac'],
                                              train_start=pd.Timestamp(config['data'].get('train_start', None)),
+                                             train_end=pd.Timestamp(config['data'].get('train_end', None)),
                                              test_start=pd.Timestamp(config['data'].get('test_start', None)),
                                              test_end=pd.Timestamp(config['data'].get('test_end', None)),
                                              t_0=t_0,
                                              target_col=target_col,
                                              scale_target=scale_target,
                                              scaler_x=config.get('scaler_x', None),
-                                             scaler_y=config.get('scaler_y', None))
+                                             scaler_y=config.get('scaler_y', None),
+                                             nwp_baseline_col=config.get('params', {}).get('nwp_baseline_col'))
     elif config['model']['name'] == 'chronos':
         prepared_data = prepare_data_for_chronos2(
             data=df,
@@ -434,7 +522,7 @@ def pipeline(data: pd.DataFrame,
                                 horizon=config['model']['horizon'],
                                 lag_in_col=config['data']['lag_in_col'],
                                 target_col=new_col)
-                if new_col != target_col and new_col not in all_known_cols:
+                if new_col not in target_cols and new_col not in all_known_cols:
                     df.drop(new_col, axis=1, inplace=True, errors='ignore')
                     # MEMORY CLEANUP: Garbage collect after dropping columns
                     gc.collect()
@@ -450,6 +538,7 @@ def pipeline(data: pd.DataFrame,
                                      scale_y=scale_y,
                                      t_0=t_0,
                                      train_start=pd.Timestamp(config['data'].get('train_start', None), tz='UTC'),
+                                     train_end=pd.Timestamp(config['data'].get('train_end', None), tz='UTC'),
                                      test_start=pd.Timestamp(config['data'].get('test_start', None), tz='UTC'),
                                      test_end=pd.Timestamp(config['data'].get('test_end', None), tz='UTC'),
                                      target_col=target_col,
@@ -651,11 +740,16 @@ def prepare_data(data: pd.DataFrame,
                  target_col: str = 'power',
                  t_0: int = 0,
                  train_start: pd.Timestamp = None,
+                 train_end: pd.Timestamp = None,
                  test_start: pd.Timestamp = None,
                  test_end: pd.Timestamp = None,
                  seq2seq: bool = False,
                  scaler_x: StandardScaler = None,
                  scaler_y: StandardScaler = None):
+    # Multi-Target: target_col darf ein einzelner Name oder eine Liste sein.
+    target_cols = [target_col] if isinstance(target_col, str) else list(target_col)
+    n_targets = len(target_cols)
+
     df = data.copy()
     df.dropna(inplace=True)
     index = data.index
@@ -665,12 +759,14 @@ def prepare_data(data: pd.DataFrame,
         df = df.groupby(level='starttime').filter(
             lambda g: g.index.get_level_values('forecasttime').nunique() == 48
         )
-    target = df[[target_col]]
-    df.drop(target_col, axis=1, inplace=True)
+    target = df[target_cols]
+    df.drop(columns=target_cols, inplace=True)
 
     # Use helper function for splitting
-    df_train, df_test = split_data(df, train_frac, train_start, test_start, test_end, t_0)
-    target_train, target_test = split_data(target, train_frac, train_start, test_start, test_end, t_0)
+    df_train, df_test = split_data(df, train_frac, train_start, test_start, test_end, t_0,
+                                   train_end=train_end)
+    target_train, target_test = split_data(target, train_frac, train_start, test_start, test_end, t_0,
+                                           train_end=train_end)
 
     #logging.info(f"Training data range: {df_train.index.min()} to {df_train.index.max()} ({len(df_train)} rows)")
     #logging.info(f"Test data range:     {df_test.index.min()} to {df_test.index.max()} ({len(df_test)} rows)")
@@ -718,14 +814,21 @@ def prepare_data(data: pd.DataFrame,
     X_train = make_windows(data=X_train, seq_len=output_dim, step_size=step_size)
     X_test = make_windows(data=X_test, seq_len=output_dim, step_size=step_size)
 
-    y_train = make_windows(data=Y_train, seq_len=output_dim, step_size=step_size).reshape(-1, output_dim)
-    y_test = make_windows(data=Y_test, seq_len=output_dim, step_size=step_size).reshape(-1, output_dim)
+    # make_windows liefert (samples, n_targets, time) — wie bei X wird auf
+    # (samples, time, n_targets) transponiert. Ein einzelnes Ziel wird auf die
+    # historische Form (samples, time) reduziert, damit alle bestehenden
+    # Single-Target-Pfade unverändert bleiben.
+    y_train = make_windows(data=Y_train, seq_len=output_dim, step_size=step_size).transpose(0, 2, 1)
+    y_test = make_windows(data=Y_test, seq_len=output_dim, step_size=step_size).transpose(0, 2, 1)
+    if n_targets == 1:
+        y_train = y_train[:, :, 0]
+        y_test = y_test[:, :, 0]
 
     # FIXED: Transpose X arrays from (samples, features, time) to (samples, time, features) for Keras
     X_train = X_train.transpose(0, 2, 1)  # (samples, features, time) -> (samples, time, features)
     X_test = X_test.transpose(0, 2, 1)    # (samples, features, time) -> (samples, time, features)
 
-    if seq2seq:
+    if seq2seq and n_targets == 1:
         y_train = y_train.reshape(-1, output_dim, 1)
         y_test = y_test.reshape(-1, output_dim, 1)
     results = {}
@@ -3636,12 +3739,14 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          train_frac: float = 0.75,
                          target_col: str = 'power',
                          train_start: pd.Timestamp = None,
+                         train_end: pd.Timestamp = None,
                          test_start: pd.Timestamp = None,
                          test_end: pd.Timestamp = None,
                          t_0: int = 0,
                          scale_target: bool = False,
                          scaler_x: StandardScaler = None,
-                         scaler_y: StandardScaler = None):
+                         scaler_y: StandardScaler = None,
+                         nwp_baseline_col: str = None):
     """
     Prepares data for a Temporal Fusion Transformer, creating a lagged target input.
     Args:
@@ -3663,6 +3768,12 @@ def prepare_data_for_tft(data: pd.DataFrame,
                         X_static_test, X_known_test, X_observed_test, y_test,
                         ...) plus optionally scaler_dict, train_indices, test_indices
     """
+    # Multi-Target: target_col darf ein einzelner Name oder eine Liste sein.
+    # target_cols wird intern durchgängig verwendet; target_col bleibt der Einzelname
+    # (bzw. der erste), damit Logmeldungen lesbar bleiben.
+    target_cols = [target_col] if isinstance(target_col, str) else list(target_col)
+    target_col = target_cols[0]
+
     # Prepare feature columns for TFT
     known_future_cols, observed_past_cols = prepare_features_for_tft(
         cols=data.columns.tolist(),
@@ -3693,7 +3804,20 @@ def prepare_data_for_tft(data: pd.DataFrame,
         test_start = test_start_adjusted
 
     # Use helper function for splitting which handles MultiIndex correctly
-    train_df, test_df = split_data(df, train_frac, train_start, test_start, test_end, t_0)
+    train_df, test_df = split_data(df, train_frac, train_start, test_start, test_end, t_0,
+                                   train_end=train_end)
+
+    # Ein leerer Split ist bei Solar ein Datenbefund, kein Programmfehler: 27 der 93
+    # Stationen enden vorzeitig (docs/preprocess_icond2_solar.md 5.1), und nach dem
+    # Verwerfen unvollstaendiger NWP-Laeufe plus dropna() kann eine Station im
+    # Testfenster leer sein. Ohne diese Pruefung faellt das erst tief in
+    # get_static_features als "IndexError: index 0 is out of bounds" auf.
+    if len(test_df) == 0 or len(train_df) == 0:
+        raise EmptySplitError(
+            f"Leerer Datensplit: train={len(train_df)} Zeilen, test={len(test_df)} Zeilen "
+            f"(train_start={train_start}, test_start={test_start}, test_end={test_end}). "
+            "Die Station deckt einen der beiden Zeitraeume nicht ab."
+        )
 
     #logging.info(f"Training data range: {train_df.index.min()} to {train_df.index.max()} ({len(train_df)} rows)")
     #logging.info(f"Test data range:     {test_df.index.min()} to {test_df.index.max()} ({len(test_df)} rows)")
@@ -3710,7 +3834,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
         try:
             # Use feature_cols (the columns used to fit the scaler) to find static feature indices
             # feature_cols is defined later at line 1815, so we compute it here too
-            scaler_feature_cols = [c for c in train_df.columns if c != target_col]
+            scaler_feature_cols = [c for c in train_df.columns if c not in target_cols]
             static_features_in_scaler = [col for col in static_cols if col in scaler_feature_cols]
 
             if static_features_in_scaler:
@@ -3743,21 +3867,26 @@ def prepare_data_for_tft(data: pd.DataFrame,
                         f"Static features will NOT be scaled! This may cause poor model performance.")
 
     # --- Extract raw NWP baseline before scaling (for Skill_NWP calculation) ---
-    # Priority: wind_speed_h10_1 (nearest grid point) > wind_speed_h10 (no suffix)
+    # Prefix per Use-Case: Wind vergleicht gegen die 10-m-Windgeschwindigkeit,
+    # Solar gegen die prognostizierte Globalstrahlung. Priorität innerhalb des
+    # Prefixes: exakter Name mit '_1' (nächster Gitterpunkt) > ohne Suffix > beliebig.
+    # nwp_baseline_col darf ein Dict {Zielgroesse: Spalte} sein (Multi-Target).
+    # Diese Extraktion braucht genau eine Spalte — die erste genuegt, weil eval.py
+    # die Baseline je Zielgroesse ohnehin direkt aus den Datenspalten zieht.
+    _prefixes = nwp_baseline_prefixes(nwp_baseline_col, 'wind_speed_h10')
+    nwp_baseline_prefix = _prefixes[0]
     nwp_raw_col = None
     if known_future_cols:
-        for col in known_future_cols:
-            if col == 'wind_speed_h10_1':
-                nwp_raw_col = col
+        for candidate in (nwp_baseline_prefix,
+                          f'{nwp_baseline_prefix}_1',
+                          nwp_baseline_prefix.rsplit('_', 1)[0]):
+            if candidate in known_future_cols:
+                nwp_raw_col = candidate
                 break
         if nwp_raw_col is None:
+            base = nwp_baseline_prefix.rsplit('_', 1)[0] if nwp_baseline_prefix[-1].isdigit() else nwp_baseline_prefix
             for col in known_future_cols:
-                if col == 'wind_speed_h10':
-                    nwp_raw_col = col
-                    break
-        if nwp_raw_col is None:
-            for col in known_future_cols:
-                if col.startswith('wind_speed_h10'):
+                if col.startswith(base):
                     nwp_raw_col = col
                     break
 
@@ -3780,7 +3909,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
 
         # Identify all feature columns (everything except target)
         # Note: train_df/test_df might contain target_col
-        feature_cols = [c for c in train_df.columns if c != target_col]
+        feature_cols = [c for c in train_df.columns if c not in target_cols]
 
         # scaler_x is fitted once across all training stations (data_cache.py::
         # _fit_global_scaler_x) and reused for every station including the val_files
@@ -3818,9 +3947,16 @@ def prepare_data_for_tft(data: pd.DataFrame,
         # Safe with respect to the target itself: y is read from the UNSCALED train_df /
         # test_df further down, not from these scaled copies.
         _tgt_feat_scaler = getattr(scaler_x, '_ff_target_feature_scaler', None)
-        if _tgt_feat_scaler is not None and target_col in train_df.columns:
-            train_df_scaled[target_col] = _tgt_feat_scaler.transform(train_df[[target_col]].values)
-            test_df_scaled[target_col] = _tgt_feat_scaler.transform(test_df[[target_col]].values)
+        _tgt_scaler_cols = getattr(scaler_x, '_ff_target_feature_cols', target_cols[:1])
+        _tgt_present = [c for c in _tgt_scaler_cols if c in train_df.columns]
+        if _tgt_feat_scaler is not None and _tgt_present:
+            if _tgt_present != list(_tgt_scaler_cols):
+                raise ValueError(
+                    "The target-as-feature scaler was fitted on columns "
+                    f"{list(_tgt_scaler_cols)}, but this station provides {_tgt_present}."
+                )
+            train_df_scaled[_tgt_scaler_cols] = _tgt_feat_scaler.transform(train_df[_tgt_scaler_cols].values)
+            test_df_scaled[_tgt_scaler_cols] = _tgt_feat_scaler.transform(test_df[_tgt_scaler_cols].values)
 
         # Now extract the specific columns from the scaled dataframes
         if known_future_cols:
@@ -3844,8 +3980,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
                                                                                         test_df[observed_past_cols].values,
                                                                                         StandardScaler)
     # Scale Target Variable (y) Separately
-    target_train_raw = train_df[[target_col]].values
-    target_test_raw = test_df[[target_col]].values
+    target_train_raw = train_df[target_cols].values
+    target_test_raw = test_df[target_cols].values
     if scale_target:
         target_train_scaled, target_test_scaled, target_scaler = apply_scaling(
             target_train_raw, target_test_raw,
@@ -4080,6 +4216,20 @@ def create_tft_sequences(known_data: np.ndarray,
             # E.g. history_len=96, future_len=48 → 2 past runs needed.
             n_past_runs = math.ceil(history_len / future_len)
 
+            # Schrittweite aus den Daten ableiten. history_len/future_len zaehlen
+            # SCHRITTE, nicht Stunden — bis Aug 2026 wurden sie hier als Stunden
+            # verrechnet. Bei Wind faellt das nicht auf (freq 1h, ein Schritt = eine
+            # Stunde), bei Solar mit freq 30min spannte das Beobachtungsfenster
+            # 96 h statt 48 h und wurde stuendlich statt halbstuendlich abgetastet.
+            # Weil 96 stuendliche Stempel ueber 96 h ebenfalls 96 Stueck sind, lief
+            # die Laengenpruefung unten glatt durch und der Fehler blieb stumm.
+            _unique_ts = timestamps_all.unique().sort_values()
+            step = pd.Series(_unique_ts).diff().median() if len(_unique_ts) > 1 else pd.NaT
+            if pd.isna(step) or step <= pd.Timedelta(0):
+                step = pd.Timedelta(hours=1)
+            logging.debug("NWP-Windowing: Schrittweite %s, history_len=%d Schritte (%s)",
+                          step, history_len, history_len * step)
+
             # Process each forecast run
             for current_start in unique_starttimes:
                 # Get current run indices (needed for target + observed timestamp anchor)
@@ -4099,7 +4249,7 @@ def create_tft_sequences(known_data: np.ndarray,
                         # e.g. 3h) picked the run from 3 hours ago, whose lead times overlap
                         # the *future* instead of the history, and additionally dropped every
                         # day's first run (no predecessor 3h earlier) — ~25% of all windows.
-                        past_start = current_start - pd.Timedelta(hours=k * future_len)
+                        past_start = current_start - k * future_len * step
                         past_indices = starttime_to_indices.get(past_start)
                         if past_indices is None or len(past_indices) != future_len:
                             valid = False
@@ -4122,14 +4272,14 @@ def create_tft_sequences(known_data: np.ndarray,
                     # Get the timestamp range we need
                     forecast_start_time = timestamps_all[current_indices[0]]  # First timestamp of current forecast
                     observed_end_time = forecast_start_time
-                    observed_start_time = observed_end_time - pd.Timedelta(hours=history_len)
+                    observed_start_time = observed_end_time - history_len * step
 
-                    # Find timestamps in range using pre-computed mapping
-                    # Generate hourly timestamps for the range
+                    # Find timestamps in range using pre-computed mapping.
+                    # Raster = Schrittweite der Daten, nicht fest stuendlich.
                     expected_timestamps = pd.date_range(
                         start=observed_start_time,
                         end=observed_end_time,
-                        freq='1H',
+                        freq=step,
                         inclusive='left'  # Exclude end
                     )
 
@@ -4171,7 +4321,10 @@ def create_tft_sequences(known_data: np.ndarray,
                         X_observed_list.pop()
                     continue
 
-                target_window = target_data[current_indices].flatten()
+                # Shape (future_len, n_targets). Multi-Target bleibt hier 2D; die
+                # Singleton-Dimension wird erst beim Zusammenbau entfernt, damit die
+                # bisherige (n_samples, future_len)-Form bei einem Ziel erhalten bleibt.
+                target_window = target_data[current_indices]
                 y_list.append(target_window)
 
                 # Use current starttime as the index
@@ -4202,7 +4355,7 @@ def create_tft_sequences(known_data: np.ndarray,
                 if known_data is not None:
                     known_future_window = known_data[i : i + total_len]
                     X_known_list.append(known_future_window)
-                target_window = target_data[i + history_len : i + total_len].flatten()
+                target_window = target_data[i + history_len : i + total_len]
                 y_list.append(target_window)
                 index_positions.append(i + history_len)
 
@@ -4213,9 +4366,15 @@ def create_tft_sequences(known_data: np.ndarray,
         X_observed_arr = (np.zeros((n_samples, history_len, 0))
                           if not X_observed_list
                           else np.array(X_observed_list))
+        y_arr = np.array(y_list)
+        # (n_samples, future_len, n_targets) → bei einem Ziel auf die historische
+        # Form (n_samples, future_len) reduzieren, damit alle bestehenden
+        # Single-Target-Pfade (Modelle, Metriken, y_to_df) unverändert funktionieren.
+        if y_arr.ndim == 3 and y_arr.shape[-1] == 1:
+            y_arr = y_arr[:, :, 0]
         return (np.array(X_known_list),
                 X_observed_arr,
-                np.array(y_list),
+                y_arr,
                 index_list)
 
 

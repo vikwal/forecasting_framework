@@ -64,8 +64,17 @@ def get_y(X_test: Any,
           y_test: np.ndarray,
           model: nn.Module,
           scaler_y: StandardScaler = None,
-          device: str = 'cpu') -> Tuple[np.ndarray, np.ndarray]:
-    """Get predictions from PyTorch model"""
+          device: str = 'cpu',
+          clip_negative: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    """Get predictions from PyTorch model.
+
+    clip_negative : bool
+        Vorhersagen bei 0 abschneiden. Richtig fuer Bestrahlungsstaerken und
+        Leistungen, die nicht negativ werden koennen. **Falsch** fuer ein
+        Residuum-Ziel (``params.target_transform: 'nwp_residual'``): dort ist rund
+        die Haelfte der Zielwerte negativ, und das Clipping wuerde die
+        Vorhersageverteilung einseitig abschneiden.
+    """
     model.eval()
 
     with torch.no_grad():
@@ -87,20 +96,39 @@ def get_y(X_test: Any,
 
         y_pred = y_pred.cpu().numpy()
 
-    # Reshape if needed
-    y_pred = y_pred.reshape(-1, y_test.shape[-1])
+    # Reshape if needed. Bei Multi-Target ist y_test (n, horizon, n_targets); dann
+    # muss die Vorhersage genau diese Form annehmen, nicht auf 2D plattgedrückt werden.
+    multi_target = y_test.ndim == 3
+    if y_pred.size == y_test.size:
+        y_pred = y_pred.reshape(y_test.shape)
+    else:
+        y_pred = y_pred.reshape(-1, y_test.shape[-1])
 
     if scaler_y:
-        y_pred = scaler_y.inverse_transform(y_pred)
-        y_true = scaler_y.inverse_transform(y_test)
+        y_pred = _inverse_transform_y(scaler_y, y_pred)
+        y_true = _inverse_transform_y(scaler_y, y_test)
     else:
         y_true = y_test
 
-    if len(y_pred.shape) == 3:  # if seq2seq output
+    if not multi_target and y_pred.ndim == 3:  # if seq2seq output
         y_pred = y_pred[:, :, -1]  # take last output from seq
 
-    y_pred[y_pred < 0] = 0
+    if clip_negative:
+        y_pred[y_pred < 0] = 0
     return y_true, y_pred
+
+
+def _inverse_transform_y(scaler_y: StandardScaler, y: np.ndarray) -> np.ndarray:
+    """inverse_transform für (n, horizon) und (n, horizon, n_targets).
+
+    Der Scaler wurde auf den Zielspalten gefittet, hat also n_targets Merkmale.
+    Für 3D-Arrays wird deshalb auf (n*horizon, n_targets) umgeformt; im
+    Single-Target-Fall bleibt die bisherige Broadcast-Semantik erhalten.
+    """
+    if y.ndim == 3:
+        n, horizon, n_targets = y.shape
+        return scaler_y.inverse_transform(y.reshape(-1, n_targets)).reshape(n, horizon, n_targets)
+    return scaler_y.inverse_transform(y)
 
 
 def get_y_chronos2(X_test: dict,
@@ -550,6 +578,15 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     weight_decay = hyperparameters.get('weight_decay', 0.0)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     quantiles = config['model'].get('tft', {}).get('quantiles', None)
+    _n_targets = len(config.get('data', {}).get('target_cols') or [None])
+    if quantiles and _n_targets > 1:
+        # Die Ausgabe wäre (batch, horizon, n_targets, n_quantiles); _pinball_loss und
+        # die Median-Auswahl unten sind auf drei Dimensionen ausgelegt. Lieber hier
+        # klar scheitern als still das falsche Quantil auswerten.
+        raise NotImplementedError(
+            "Quantil-Vorhersage (model.tft.quantiles) ist noch nicht mit mehreren "
+            f"Zielspalten kombinierbar (data.target_cols hat {_n_targets} Einträge)."
+        )
     if quantiles:
         criterion = lambda pred, tgt: _pinball_loss(pred, tgt, quantiles)
         median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
@@ -558,7 +595,55 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
         median_idx = None
 
     # Training loop
-    epochs = hyperparameters.get('epochs', 200)
+    # model.epochs aus der Config als Rueckfallebene. get_hyperparameters legt
+    # 'epochs' bewusst nicht ins Dict (hpo.py:743 auskommentiert) — vorher stand hier
+    # nur die 200, womit der Config-Schluessel wirkungslos war und jeder CL-Lauf
+    # 200 Epochen fuhr, begrenzt allein durch Early Stopping.
+    epochs = hyperparameters.get('epochs') or config.get('model', {}).get('epochs') or 200
+    logging.info("Training ueber max. %d Epochen (Quelle: %s)", epochs,
+                 'hyperparameters' if hyperparameters.get('epochs')
+                 else 'config.model.epochs' if config.get('model', {}).get('epochs')
+                 else 'Default 200')
+
+    # Lernraten-Scheduler, optional. Default None heisst: konstante Lernrate, also
+    # exakt das bisherige Verhalten — ein Schluessel, den keine bestehende Config
+    # setzt, darf frühere TFT-Ergebnisse nicht rueckwirkend unvergleichbar machen.
+    # Diese Schleife teilen sich Wind und Solar, CL wie Bias-Correction.
+    #
+    # Semantik bewusst identisch zu den Graph-Modellen (geostatistics/train_mtgnn.py:719,
+    # train_wavenet.py:698), damit derselbe Config-Schluessel ueberall dasselbe tut.
+    # Einziger Unterschied: dort ist 'cosine' der Default, hier None.
+    scheduler_type = config['model'].get('scheduler')
+    scheduler = None
+    if scheduler_type == 'cosine':
+        # T_max getrennt vom Epochen-Cap einstellbar, weil beide auseinanderfallen,
+        # sobald Early Stopping greift: model.epochs ist mit 100 eine Obergrenze, die
+        # Laeufe enden aber nach 13-16 Epochen. Mit T_max=100 durchliefe die Lernrate
+        # nur den flachen Anfang der Kosinuskurve und faellt bis Epoche 16 gerade um
+        # 5 % (5.00e-4 -> 4.73e-4) — der Scheduler waere praktisch wirkungslos.
+        # scheduler_t_max sollte daher ungefaehr auf der erwarteten Stopp-Epoche liegen.
+        t_max = config['model'].get('scheduler_t_max') or epochs
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max)
+    elif scheduler_type == 'plateau':
+        if val_loader is None:
+            raise ValueError(
+                "model.scheduler: 'plateau' braucht Validierungsdaten — ohne "
+                "val_loader gibt es keine Groesse, auf die er reagieren koennte."
+            )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', patience=5, factor=0.5,
+        )
+    elif scheduler_type is not None:
+        raise ValueError(
+            f"Unbekannter model.scheduler: {scheduler_type!r} "
+            "(erlaubt: 'cosine', 'plateau', oder weglassen fuer konstante Lernrate)"
+        )
+    if scheduler is not None:
+        logging.info("LR-Scheduler '%s' aktiv, Startlernrate %g%s",
+                     scheduler_type, lr,
+                     f", T_max {config['model'].get('scheduler_t_max') or epochs}"
+                     if scheduler_type == 'cosine' else '')
+
     history = {
         'train_loss': [], 'val_loss': [],
         'train_rmse': [], 'val_rmse': [],
@@ -747,29 +832,51 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                     f"Train: MSE={train_mse:.6f}, RMSE={train_rmse:.6f}, R²={train_r2:.4f}"
                 )
 
+        # Am Ende der Epoche, nach der Validierung: 'plateau' braucht val_rmse.
+        # Bricht Early Stopping vorher ab, wird dieser Schritt uebersprungen — dann
+        # endet das Training ohnehin, und die Lernrate der naechsten Epoche ist
+        # gegenstandslos.
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_rmse)
+            else:
+                scheduler.step()
+
     return history, model
 
 
 def handle_freq(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Adjust config based on time series frequency - framework agnostic"""
+    """Adjust config based on time series frequency - framework agnostic.
+
+    ``lookback``/``horizon``/``output_dim`` sind **Schrittzahlen**, keine Stunden —
+    bei ``freq: '1h'`` bedeutet 48 also 48 h, bei ``'30min'`` 24 h.  Der Horizont
+    muss beim Wechsel der Frequenz in der Config mitgezogen werden.
+
+    Früher lag hier ein Sonderfall ``if freq == '15min': ... * 4``, der die Werte als
+    Stundenzahlen interpretierte — aber nur für genau diese eine Frequenz.  Mit
+    ``'30min'`` oder ``'10min'`` (Solar, ICON-D2-SL ist viertelstündlich) hätte das
+    stillschweigend drei verschiedene Konventionen im selben Repo bedeutet: 15min
+    hochskaliert, alles andere nicht.  Keine Config im Repo nutzte den Zweig.
+    """
     freq = config['data']['freq']
     lookback = config['model']['lookback']
-    horizon = config['model']['horizon']
     output_dim = config['model']['output_dim']
-
-    if freq == '15min':
-        if not output_dim == 1:
-            output_dim = output_dim * 4
-        horizon = horizon * 4
-        lookback = lookback * 4
+    horizon = config['model']['horizon']
 
     if not output_dim == 1:
         horizon = output_dim
 
-    config['data']['freq'] = freq
     config['model']['lookback'] = lookback
     config['model']['horizon'] = horizon
     config['model']['output_dim'] = output_dim
+
+    try:
+        span_h = horizon * pd.Timedelta(freq) / pd.Timedelta('1h')
+        hist_h = lookback * pd.Timedelta(freq) / pd.Timedelta('1h')
+        logging.info("freq=%s → Lookback %d Schritte (%.1f h), Horizont %d Schritte (%.1f h)",
+                     freq, lookback, hist_h, horizon, span_h)
+    except (ValueError, TypeError):
+        pass
 
     return config
 
@@ -797,16 +904,24 @@ def create_data_generator(dfs, config, features, scaler_x=None, scaler_y=None):
     if scaler_y:
         config['scaler_y'] = scaler_y
 
+    skipped = []
     for key, df in dfs.items():
         logging.debug(f'Processing {key} in generator.')
-        prepared_data, _ = preprocessing.pipeline(
-            data=df,
-            config=config,
-            known_cols=features['known'],
-            observed_cols=features['observed'],
-            static_cols=features['static'],
-            target_col=config['data']['target_col']
-        )
+        try:
+            prepared_data, _ = preprocessing.pipeline(
+                data=df,
+                config=config,
+                known_cols=features['known'],
+                observed_cols=features['observed'],
+                static_cols=features['static'],
+                target_col=preprocessing.get_target_cols(config)[0]
+            )
+        except preprocessing.EmptySplitError as exc:
+            # Eine Station ohne Daten im Trainings- oder Testfenster darf den ganzen
+            # Lauf nicht kippen — bei Solar enden 27 der 93 Reihen vorzeitig.
+            skipped.append(key)
+            logging.warning("Station %s uebersprungen: %s", key, exc)
+            continue
 
         yield {
             'key': key,
@@ -822,6 +937,12 @@ def create_data_generator(dfs, config, features, scaler_x=None, scaler_y=None):
         del prepared_data
         del df
         gc.collect()
+
+    if skipped:
+        logging.warning(
+            "%d von %d Stationen uebersprungen (kein Trainings- oder Testfenster): %s",
+            len(skipped), len(dfs), sorted(os.path.basename(str(k)) for k in skipped)
+        )
 
 
 def combine_datasets_efficiently(data_generator):
