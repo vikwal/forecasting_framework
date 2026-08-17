@@ -839,3 +839,108 @@ Geprüft, bevor dort etwas gerechnet wurde:
   (fold1 `b9409aec8f5a8763`, fold2 `13fa75321a554108`, fold3 `03bc05381938c4df`).
 - l1 und ws sehen **dieselbe** Datei-Ablage: l1s IP ist 10.166.32.238, ws mountet
   `10.166.32.238:/mnt/nvme1`. Der Unterschied kam nicht vom Host, sondern vom Zeitpunkt.
+
+---
+
+## 13. Retrains geprüft, dcrnn_base neu mit 200 Epochen, unbeaufsichtigte Auswertung
+
+### 13.1 Prüfung der neun Retrains: bestanden
+
+Alle neun Läufe auf dem einheitlichen Datenstand (Fingerabdruck 723 überall):
+
+| Arm | Trial | val-RMSE fold1/2/3 | Epochen | Laufpaare |
+|---|---|---|---|---|
+| `dcrnn` (GRID) | #192 in allen drei | 1.1326 / 1.2344 / 1.2206 | 20 / 17 / 23 von 200 | 1473/1460 |
+| `dcrnn_base` | #111 in allen drei | 1.1977 / 1.2547 / 1.3062 | **50/50** / 21 / 42 von 50 | 1473/1460 |
+| `dcrnn_idw_alt` | #109 in allen drei | 1.1407 / 1.1811 / 1.1835 | 24 / 32 / 41 von 200 | 1473/1460 |
+
+Kein Fehlermuster, kein NaN in Verlusten, kein NaN-Tensor in den Checkpoints, alle Modelle
+korrekt benannt und abgelegt, alle pkl vorhanden. Die befürchtete Trial-Divergenz bei
+`dcrnn_base` ist ausgeblieben.
+
+### 13.2 dcrnn_base wird mit 200 Epochen wiederholt
+
+`dcrnn_base` fold1 lief **50 von 50** Epochen, hat die Obergrenze also erreicht statt früh
+zu stoppen. Die Config trug als einzige `max_epochs: 50`, während die übrigen Arme 200
+haben — der Arm war damit gegenüber den anderen benachteiligt, was in einer
+Ablationsleiter genau das Falsche ist. Auf Entscheidung des Nutzers auf **200** gesetzt
+(`configs/dcrnn/config_wind_dcrnn_base_fold{1,2,3}.yaml:104`, `patience: 10` unverändert,
+Sicherungen unter `/tmp/config_wind_dcrnn_base_fold*.yaml.bak-50ep`). Die drei
+50-Epochen-Läufe liegen samt Logs, Modellen und pkl unter
+`archiv/retrain_base_50epochen_20260817/`.
+
+### 13.3 Auswertungsaufruf
+
+```bash
+python geostatistics/get_test_results_dcrnn.py \
+    -m wind_<arm>_fold<N>_dcrnn_retrain_fold<N> \
+    -c configs/dcrnn/config_wind_<arm>_fold<N>.yaml \
+    --pkl results/<stem>_<timestamp>.pkl \
+    --raw-out-name retrain_<arm>_fold<N>
+```
+
+Bewusst **`--pkl` statt `--hpo-study auto`**: das pkl trägt die Config so, wie trainiert
+wurde (inklusive der HPO-Überschreibungen), und ist eingefroren. `--hpo-study auto` würde
+den jeweils aktuellen Optuna-Bestwert ziehen und könnte die Architektur gegenüber dem
+Checkpoint verschieben, sobald ein neuer Trial gewinnt. **Kein `--test-mode`**, also
+Entwicklungsmodus mit den 51 nie gesehenen Zielstationen — genau der Pfad, für den N1
+gefixt wurde.
+
+Erster Lauf zur Kontrolle (`dcrnn` fold1) sauber durch, Fenster bestätigt
+(`Evaluation period: 2024-08-01 .. 2025-08-01 (mode=dev)`), Ergebnis
+`R²=0.621, RMSE=1.073 m/s, MAE=0.830, Skill_NWP=0.148`. Ausgaben je Lauf:
+`data/test_results/retrain_<arm>_fold<N>.csv` und
+`data/raw_preds/retrain_<arm>_fold<N>_raw.parquet`.
+
+### 13.4 Was unbeaufsichtigt läuft
+
+`~/pipeline.sh <REPO> <GPU> <schritt> …` arbeitet Schritte sequenziell ab
+(`train:<arm>:<fold>` oder `eval:<arm>:<fold>`), protokolliert nach
+`logs/pipeline_gpu<G>.log` und macht bei einem Fehlschlag mit dem nächsten Schritt
+weiter, statt die ganze Kette abzubrechen.
+
+| Host | GPU | Schritte |
+|---|---|---|
+| `ws` | 0 | eval `dcrnn` fold2, fold3 |
+| `ws` | 1 | train `dcrnn_base` fold1–3 (200 Ep.), danach eval fold1–3 |
+| `l1` | 6 | eval `dcrnn_idw_alt` fold1–3 |
+
+**Regel, aus Schaden gelernt:** `run_retrain.sh`, `run_eval.sh` und `pipeline.sh` werden
+nicht angefasst, solange Jobs laufen. Bash liest Skriptdateien fortlaufend; eine Änderung
+im Flug hat am 2026-08-17 zwei Läufe dazu gebracht, das Training ein zweites Mal zu
+starten (§12.3).
+
+### 13.5 Noch offen: die Filterung
+
+`get_test_results_dcrnn.py` filtert **nicht**. Es schreibt die Ergebnis-CSV und die
+Rohvorhersagen; die Papierkonvention „per Station und gefiltert" (imputierte Zielstunden
+ausgeschlossen, per Station über die drei Folds gemittelt) ist ein nachgelagerter
+Schritt. Vorbild ist `docs/baselines_verification_results.md` §4.1 und das Skript
+`archiv/baselines_verification/compute_filtered_mos.py`. Solange dieser Schritt nicht
+angewandt ist, sind die Zahlen aus §13.3 **ungefiltert** und nicht mit den Referenzen
+(ICON-D2 1.304, Persistenz 2.240, MOS-local 0.9452, MOS-regional 1.1603, TFT base 1.186)
+vergleichbar.
+
+### 13.6 tft_sp_base läuft wieder
+
+Kein Defekt. Die Studie war seit dem 2026-08-17 09:03 schlicht **unbesetzt**; die letzte
+Logzeile stammt von dort. Der Fehlschlag an jenem Morgen war der letzte Nachhall des
+Vorfalls vom 08-12 (leere Spalten in neu erzeugten Station-Parquets): der Lauf lud Fold 1
+aus dem Cache-Eintrag `44bb6ba8…` vom 08-12 04:26, geschrieben 20 Minuten bevor die
+Parquets um 04:46 korrigiert wurden.
+
+Nachgewiesen, dass heute nichts kaputt ist: Nachbau mit exakt den Parametern des
+gescheiterten Trials (`grid_points=4, grid_ecmwf=1, stations=3`) auf **Fold 2**, wo er
+abbrach, liefert 206 610 Trainingszeilen. Ein am 2026-08-17 21:15 gestarteter Worker
+(l1, GPU 3, Screen `hpo_tft_sp_base_n1`) ist über die kritische Stelle hinaus:
+`Fitted global scaler_x on 102 training stations / 6973543 rows / 25 feature columns`,
+**null** Stationen ohne Trainingszeilen — und das mit demselben Cache-Eintrag.
+
+Dafür wurde genau **ein** `mtgnn_nwp_hist`-Worker zum Auslaufen markiert
+(`.hpo_stop_n3` auf l1; Suffix `n3` wird dort nur von dieser Studie benutzt, die
+Stop-Datei trifft also keinen anderen Arm).
+
+Meine frühere Darstellung, es habe eine „CSV-auf-Parquet-Umstellung" gegeben, war falsch:
+es waren durchgehend Parquets. `preprocessing.py:95` probiert zuerst
+`Station_<id>.parquet`; der Schlüssel `synth_<id>.csv` in `preprocessing.py:155/167` ist
+nur eine feste Beschriftung, kein Dateiname.
