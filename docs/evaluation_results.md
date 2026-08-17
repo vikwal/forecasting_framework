@@ -510,3 +510,50 @@ Zwei der drei Bestenauswahlen sind endgültig, eine noch nicht:
 Bei `dcrnn_base` ist vor dem Retrain erneut abzufragen, ob #135 oder #136 den Wert
 1.2242 unterbieten. Der Abstand zu Platz zwei ist mit 1.2242 gegen 1.2326 klein genug,
 dass ein neuer Trial die Auswahl kippen kann.
+
+### 9.5 Weitere Entscheidungen
+
+| Frage | Entscheidung |
+|---|---|
+| FRAGE 3, acht Tage nachexportieren | **Nein.** Datenstand bleibt 2909 Laufpaare, je Tabelle zu vermerken. Trials von vor dem 2026-08-17 bleiben auf 2933, die Inkonsistenz von 0.82 % wird in Kauf genommen. |
+| FRAGE 4, TFT-Spatial | **Nur `tft_sp_hist`** (101 Trials) kommt in die Auswertung, vergleichbar mit den DCRNN-Ablationsarmen. `tft_sp_base` (53 Trials, Ladepfad seit 2026-08-12 kaputt) bleibt draußen, mit Begründung im Text. |
+| Einordnung der hist-Arme | **Getrennte Tabellenblöcke.** Arme ohne Zielstationsmessung und `*_nwp_hist`-Arme in getrennten Blöcken. MOS-local (0.9452) wird nur im ersten Block als transduktive Obergrenze ausgewiesen. |
+| Commit | **Nur der Wind-Anteil**, siehe §9.6. |
+
+Folge für §3b: die Tabelle in §3.4 zu `tft_sp_base` bleibt als Diagnose stehen, weil sie
+den Fall „Wichtigkeit ohne monotone Wirkung" belegt, aber die Studie geht nicht in die
+Ergebnistabellen ein.
+
+### 9.6 Commit e15d778
+
+Branch `fix/mtgnn-topo-static-dim`, **nicht** gepusht. 22 Dateien, der Codestand, mit dem
+die Retrains gerechnet werden.
+
+Ein sauberer Schnitt allein nach Wind gegen Solar war **nicht möglich**, und das ist
+selbst ein Befund: der Solar-Umbau hat den Wind-Pfad von Solar-Modulen abhängig gemacht.
+
+- `geostatistics/shared/resolution.py` ist eine **neue, bisher unversionierte** Datei,
+  die `hpo_dcrnn.py` auf Modulebene importiert (`freq_to_hours`). Ohne sie ist der
+  Wind-Code auf einem frischen Checkout nicht einmal importierbar.
+- `utils/solar.py` ist ebenfalls neu und wird von `train_stgnn2.py` im **Wind-Pfad** auf
+  Modulebene importiert (`infer_sample_seconds`, `resample_interval_mean`). Sie musste
+  daher mit in den Commit.
+- `utils/eval.py` und `utils/preprocessing.py` tragen Wind- und Solaränderungen in
+  denselben Dateien. Eine Trennung ginge nur hunkweise und ist nicht ohne Risiko, also
+  sind sie ganz drin.
+
+Bewusst **nicht** committet: `geostatistics/solar_preprocessing.py`,
+`utils/solar_ecmwf.py`, `configs/solar_*`, `configs/*config_solar_*`,
+`scripts/run_solar_*`, `scripts/launch_solar_*`, die Solar-Dokumente und `CLAUDE.md`.
+`solar_ecmwf.py` und `solar_preprocessing.py` werden nur **lazy** innerhalb von
+Funktionen importiert (`utils/solar.py:1368`, `train_dcrnn.py:682`), der Wind-Pfad
+braucht sie nicht. Nach dem Commit sind noch 40 Einträge uncommittet, im Kern die
+Solar-Arbeit.
+
+Ebenfalls bewusst nicht committet: die `.hpo_stop_*`-Dateien. Sie sind Betriebszustand,
+und in einem anderen Checkout würden sie dort Worker stilllegen. Vor dem Commit geprüft,
+dass keine davon in der Staging-Area lag.
+
+**Offen:** `l1` und `ws` tragen weiter den älteren, uncommitteten Stand (§5). Für die
+Retrains ist das unerheblich, solange sie auf `l2` laufen. Wer sie auf `l1` rechnet, muss
+den Stand vorher gleichziehen.
