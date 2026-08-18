@@ -944,3 +944,95 @@ Meine frühere Darstellung, es habe eine „CSV-auf-Parquet-Umstellung" gegeben,
 es waren durchgehend Parquets. `preprocessing.py:95` probiert zuerst
 `Station_<id>.parquet`; der Schlüssel `synth_<id>.csv` in `preprocessing.py:155/167` ist
 nur eine feste Beschriftung, kein Dateiname.
+
+---
+
+## 14. Ergebnis von §3a: die gefilterten Papierzahlen
+
+### 14.1 Ablauf
+
+Alle drei Pipelines sind in der Nacht zum 2026-08-18 mit **0 Fehlern** durchgelaufen
+(ws GPU0 22:02, l1 GPU6 22:24, ws GPU1 22:53). Die neun Retrains und die neun
+Auswertungen sind vollständig, die Prüfung nach §13.1 besteht erneut: Trial-Konsistenz je
+Arm, Laufpaare 1473/1460 überall, Datenstand-Fingerabdruck einheitlich 723, keine
+NaN-Tensoren, alle Modelle und pkl am erwarteten Ort.
+
+Der Sammler auf l2 hat die neun Parquets geholt, ist aber am letzten Schritt gescheitert:
+`filtered_table.py` lag dort nur unter `/tmp`, nicht im Home, von wo das Skript es
+aufrief. Ein Verteilungsfehler von mir, ohne Folgen ausser einem Nachlauf.
+
+### 14.2 Die Filterung ist gegen die Referenz validiert
+
+Die Rohvorhersage-Parquets tragen neben `pred` auch `nwp_ref` und `pers_ref`. Beide
+wurden auf **derselben** gefilterten Basis mitgerechnet, als Kontrolle der Konvention:
+
+| Referenz | gerechnet | dokumentiert | Abweichung |
+|---|---|---|---|
+| ICON-D2 | **1.3036** | 1.304 | 0.0004 |
+| Persistenz | **2.2342** | 2.240 | 0.0058 |
+
+ICON-D2 auf vier Nachkommastellen zu treffen ist der Beleg, dass die Filterung die
+Papierkonvention reproduziert. Benutzt werden `build_imputation_mask` und
+`_lookup_imputed` aus `archiv/baselines_verification/verify_baselines.py`, also dieselbe
+Formel wie bei den Baselines, keine zweite Kopie.
+
+### 14.3 Haupttabelle, Val-Fenster, per Station, gefiltert
+
+Mittel über die drei Folds, 51 nie gesehene Zielstationen je Fold, imputierte Zielstunden
+ausgeschlossen (0.60 / 0.68 / 0.86 % je Fold).
+
+| Arm | fold1 | fold2 | fold3 | **Mittel** |
+|---|---|---|---|---|
+| `dcrnn_idw_alt` (D') | 1.0783 | 1.0954 | 1.1163 | **1.0967** |
+| `dcrnn` (GRID) | 1.0742 | 1.1224 | 1.1381 | **1.1116** |
+| `dcrnn_base` | 1.1741 | 1.1585 | 1.2020 | **1.1782** |
+
+Einordnung gegen die Referenzen: ICON-D2 1.3036, Persistenz 2.2342, MOS-regional 1.1603,
+MOS-local 0.9452 (transduktive Obergrenze), TFT base 1.186.
+
+- Alle drei Arme schlagen **ICON-D2** deutlich (1.10 bis 1.18 gegen 1.30).
+- GRID und D' schlagen auch **MOS-regional** (1.1603) und **TFT base** (1.186).
+- **Keiner** schlägt MOS-local (0.9452). Das ist konsistent damit, dass MOS-local die
+  transduktive Obergrenze ist.
+
+### 14.4 Zwei Vorbehalte, die vor der Interpretation stehen müssen
+
+**(a) Die Reihenfolge von GRID und D' ist nicht belegt.** Der Abstand beträgt
+1.1116 − 1.0967 = **0.0149**. Aus den zwei unabhängigen Retrains von `dcrnn_base`
+(50-Epochen- und 200-Epochen-Lauf, identische Hyperparameter aus Trial #111, nur andere
+Zufallsinitialisierung) lässt sich die Lauf-zu-Lauf-Streuung beziffern:
+
+| Fold | 50-Ep.-Lauf | 200-Ep.-Lauf | Differenz |
+|---|---|---|---|
+| fold1 | 1.1977 | 1.2349 | +0.0372 |
+| fold2 | 1.2547 | 1.2648 | +0.0101 |
+| fold3 | 1.3062 | 1.3016 | −0.0046 |
+| Mittel | 1.2529 | 1.2671 | **+0.0142** |
+
+Die Streuung des Dreifold-Mittels über zwei Läufe (**0.0142**) ist praktisch so gross wie
+der Abstand zwischen GRID und D' (**0.0149**). Aus je einem Retrain lässt sich also
+**nicht** sagen, welcher der beiden Arme besser ist. Wer die Reihenfolge behaupten will,
+braucht mehrere Wiederholungen je Arm (Mittel und Streuung über Seeds) oder muss sich auf
+die Aussage beschränken, dass beide gleichauf liegen und beide MOS-regional schlagen.
+Der Abstand zu `dcrnn_base` (0.067 bzw. 0.082) liegt dagegen klar über der Streuung.
+
+**(b) Die HPO-Reihenfolge kehrt sich um.** Gepoolt über das HPO-Objective lag GRID vorn
+(1.1741 gegen 1.1819 für D'), auf der Papiermetrik liegt D' vorn (1.0967 gegen 1.1116).
+Das ist kein Widerspruch, sondern der in §2 des Auftrags benannte Unterschied zwischen
+gepoolt und per Station, plus die Filterung. Es zeigt aber, dass die Bestenauswahl nach
+gepooltem Val-RMSE nicht dieselbe Rangfolge erzeugt wie die berichtete Metrik.
+
+### 14.5 Zur Anhebung von dcrnn_base auf 200 Epochen
+
+Die Änderung war der Sache nach richtig, `dcrnn_base` war als einziger Arm auf 50 Epochen
+begrenzt. Sie hat aber **nichts gebracht**: der neue Lauf stoppte per Early Stopping bei
+21, 12 und 32 Epochen, die 50er-Grenze war also gar nicht mehr bindend, und die Zahlen
+wurden auf zwei von drei Folds leicht schlechter. Dass der frühere fold1 mit 50/50 an die
+Grenze lief, war Lauf-zu-Lauf-Zufall, nicht ein systematisches Anstossen an die Obergrenze.
+`dcrnn_base` ist damit nachweislich schwächer, nicht bloss unterausgestattet gewesen.
+
+### 14.6 Stand von tft_sp_base
+
+Seit dem Neustart (§13.6) von 53 auf **60** COMPLETE, 2 laufende Trials, **keine neuen
+FAILs**. Beide Worker (l1 GPU3, l2 GPU0) arbeiten. Bester Wert unverändert 1.2593; die
+Studie bleibt nach FRAGE 4 aus der Auswertung, die Wiederbelebung dient dem Budget.
