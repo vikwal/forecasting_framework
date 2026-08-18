@@ -1036,3 +1036,111 @@ Grenze lief, war Lauf-zu-Lauf-Zufall, nicht ein systematisches Anstossen an die 
 Seit dem Neustart (§13.6) von 53 auf **60** COMPLETE, 2 laufende Trials, **keine neuen
 FAILs**. Beide Worker (l1 GPU3, l2 GPU0) arbeiten. Bester Wert unverändert 1.2593; die
 Studie bleibt nach FRAGE 4 aus der Auswertung, die Wiederbelebung dient dem Budget.
+
+---
+
+## 15. Die vollständige Ablationsleiter, HPO-getunt
+
+### 15.1 Was dazugekommen ist
+
+Am 2026-08-18 wurden `dcrnn_nograph` (Variante C) und `dcrnn_nomeas` (Variante B) mit
+ihren HPO-besten Hyperparametern nachtrainiert, je drei Folds. Beide Studien waren vorher
+eingefroren und hatten **0 laufende Trials**, es musste also nichts gestoppt werden.
+`dcrnn_nograph` hatte über Nacht noch drei Trials abgeschlossen (101 auf 104) und einen
+besseren Bestwert bekommen (1.2117 auf 1.1999); der Retrain nutzt daher Trial #129.
+
+| Arm | Trial | Epochen fold1/2/3 | Laufpaare | Fingerabdruck |
+|---|---|---|---|---|
+| `dcrnn_nograph` (C) | #129 | 21 / 17 / 31 von 200 | 1473/1460 | 723 |
+| `dcrnn_nomeas` (B) | #170 | 29 / 27 / 52 von 200 | 1473/1460 | 723 |
+
+Trial-Konsistenz je Arm eingehalten, keine NaN, alle Modelle und pkl vorhanden. Alle
+**fünfzehn** Läufe der Leiter stehen damit auf demselben Datenstand.
+
+Die Arme unterscheiden sich in genau zwei Zeilen der Config: **A (GRID)**
+`station_connectivity: delaunay` mit Nachbarmessungen; **B (NOMEAS)** Kanten bleiben,
+`neighbour_meas_available: false`; **C (NOGRAPH)** zusätzlich `station_connectivity: none`.
+`BASE` ist davon unabhängig: dort ist `nwp_nodes: false`, die NWP-Gitterpunkte werden also
+in `station.x` konkateniert statt als Graphknoten geführt.
+
+### 15.2 Haupttabelle, gefiltert, per Station, Mittel über drei Folds
+
+| Arm | fold1 | fold2 | fold3 | Mittel |
+|---|---|---|---|---|
+| `dcrnn_idw_alt` (D-Strich) | 1.0783 | 1.0954 | 1.1163 | **1.0967** |
+| `dcrnn_nomeas` (B) | 1.0897 | 1.1011 | 1.1354 | **1.1087** |
+| `dcrnn` (GRID, A) | 1.0742 | 1.1224 | 1.1381 | **1.1116** |
+| `dcrnn_nograph` (C) | 1.1248 | 1.1848 | 1.1803 | **1.1633** |
+| `dcrnn_base` | 1.1741 | 1.1585 | 1.2020 | **1.1782** |
+
+Selbstkontrolle der Filterung auf denselben Zeilen: ICON-D2 **1.3036** gegen dokumentierte
+1.304 (Abweichung 0.0004), Persistenz **2.2342** gegen 2.240. Referenzen zur Einordnung:
+MOS-regional 1.1603, MOS-local 0.9452, TFT base 1.186.
+
+### 15.3 Signifikanz auf Stationsebene
+
+Wilcoxon-Vorzeichen-Rangtest, zweiseitig, gepaart über die **Vereinigung** der drei Folds
+(N = 153; die Zielmengen sind paarweise disjunkt, geprüft an `spatial_folds.yaml`, ihre
+Vereinigung ist exakt der Pool). Holm-korrigiert.
+
+| Vergleich | Median A minus B | p (Holm) | signifikant |
+|---|---|---|---|
+| BASE gegen D-Strich | +0.0733 | 4.4e-11 | ja |
+| C (NOGRAPH) gegen D-Strich | +0.0645 | 1.0e-08 | ja |
+| BASE gegen B (NOMEAS) | +0.0551 | 4.8e-08 | ja |
+| BASE gegen A (GRID) | +0.0581 | 1.2e-07 | ja |
+| **A gegen C** (Beobachtungsnetz gesamt) | −0.0575 | 2.8e-07 | **ja** |
+| **C gegen B** (reiner Geometriekanal) | +0.0562 | 8.4e-07 | **ja** |
+| B gegen D-Strich | +0.0125 | 0.317 | nein |
+| A gegen D-Strich | +0.0048 | 0.536 | nein |
+| **A gegen B** (Messkanal der Nachbarn) | +0.0056 | 1.0 | **nein** |
+| **BASE gegen C** | −0.0017 | 1.0 | **nein** |
+
+### 15.4 Zwei Befunde, die das Mechanismuskapitel tragen
+
+**(a) Das Netz trägt, aber nicht über die Beobachtungen.** A gegen C ist mit −0.0575
+hochsignifikant (71.9 Prozent der Stationen besser), A gegen B dagegen null (p = 1.0). Der
+gesamte Gewinn steckt in C gegen B, also in den Kanten **ohne** Nachbarmessungen (+0.0562,
+74.5 Prozent der Stationen). Was der Graph liefert, ist räumlicher Kontext aus NWP-Größen
+und Stationsattributen, nicht die Windmessung der Nachbarn. Das schärft B4 der Story: im
+ungetunten Trockenlauf stand dort A minus C = −0.0084 („trägt als Obergrenze"), getunt
+sind es −0.0575, aber mit verschobener Begründung.
+
+**(b) Die beiden Graphkomponenten wirken nur zusammen.** `BASE` (Stationsgraph ja,
+NWP-Knoten nein) und `NOGRAPH` (Stationsgraph nein, NWP-Knoten ja) sind statistisch
+**ununterscheidbar** (Median −0.0017, p = 1.0), und beide werden von `GRID` klar geschlagen
+(1.2e-07 bzw. 2.8e-07). Jede Komponente allein bringt gegenüber der anderen nichts; erst
+gemeinsam ergeben sie rund 0.06 m/s. Das ist ein Interaktions-, kein Additivbefund.
+
+Unverändert bleibt der Nullbefund zu B6: **A gegen D-Strich ist nicht signifikant**
+(p = 0.536 nach Holm, 0.179 unkorrigiert), auch nachdem beide Seiten getunt wurden. Die
+gelernte GATv2-Attention schlägt die feste, physikalisch motivierte IDW-Regel mit
+Höhenkorrektur nicht.
+
+### 15.5 Vorbehalte
+
+- Die Tests laufen auf den **ungefilterten** Stations-CSVs des Notebooks, die Tabelle in
+  §15.2 ist gefiltert. Bei 0.60 bis 0.86 Prozent imputierten Stunden ist ein
+  Vorzeichenwechsel unwahrscheinlich, geprüft ist es nicht.
+- „Nicht signifikant" ist nicht „gleichwertig". Für Äquivalenzaussagen bräuchte es einen
+  TOST mit vorab festgelegter Marge.
+- `dcrnn_base` läuft mit `patience: 10`, alle anderen Arme mit 15 (Rest der alten
+  50-Epochen-Config). Nutzerentscheidung: so belassen, der Unterschied ist gegenüber der
+  Lauf-zu-Lauf-Streuung von 0.014 unerheblich.
+- Die Budgets der Arme sind ungleich (104 bis 170 Trials, siehe FRAGE 2) und gehören in
+  die Tabelle.
+
+### 15.6 Zwei widersprüchliche MTGNN-Auswertungen aufgelöst
+
+Beim Zusammenführen der Ergebnisse aller drei Hosts traten 14 gleichnamige Dateien auf,
+zehn davon bytegleich. Vier nicht, darunter `stdhp_mtgnn_wind_mtgnn_nwp_fold2.csv` und
+`stdhp_mtgnn_wind_mtgnn_nwp_hist_fold2.csv` mit bis zu 0.58 m/s Unterschied je Station.
+
+Geprüft: **beide sind in sich konsistent**, jede CSV passt auf 1e-7 genau zu ihrem eigenen
+Rohvorhersage-Parquet. Es sind also zwei vollständige, unabhängige Auswertungen. Die
+pkl-Namen lösen es auf: für die stdhp-Läufe sind fold1 und fold2 auf `l1` und `ws`
+identisch, nur fold3 (in der CSV-Zählung fold2) unterscheidet sich. `l1` hat ihn am
+2026-08-05 um 23:54 nachgerechnet, `ws` stammt von 17:24. Die `ws`-Fassung ist damit
+abgelöst und liegt unter `archiv/stdhp_mtgnn_fold2_abgeloest_20260818/`. Ebenso
+archiviert: die älteren `ecmwf_test_fold0.csv` und `icon_d2_test_fold0.csv` auf `l2`, die
+das Notebook ohnehin in keiner Konfiguration als Referenz verwendet.

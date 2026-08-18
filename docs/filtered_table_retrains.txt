@@ -1,7 +1,3 @@
-W0000 00:00:1787033006.680025 2870126 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1787033006.680037 2870126 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1787033006.680038 2870126 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
-W0000 00:00:1787033006.680040 2870126 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
 Rohdaten fuer die Imputationsmaske: /mnt/lambda1/nvme1/synthetic/raw/wind
 
   dcrnn          fold1: modell=1.0742  icon_d2=1.3004  persistenz=2.1540  stationen=51  imputiert=0.60%
@@ -13,12 +9,20 @@ Rohdaten fuer die Imputationsmaske: /mnt/lambda1/nvme1/synthetic/raw/wind
   dcrnn_idw_alt  fold1: modell=1.0783  icon_d2=1.3004  persistenz=2.1540  stationen=51  imputiert=0.60%
   dcrnn_idw_alt  fold2: modell=1.0954  icon_d2=1.2735  persistenz=2.2536  stationen=51  imputiert=0.68%
   dcrnn_idw_alt  fold3: modell=1.1163  icon_d2=1.3369  persistenz=2.2951  stationen=51  imputiert=0.86%
+  dcrnn_nomeas   fold1: modell=1.0897  icon_d2=1.3004  persistenz=2.1540  stationen=51  imputiert=0.60%
+  dcrnn_nomeas   fold2: modell=1.1011  icon_d2=1.2735  persistenz=2.2536  stationen=51  imputiert=0.68%
+  dcrnn_nomeas   fold3: modell=1.1354  icon_d2=1.3369  persistenz=2.2951  stationen=51  imputiert=0.86%
+  dcrnn_nograph  fold1: modell=1.1248  icon_d2=1.3004  persistenz=2.1540  stationen=51  imputiert=0.60%
+  dcrnn_nograph  fold2: modell=1.1848  icon_d2=1.2735  persistenz=2.2536  stationen=51  imputiert=0.68%
+  dcrnn_nograph  fold3: modell=1.1803  icon_d2=1.3369  persistenz=2.2951  stationen=51  imputiert=0.86%
 
 === gefiltert, per Station, Mittel ueber die vorhandenen Folds ===
           arm  n_folds  modell  icon_d2  persistenz
         dcrnn        3  1.1116   1.3036      2.2342
    dcrnn_base        3  1.1782   1.3036      2.2342
 dcrnn_idw_alt        3  1.0967   1.3036      2.2342
+ dcrnn_nomeas        3  1.1087   1.3036      2.2342
+dcrnn_nograph        3  1.1633   1.3036      2.2342
 
 === Kontrolle der Filterung gegen die dokumentierten Referenzen ===
   ICON-D2    gerechnet 1.3036  erwartet 1.304  Abweichung 0.0004
