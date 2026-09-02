@@ -3,8 +3,10 @@ update_icond2_from_db.py — Extend existing ICON-D2 ML parquet caches from the 
 
 For each unique grid-point stem in each run-hour directory:
   1. Parse (lat, lon) from filename stem
-  2. Resolve canonical geom in DB via KNN on icon_d2_grid_points (same query
-     convention as misc/fill_db_from_parquet.py, which originally wrote this data)
+  2. Resolve the stem's OWN grid point in icon_d2_grid_points — an exact match
+     within GEOM_MATCH_DIST_M, geodesic, never a nearest-neighbour search. Stems
+     whose grid point is not in the DB (everything outside the next-6 set) are
+     skipped, not aliased onto a neighbour. See _resolve_geom for why.
   3. Determine the current max starttime across the stem's parquet file(s)
      (a stem can appear under several park_id folders — read once, reuse)
   4. Fetch only rows newer than that max, up to --target-date, for the given
@@ -62,7 +64,11 @@ _thread_local = threading.local()
 DATA_COLS = ["starttime", "forecasttime", "toplevel", "bottomlevel",
              "u_wind", "v_wind", "temperature", "pressure", "qs"]
 EXPECTED_ROWS_PER_RUN = 294  # 6 levels x 49 lead steps (0-48h)
-GEOM_SUSPICIOUS_DIST_M = 5000
+# A stem must resolve to its OWN grid point. The only tolerated difference is the
+# 4-decimal rounding in the filename (~4 m at these latitudes) plus the DB's own
+# rounding variants; 25 m stays far below the ~2100 m ICON-D2 grid spacing, so it
+# can never reach a neighbouring point.
+GEOM_MATCH_DIST_M = 25
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,28 +95,43 @@ def _get_conn(db_url: str) -> psycopg2.extensions.connection:
 
 def _resolve_geom(conn, lat: float, lon: float) -> tuple[float, float] | None:
     """
-    Resolve the canonical (lon, lat) geom in icon_d2_grid_points nearest to
-    (lat, lon), using the exact query convention of fill_db_from_parquet.py
-    (which originally populated the DB rows behind these parquet files).
-    Returns None if no geom found or the match is implausibly far away.
+    Resolve the grid point in icon_d2_grid_points that IS (lat, lon) — not the
+    one nearest to it.
+
+    The parquet filename encodes the grid point's own coordinates, rounded to 4
+    decimals, so the DB value can sit a few metres off; GEOM_MATCH_DIST_M covers
+    that and nothing more. A stem whose own grid point is absent from the DB
+    returns None and is skipped by the caller.
+
+    Do NOT relax this into a nearest-neighbour lookup. icon_d2_grid_points holds
+    only the next-6 set (1218 points) while the ML parquet tree carries 4459
+    stems, so an unbounded KNN silently resolved 3241 of them onto a *different*
+    grid point — median 2227 m, max 4980 m away — and filled their files with
+    that neighbour's values. Every alias sat below the old 5000 m warning
+    threshold, so nothing was ever logged. Corrupted 2026-03-07 onward before it
+    was caught on 2026-09-01.
+
+    Distance is geodesic (geography), never planar: the `<->` operator on
+    `geometry` orders by degrees, which mixes unequal lat/lon scales and is not
+    a distance at these latitudes.
     """
     with conn.cursor() as cur:
         cur.execute("""
             SELECT ST_X(geom), ST_Y(geom),
                    ST_Distance(geom::geography,
-                               ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography)
+                               ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS dist_m
             FROM icon_d2_grid_points
-            ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+            WHERE ST_DWithin(geom::geography,
+                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+            ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
             LIMIT 1
-        """, (lon, lat, lon, lat))
+        """, (lon, lat, lon, lat, GEOM_MATCH_DIST_M, lon, lat))
         row = cur.fetchone()
 
     if row is None:
         return None
 
-    canon_lon, canon_lat, dist_m = row
-    if dist_m > GEOM_SUSPICIOUS_DIST_M:
-        log.warning("geom for (%.4f, %.4f) is %.0f m away (suspicious)", lat, lon, dist_m)
+    canon_lon, canon_lat, _dist_m = row
     return canon_lon, canon_lat
 
 
@@ -161,7 +182,7 @@ def _process_stem(
 ) -> dict:
     result = {
         "stem": stem, "rows_fetched": 0, "files_updated": 0, "files_skipped": 0,
-        "warnings": [], "error": None,
+        "no_db_point": 0, "warnings": [], "error": None,
     }
 
     try:
@@ -177,7 +198,12 @@ def _process_stem(
             cached = resolved
 
         if cached is None:
-            result["error"] = "no geom in icon_d2_grid_points"
+            # Expected for every stem outside the next-6 set: the DB holds only
+            # the 6 nearest grid points per station, while the ML parquet tree
+            # also carries the next-22 neighbourhood. Those files have no source
+            # in the DB and are left untouched — this is a skip, not an error.
+            result["no_db_point"] = 1
+            result["files_skipped"] = len(files)
             return result
         canon_lon, canon_lat = cached
 
@@ -399,7 +425,7 @@ def main() -> None:
         log.info("rh=%02d: %d unique stems, target=%s", rh, len(stem_to_files), target_ts)
 
         rh_results: list[dict] = []
-        rows_fetched = files_updated = files_skipped = errors = 0
+        rows_fetched = files_updated = files_skipped = errors = no_db = 0
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futures = {
@@ -413,12 +439,14 @@ def main() -> None:
                     res = fut.result()
                 except Exception as exc:
                     res = {"stem": stem, "rows_fetched": 0, "files_updated": 0,
-                           "files_skipped": 0, "warnings": [], "error": str(exc)}
+                           "files_skipped": 0, "no_db_point": 0,
+                           "warnings": [], "error": str(exc)}
 
                 rh_results.append(res)
                 rows_fetched += res["rows_fetched"]
                 files_updated += res["files_updated"]
                 files_skipped += res["files_skipped"]
+                no_db += res.get("no_db_point", 0)
                 if res["error"]:
                     errors += 1
                     log.warning("stem %-30s error: %s", stem, res["error"])
@@ -428,8 +456,9 @@ def main() -> None:
         all_results[rh] = rh_results
 
         log.info("─" * 60)
-        log.info("rh=%02d summary: rows_fetched=%d files_updated=%d files_skipped=%d errors=%d",
-                  rh, rows_fetched, files_updated, files_skipped, errors)
+        log.info("rh=%02d summary: rows_fetched=%d files_updated=%d files_skipped=%d "
+                 "no_db_point=%d errors=%d",
+                  rh, rows_fetched, files_updated, files_skipped, no_db, errors)
         log.info("─" * 60)
 
         # persist after each run-hour so a later crash doesn't lose earlier progress

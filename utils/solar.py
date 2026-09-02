@@ -20,16 +20,19 @@ NWP : ``{data.nwp_path}/SL/{forecast_hour}/<lon>_<lat>_SL.parquet``
     193 Schritte je Lauf.  Die frühesten Läufe (bis ~2023-08-08, rund 2 %) sind nur
     stündlich abgelegt und fallen bei ``freq`` < 1 h aus der Vollständigkeitsprüfung.
 
-Zwei Konventionen weichen von den ICON-D2-**ML**-Dateien (Wind) ab und sind hier
-bewusst explizit behandelt:
+Eine Besonderheit gegenüber den ICON-D2-**ML**-Dateien (Wind) bleibt:
 
-1. **Dateinamen sind lon-first.**  ML heißt ``<lat>_<lon>_ML.parquet``
-   (``52_9057_12_9151`` → lat 52.9057), SL dagegen ``<lon>_<lat>_SL.parquet``
-   (``10_0000_47_8000`` → lon 10.0, lat 47.8).  Auch die Spalten *innerhalb* der
-   SL-Datei sind vertauscht: ``longitude`` enthält die Breite, ``latitude`` die Länge.
-   Deshalb werden die Koordinaten ausschließlich aus dem Dateinamen gelesen.
-2. **SL ist flach.**  Es gibt kein ``SL/06/<station_id>/``-Unterverzeichnis wie bei ML;
+1. **SL ist flach.**  Es gibt kein ``SL/06/<station_id>/``-Unterverzeichnis wie bei ML;
    alle 1218 Gitterpunkte liegen direkt in ``SL/06/``.
+
+Dateinamen sind seit 2026-08 **lat-first** wie ML (``<lat>_<lon>_SL.parquet``), vereinheitlicht
+mit der ursprünglich abweichenden lon-first-Konvention — Auslöser war ein Koordinaten-Vertausch-
+Bug in der DWD-Schreibpipeline (``write_db.py::insert_data()``), der `ST_X`/`ST_Y` in der DB
+vertauschte; die alte lon-first-Benennung war eine zufällige Doppelkompensation zweier
+unabhängiger Fehler in ``extract_to_parquet.py``, kein Design. Koordinaten werden weiterhin
+ausschließlich aus dem Dateinamen gelesen, nicht aus den ``longitude``/``latitude``-Spalten
+innerhalb der Datei (die auch nach der Migration nicht vertrauenswürdig sind, solange nicht
+jede SL-Datei neu aus der reparierten DB extrahiert wurde).
 
 Zeitliche Zuordnung
 -------------------
@@ -333,18 +336,17 @@ def resample_interval_mean(df: pd.DataFrame,
 _SL_STEM_RE = re.compile(r'^(-?\d+)_(\d+)_(-?\d+)_(\d+)$')
 
 
-def parse_sl_lonlat(stem: str) -> tuple[float, float]:
-    """``'10_0000_47_8000'`` → ``(lon, lat) = (10.0, 47.8)``.
+def parse_sl_latlon(stem: str) -> tuple[float, float]:
+    """``'47_8000_10_0000'`` → ``(lat, lon) = (47.8, 10.0)``.
 
-    Achtung: umgekehrte Reihenfolge gegenüber den ML-Dateinamen (dort lat-first),
-    siehe Modul-Docstring.
+    Lat-first, dieselbe Konvention wie die ML-Dateinamen (siehe Modul-Docstring).
     """
     m = _SL_STEM_RE.match(stem)
     if not m:
         raise ValueError(f"Unparsbarer SL-Dateiname: '{stem}'")
-    lon = float(f"{m.group(1)}.{m.group(2)}")
-    lat = float(f"{m.group(3)}.{m.group(4)}")
-    return lon, lat
+    lat = float(f"{m.group(1)}.{m.group(2)}")
+    lon = float(f"{m.group(3)}.{m.group(4)}")
+    return lat, lon
 
 
 @lru_cache(maxsize=32)
@@ -365,7 +367,7 @@ def _scan_sl_grid(nwp_path: str, forecast_hour: str) -> tuple[tuple[str, float, 
             continue
         stem = fname[:-len('_SL.parquet')]
         try:
-            lon, lat = parse_sl_lonlat(stem)
+            lat, lon = parse_sl_latlon(stem)
         except ValueError:
             continue
         out.append((stem, lat, lon))

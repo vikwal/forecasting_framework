@@ -102,9 +102,11 @@ def main():
             print(f"WARNING: Could not extract coordinates from {csv_file}")
             continue
 
-        # Calculate distance
-        #distance = geodesic((station_lat, station_lon), (grid_lat, grid_lon)).kilometers
-        distance = math.sqrt((grid_lat - station_lat) ** 2 + (grid_lon - station_lon) ** 2)
+        # Calculate distance -- geodesic, in km. A Euclidean norm on raw degrees
+        # (which stood here) is not a distance: at German latitudes one degree of
+        # longitude is only ~0.62 of a degree of latitude, so it distorts the
+        # ranking and the numbers are not in any unit.
+        distance = geodesic((station_lat, station_lon), (grid_lat, grid_lon)).kilometers
         # Analyze temporal coverage
         min_date, max_date, n_rows = analyze_csv_file(csv_path)
 

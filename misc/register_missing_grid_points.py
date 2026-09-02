@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from geopy.distance import geodesic
 import psycopg2
 import psycopg2.extras
 import yaml
@@ -113,10 +114,18 @@ def find_missing(
     stems: set[str],
     db_lats: np.ndarray,
     db_lons: np.ndarray,
-    tol: float = 0.020,
+    tol_m: float = 100.0,
 ) -> list[tuple[str, float, float]]:
     """
-    Return (stem, lat, lon) for stems that have no matching DB row within *tol* degrees.
+    Return (stem, lat, lon) for stems that have no matching DB row within
+    *tol_m* metres (geodesic).
+
+    The tolerance used to be given in degrees and compared with a Euclidean norm
+    on raw degrees. That is not a distance: at German latitudes one degree of
+    longitude is only ~0.62 of a degree of latitude, so the same numeric
+    tolerance meant ~2.2 km north-south but ~1.4 km east-west, and the resulting
+    ellipse could span more than one ICON-D2 grid cell (~2100 m) in one direction
+    while missing a genuine match in the other.
     """
     missing = []
     for s in sorted(stems):
@@ -124,8 +133,15 @@ def find_missing(
         if len(db_lats) == 0:
             missing.append((s, lat, lon))
             continue
-        d = np.sqrt((db_lats - lat) ** 2 + (db_lons - lon) ** 2).min()
-        if d > tol:
+        # Bounding box first (0.05 deg is well beyond any sane tolerance), then
+        # exact geodesic on the few survivors -- geodesic over every DB point
+        # would be needlessly slow.
+        near = np.where((np.abs(db_lats - lat) < 0.05) & (np.abs(db_lons - lon) < 0.08))[0]
+        if near.size == 0:
+            missing.append((s, lat, lon))
+            continue
+        d_m = min(geodesic((lat, lon), (db_lats[i], db_lons[i])).m for i in near)
+        if d_m > tol_m:
             missing.append((s, lat, lon))
     return missing
 
@@ -188,8 +204,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True,
                     help="Path to YAML config, e.g. configs/dcrnn/config_wind_stgcn.yaml")
-    ap.add_argument("--tol", type=float, default=0.020,
-                    help="Match tolerance in degrees (default: 0.020)")
+    ap.add_argument("--tol", type=float, default=100.0,
+                    help="Match tolerance in METRES, geodesic (default: 100)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print what would be inserted without writing to DB")
     args = ap.parse_args()
@@ -206,7 +222,7 @@ def main() -> None:
     db_lats, db_lons = load_registered_coords(db_url)
     log.info("icon_d2_grid_points: %d registered rows", len(db_lats))
 
-    missing = find_missing(training_stems, db_lats, db_lons, tol=args.tol)
+    missing = find_missing(training_stems, db_lats, db_lons, tol_m=args.tol)
     log.info("Stems missing from icon_d2_grid_points: %d", len(missing))
 
     if not missing:

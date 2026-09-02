@@ -102,23 +102,34 @@ def find_nearest_grid_points(
     """
     db = WeatherDBConnector()
     
-    # icon_d2_grid_points stores POINT(lat, lon) — non-standard.
-    # ST_X(geom) = lat, ST_Y(geom) = lon.
-    # ST_MakePoint(lat, lon) matches this non-standard storage for KNN.
-    # multilevelfields uses standard POINT(lon, lat) — handled separately in load_multilevel_data.
+    # icon_d2_grid_points stores standard POINT(lon, lat): ST_X = lon, ST_Y = lat.
+    # Verified 2026-09-01: all 1218 rows have ST_X in the German lon range (5-16)
+    # and ST_Y in the lat range (46-56), none the other way round.
+    #
+    # This previously read `ST_Y as lon, ST_X as lat` with the query point built
+    # as ST_MakePoint(station_lat, station_lon), on the belief that the table was
+    # stored lat-first. Both halves were wrong, and they did not cancel: the KNN
+    # compared a lat-first probe against lon-first rows, so it ranked by distance
+    # to a point roughly 5600 km away and returned the same far-corner grid points
+    # for every station, with lon/lat additionally swapped in the result. Caught
+    # only because no config uses icond2_source: 'database' (default is 'csv').
+    #
+    # Ordering is geodesic on ::geography. `<->` on plain geometry orders by
+    # degrees, where one degree of longitude is ~0.62 of a degree of latitude at
+    # German latitudes — that is not a distance and mis-ranks the neighbourhood.
     query = """
         SELECT
-            ST_Y(geom) as lon,
-            ST_X(geom) as lat
+            ST_X(geom) as lon,
+            ST_Y(geom) as lat
         FROM icon_d2_grid_points
-        ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+        ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
         LIMIT %s;
     """
 
     try:
         with db.get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, (station_lat, station_lon, n_points))
+                cur.execute(query, (station_lon, station_lat, n_points))
                 results = cur.fetchall()
 
         if not results:

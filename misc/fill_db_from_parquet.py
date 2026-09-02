@@ -3,7 +3,8 @@ fill_db_from_parquet.py — Fill gaps in multilevelfields DB table from parquet 
 
 For each unique grid-point stem:
   1. Parse (lat, lon) from filename stem
-  2. Find canonical geom in DB via KNN on icon_d2_grid_points
+  2. Match the stem's OWN grid point in icon_d2_grid_points (exact, geodesic,
+     within GEOM_MATCH_DIST_M) — never a nearest-neighbour search
   3. Load parquet, filter to run-hour + cutoff
   4. Query DB for already-complete (starttime, forecasttime) pairs — no aggregation,
      just a lightweight key-only scan filtered by geom + NOT NULL on data columns
@@ -39,7 +40,14 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+from geopy.distance import geodesic
 from tqdm import tqdm
+
+# A stem must resolve to its OWN grid point. Only the 4-decimal rounding of the
+# parquet filename (~4 m here) and the DB's own rounding variants are tolerated;
+# 25 m is far below the ~2100 m ICON-D2 grid spacing, so it can never reach a
+# neighbouring point.
+GEOM_MATCH_DIST_M = 25
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,8 +91,26 @@ def _build_allowed_stems(
     allowed: set[str] = set()
     for _, row in stations.iterrows():
         s_lat, s_lon = float(row["latitude"]), float(row["longitude"])
-        dists = np.sqrt((stem_coords[:, 0] - s_lat) ** 2 + (stem_coords[:, 1] - s_lon) ** 2)
-        top_k = np.argsort(dists)[:next_n_grid]
+        # Geodesic, matching build_locations_map() in NWP/DWD/write_db.py, which
+        # defines the authoritative next-n set. A Euclidean norm on raw degrees
+        # (what stood here) is not a distance: at German latitudes one degree of
+        # longitude is ~0.62 of a degree of latitude, so it stretches the
+        # neighbourhood east-west and can rank a farther point ahead of a nearer
+        # one, giving a different set than the ingestion pipeline used.
+        # Cheap bounding box first (0.5 deg lat / 0.8 deg lon covers far more than
+        # the ~6 km the next-22 neighbourhood spans), then exact geodesic on the
+        # few hundred survivors.
+        near = np.where(
+            (np.abs(stem_coords[:, 0] - s_lat) < 0.5)
+            & (np.abs(stem_coords[:, 1] - s_lon) < 0.8)
+        )[0]
+        if near.size == 0:
+            continue
+        dists = np.array([
+            geodesic((s_lat, s_lon), (stem_coords[i, 0], stem_coords[i, 1])).km
+            for i in near
+        ])
+        top_k = near[np.argsort(dists)[:next_n_grid]]
         allowed.update(stem_arr[top_k].tolist())
 
     log.info(
@@ -150,31 +176,46 @@ def _process_stem(
     force: bool = False,  # skip the db_count < 10_000 guard (used for exception stems)
     first_n_days: int | None = None,  # per-parquet relative cutoff
 ) -> dict:
-    result = {"rows_sent": 0, "skipped": False, "error": None}
+    result = {"rows_sent": 0, "skipped": False, "no_db_point": False, "error": None}
 
     try:
         lat, lon = _parse_latlon(stem)
         conn = _get_conn(db_url)
 
-        # 1. Canonical geom from icon_d2_grid_points (tiny table, fast KNN)
+        # 1. The stem's OWN grid point in icon_d2_grid_points — an exact match
+        #    within GEOM_MATCH_DIST_M, not a nearest-neighbour search.
+        #
+        #    This was an unbounded KNN. icon_d2_grid_points holds only the next-6
+        #    set (1218 points) while the ML parquet tree carries 4459 stems, so
+        #    3241 of them resolved onto a *different* grid point up to ~5 km away
+        #    and would be written into the DB under that neighbour's geom. Same
+        #    defect as in update_icond2_from_db.py, which corrupted the parquet
+        #    side from 2026-03-07 until it was found on 2026-09-01.
+        #
+        #    Distance is geodesic (::geography); `<->` on plain geometry orders by
+        #    degrees, which is not a distance at these latitudes.
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT ST_X(geom), ST_Y(geom),
                        ST_Distance(geom::geography,
                                    ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography)
                 FROM icon_d2_grid_points
-                ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                WHERE ST_DWithin(geom::geography,
+                                 ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+                ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
                 LIMIT 1
-            """, (lon, lat, lon, lat))
+            """, (lon, lat, lon, lat, GEOM_MATCH_DIST_M, lon, lat))
             row = cur.fetchone()
 
         if row is None:
-            result["error"] = "no geom in icon_d2_grid_points"
+            # Expected for every stem outside the next-6 set: the DB deliberately
+            # holds only the 6 nearest grid points per station. Such a stem has no
+            # place in the DB and must not be aliased onto a neighbour.
+            result["no_db_point"] = True
+            result["skipped"] = True
             return result
 
         canon_lon, canon_lat, dist_m = row
-        if dist_m > 5000:
-            log.warning("stem %s: nearest DB geom is %.0f m away (suspicious)", stem, dist_m)
 
         # 1b. Check that this geom has sufficient data in the DB — if not,
         #     the grid point was never populated and there is nothing to fill.
