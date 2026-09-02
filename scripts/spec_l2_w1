@@ -1,0 +1,3 @@
+dcrnn configs/dcrnn/config_wind_dcrnn_base.yaml 1 n1
+dcrnn configs/dcrnn/config_wind_dcrnn_nograph.yaml 2 n1
+dcrnn configs/dcrnn/config_wind_dcrnn_nwp_hist.yaml 3 n1
