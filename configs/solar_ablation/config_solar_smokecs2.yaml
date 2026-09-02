@@ -1,0 +1,263 @@
+# Rauchtest fuer die korrigierte dhi-Kappung. Abnahmekriterium: die NWP-Baseline
+# muss wieder mit den uebrigen Laeufen uebereinstimmen.
+data:
+  use_case: solar
+  path: /mnt/lambda1/nvme1/synthetic/raw/solar
+  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
+  stations_master: data/stations_master.csv
+  forecast_hours:
+  - '06'
+  - 09
+  - '12'
+  - '15'
+  freq: 30min
+  target_cols:
+  - ghi
+  - dhi
+  files:
+  - 00183
+  - '00232'
+  - 00282
+  val_files:
+  - 01358
+  - '01443'
+  train_start: '2023-08-01'
+  train_end: '2025-01-27'
+  test_start: '2025-02-01'
+  test_end: '2025-08-01'
+  train_frac: 1
+  scale_x: true
+  scale_y: false
+  use_pca: false
+  pca_components: 3
+  lag_in_col: false
+  n_neighbors: 5
+  retrain_interval: 1
+  eval_interval: 1
+params:
+  icond2_features:
+  - ghi_nwp
+  - dhi_nwp
+  - bhi_nwp
+  - clct
+  - alb_rad
+  - h_snow
+  - rho_snow
+  - prr_gsp
+  known_features:
+  - ghi_nwp
+  - dhi_nwp
+  - bhi_nwp
+  - clct
+  - alb_rad
+  - h_snow
+  - rho_snow
+  - prr_gsp
+  - solar_zenith_cos
+  - solar_azimuth_sin
+  - solar_azimuth_cos
+  - dni_extra
+  - ghi_clearsky
+  - hour_sin
+  - hour_cos
+  - doy_sin
+  - doy_cos
+  observed_features:
+  - ghi
+  - dhi
+  static_features:
+  - altitude
+  - latitude
+  - longitude
+  next_n_grid_points: 1
+  get_next_grid_points_method: geodesic_next
+  next_n_stations: 0
+  topo_features_path: /mnt/lambda1/nvme1/topo_features
+  target_transform: clearsky_index
+  clearsky_clip_max:
+    ghi: 1.5
+    dhi: 6.0
+  measurement_time_label: right
+  sub_hourly_fill: ffill
+  max_nan_frac: 0.5
+  nwp_baseline_col:
+    ghi: ghi_nwp
+    dhi: dhi_nwp
+  daytime_zenith_threshold: 85
+  nwp_workers: 8
+  nwp_models:
+  - icon-d2
+  ecmwf_features: []
+  random_seed: 42
+model:
+  name: tft
+  num_workers: 4
+  output_dim: 96
+  lookback: 96
+  horizon: 96
+  step_size: 96
+  batch_size: 32
+  epochs: 1
+  lr: 0.0005
+  optimizer: adam
+  loss: mse
+  metrics:
+  - mae
+  - rmse
+  - r^2
+  tft:
+    n_heads: 4
+    hidden_dim: 32
+    dropout: 0.2
+    n_lstm_layers: 1
+    static_embedding_dim: 16
+    num_quantiles: 1
+    clipnorm: 10.0
+  fnn:
+    units: 128
+    n_layers: 2
+  cnn:
+    filters: 128
+    kernel_size: 3
+    n_cnn_layers: 10
+    increase_filters: false
+  rnn:
+    n_rnn_layers: 2
+    units: 64
+    dropout: 0.01
+  attention_heads: 32
+  callbacks: false
+  shuffle: true
+  force_retrain: true
+  early_stopping:
+    enabled: false
+    patience: 10
+    min_delta: 0.0001
+    monitor: val_rmse
+    mode: min
+    restore_best_weights: true
+  parallelize: false
+  lookup_hpo: false
+  verbose: 1
+hpo:
+  studies_path: /mnt/nas/optuna_studies/optuna_viktor.db
+  objectives:
+  - metric: val_rmse
+    direction: minimize
+  trials: 150
+  kfolds: 12
+  min_train_date: '2024-06-30'
+  val_split: 1
+  pruning:
+    use_median_pruner: true
+    n_startup_trials: 10
+    n_warmup_steps: 2
+    interval_steps: 1
+    disable_pruning: false
+  batch_size:
+  - 32
+  - 1024
+  epochs:
+  - 1
+  - 150
+  n_layers:
+  - 1
+  - 4
+  n_cnn_layers:
+  - 1
+  - 10
+  n_rnn_layers:
+  - 1
+  - 7
+  learning_rate:
+  - 0.0001
+  - 0.01
+  attention_heads:
+  - 1
+  - 64
+  tft:
+    n_heads:
+    - 1
+    - 8
+    hidden_dim:
+    - 8
+    - 256
+    dropout:
+    - 0.01
+    - 0.8
+    n_lstm_layers:
+    - 1
+    - 5
+    static_embedding_dim:
+    - 8
+    - 128
+    num_quantiles:
+    - 1
+    clipnorm:
+    - 0
+    - 10.0
+  cnn:
+    filters:
+    - 16
+    - 128
+    kernel_size:
+    - 2
+    - 5
+    increase_filters: false
+  rnn:
+    units:
+    - 16
+    - 100
+    dropout:
+    - 0.0
+    - 0.8
+  fnn:
+    units:
+    - 32
+    - 256
+  fl:
+    strategy: fedavg
+    personalize: false
+    n_rounds:
+    - 1
+    - 20
+    server_lr:
+    - 0.0001
+    - 0.1
+    beta_1:
+    - 0
+    - 1
+    beta_2:
+    - 0
+    - 1
+    tau:
+    - 0.0001
+    - 0.1
+eval:
+  results_path: results/solar_residual
+  eval_on_all_test_data: true
+  retrain_interval: 0
+  t_0: 12
+fl:
+  clients:
+    clientA:
+    - synth_00342
+    - synth_04928
+    clientB:
+    - synth_05158
+    - synth_01612
+    clientC:
+    - synth_00164
+  strategy: fedavg
+  n_rounds: 2
+  personalize: false
+  fedopt:
+    server_lr: 0.001
+    beta_1: 0.9
+    beta_2: 0.99
+    tau: 0.001
+  force_retrain: true
+  verbose: true
+  save_history: false
+  num_gpus: 1
+  num_cpus: 11

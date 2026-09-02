@@ -1,0 +1,423 @@
+# Solar-Irradiance-Forecasting (Federated Learning)
+#
+# Identisch zu config_solar_93.yaml, ergaenzt um die FL-Sektion.
+# Die 56 Trainingsstationen sind deterministisch (Round-Robin) auf 6 Clients verteilt.
+#
+# Pendant zu config_wind_50.yaml. Zielgrößen sind gemessene Bestrahlungsstärken
+# der DWD-Stationen, Prädiktoren die ICON-D2-Surface-Level-Prognosen.
+# Details: docs/preprocess_icond2_solar.md, docs/predict_solar.md
+#
+# Stationsauswahl: von den 204 Stationen unter data.path führen nur 93 überhaupt
+# ghi/dhi — die übrigen 111 haben die Spalten durchgehend NaN. Die Rollen
+# (train/val/test) sind aus data/station_split.csv übernommen, also identisch zum
+# Wind-Experiment.
+
+# hpo.cnn/rnn/fnn/fl und die fl-Sektion werden von
+# utils/hpo.py::get_hyperparameters UNBEDINGT gelesen — auch fuer TFT und
+# auch bei lookup_hpo: False. Ohne sie bricht train_cl.py mit KeyError ab.
+# Fuer einen zentralen TFT-Lauf sind die Werte selbst wirkungslos.
+
+data:
+  use_case: solar
+  path: /mnt/lambda1/nvme1/synthetic/raw/solar
+  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
+  stations_master: data/stations_master.csv
+  forecast_hours:
+  - '06'
+  - 09
+  - '12'
+  - '15'
+  freq: 30min
+  target_cols:
+  - ghi
+  - dhi
+  files:
+  - 00183
+  - '00232'
+  - 00282
+  - '00460'
+  - 00591
+  - 00596
+  - '00662'
+  - 00691
+  - '00704'
+  - 00856
+  - 00867
+  - 00880
+  - 00953
+  - 00963
+  - '01303'
+  - '01346'
+  - 01468
+  - '01605'
+  - '01766'
+  - '02014'
+  - '02115'
+  - '02171'
+  - 02483
+  - 02638
+  - '02712'
+  - 02925
+  - 02932
+  - '03015'
+  - '03032'
+  - '03126'
+  - '03167'
+  - '03231'
+  - 03287
+  - '03631'
+  - '03730'
+  - '04104'
+  - '04177'
+  - 04393
+  - '04466'
+  - '04642'
+  - '04745'
+  - '05142'
+  - 05397
+  - '05404'
+  - '05426'
+  - 05480
+  - 05629
+  - '05705'
+  - 05779
+  - 05792
+  - 05856
+  - '06163'
+  - 06197
+  - '07370'
+  - '07374'
+  - '15000'
+  val_files:
+  - '00427'
+  - 00853
+  - 01078
+  - 01358
+  - '01420'
+  - '01443'
+  - '01550'
+  - '01612'
+  - 01691
+  - 01975
+  - '02261'
+  - 02290
+  - 02559
+  - '02601'
+  - '02667'
+  - '03660'
+  - 03987
+  - 04911
+  - '05100'
+  - '15444'
+  test_files:
+  - '00342'
+  - '00701'
+  - 01048
+  - '01503'
+  - 01639
+  - 01684
+  - 02907
+  - 03028
+  - 03098
+  - '03366'
+  - 03668
+  - '03761'
+  - '04271'
+  - '04336'
+  - 04887
+  - 04928
+  - 05906
+  train_start: '2023-08-01'
+  test_start: '2025-08-01'
+  test_end: '2026-06-27'
+  train_frac: 1
+  val_frac: 0.25
+  scale_x: true
+  scale_y: false
+  use_pca: false
+  pca_components: 3
+  lag_in_col: false
+  n_neighbors: 5
+  retrain_interval: 1
+  eval_interval: 3
+params:
+  icond2_features:
+  - ghi_nwp
+  - dhi_nwp
+  - bhi_nwp
+  - clct
+  - alb_rad
+  - h_snow
+  - rho_snow
+  - prr_gsp
+  known_features:
+  - ghi_nwp
+  - dhi_nwp
+  - bhi_nwp
+  - clct
+  - alb_rad
+  - h_snow
+  - rho_snow
+  - prr_gsp
+  - solar_zenith_cos
+  - solar_azimuth_sin
+  - solar_azimuth_cos
+  - dni_extra
+  - ghi_clearsky
+  - hour_sin
+  - hour_cos
+  - doy_sin
+  - doy_cos
+  observed_features:
+  - ghi
+  - dhi
+  static_features:
+  - altitude
+  - latitude
+  - longitude
+  next_n_grid_points: 1
+  get_next_grid_points_method: geodesic_next
+  next_n_stations: 0
+  topo_features_path: /mnt/lambda1/nvme1/topo_features
+  target_transform: none
+  measurement_time_label: right
+  sub_hourly_fill: ffill
+  max_nan_frac: 0.5
+  # Pro Zielgroesse, nicht global: ein einzelner Spaltenname wuerde JEDES Ziel
+  # gegen dieselbe Spalte messen — dhi gegen ghi_nwp ergab Baseline-RMSE 165
+  # statt 41 W/m² und ein Skill_NWP von +0.77, das nichts aussagt.
+  nwp_baseline_col:
+    ghi: ghi_nwp
+    dhi: dhi_nwp
+  daytime_zenith_threshold: 85
+  nwp_workers: 8
+  nwp_models:
+  - icon-d2
+  ecmwf_features: []
+  random_seed: 42
+model:
+  name: tft
+  num_workers: 4
+  output_dim: 96
+  lookback: 96
+  horizon: 96
+  step_size: 96
+  batch_size: 32
+  epochs: 100
+  lr: 0.0002
+  optimizer: adam
+  loss: mse
+  metrics:
+  - mae
+  - rmse
+  - r^2
+  tft:
+    n_heads: 4
+    hidden_dim: 32
+    dropout: 0.2
+    n_lstm_layers: 1
+    static_embedding_dim: 16
+    num_quantiles: 1
+    clipnorm: 1.0
+  fnn:
+    units: 128
+    n_layers: 2
+  cnn:
+    filters: 128
+    kernel_size: 3
+    n_cnn_layers: 10
+    increase_filters: false
+  rnn:
+    n_rnn_layers: 2
+    units: 64
+    dropout: 0.01
+  attention_heads: 32
+  callbacks: false
+  shuffle: true
+  force_retrain: true
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+    monitor: val_rmse
+    mode: min
+    restore_best_weights: true
+  parallelize: false
+  lookup_hpo: true
+  verbose: 1
+hpo:
+  studies_path: /mnt/nas/optuna_studies/optuna_viktor.db
+  objectives:
+  - metric: val_rmse
+    direction: minimize
+  trials: 150
+  kfolds: 12
+  min_train_date: '2024-06-30'
+  val_split: 1
+  pruning:
+    use_median_pruner: true
+    n_startup_trials: 10
+    n_warmup_steps: 2
+    interval_steps: 1
+    disable_pruning: false
+  batch_size:
+  - 32
+  - 1024
+  epochs:
+  - 1
+  - 150
+  n_layers:
+  - 1
+  - 4
+  n_cnn_layers:
+  - 1
+  - 10
+  n_rnn_layers:
+  - 1
+  - 7
+  learning_rate:
+  - 0.0001
+  - 0.01
+  attention_heads:
+  - 1
+  - 64
+  tft:
+    n_heads:
+    - 1
+    - 8
+    hidden_dim:
+    - 8
+    - 256
+    dropout:
+    - 0.01
+    - 0.8
+    n_lstm_layers:
+    - 1
+    - 5
+    static_embedding_dim:
+    - 8
+    - 128
+    num_quantiles:
+    - 1
+    clipnorm:
+    - 0
+    - 10.0
+  cnn:
+    filters:
+    - 16
+    - 128
+    kernel_size:
+    - 2
+    - 5
+    increase_filters: false
+  rnn:
+    units:
+    - 16
+    - 100
+    dropout:
+    - 0.0
+    - 0.8
+  fnn:
+    units:
+    - 32
+    - 256
+  fl:
+    strategy: fedavg
+    personalize: false
+    n_rounds:
+    - 1
+    - 20
+    server_lr:
+    - 0.0001
+    - 0.1
+    beta_1:
+    - 0
+    - 1
+    beta_2:
+    - 0
+    - 1
+    tau:
+    - 0.0001
+    - 0.1
+eval:
+  results_path: results
+  eval_on_all_test_data: true
+  retrain_interval: 0
+  t_0: 12
+fl:
+  clients:
+    clientA:
+    - 00183
+    - '00662'
+    - 00953
+    - '01766'
+    - '02712'
+    - '03167'
+    - '04177'
+    - 05397
+    - 05779
+    - '07374'
+    clientB:
+    - '00232'
+    - 00691
+    - 00963
+    - '02014'
+    - 02925
+    - '03231'
+    - 04393
+    - '05404'
+    - 05792
+    - '15000'
+    clientC:
+    - 00282
+    - '00704'
+    - '01303'
+    - '02115'
+    - 02932
+    - 03287
+    - '04466'
+    - '05426'
+    - 05856
+    clientD:
+    - '00460'
+    - 00856
+    - '01346'
+    - '02171'
+    - '03015'
+    - '03631'
+    - '04642'
+    - 05480
+    - '06163'
+    clientE:
+    - 00591
+    - 00867
+    - 01468
+    - 02483
+    - '03032'
+    - '03730'
+    - '04745'
+    - 05629
+    - 06197
+    clientF:
+    - 00596
+    - 00880
+    - '01605'
+    - 02638
+    - '03126'
+    - '04104'
+    - '05142'
+    - '05705'
+    - '07370'
+  strategy: fedavg
+  n_rounds: 20
+  personalize: false
+  fedopt:
+    server_lr: 0.001
+    beta_1: 0.9
+    beta_2: 0.99
+    tau: 0.001
+  force_retrain: true
+  verbose: true
+  save_history: false
+  num_gpus: 1
+  num_cpus: 11

@@ -1,0 +1,377 @@
+data:
+  use_case: solar
+  path: /mnt/lambda1/nvme1/synthetic/raw/solar
+  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
+  stations_master: data/stations_master.csv
+  forecast_hours:
+  - '06'
+  - 09
+  - '12'
+  - '15'
+  freq: 30min
+  target_cols:
+  - ghi
+  - dhi
+  files:
+  - 00183
+  - '00232'
+  - 00282
+  - '00460'
+  - 00591
+  - 00596
+  - '00662'
+  - 00691
+  - '00704'
+  - 00856
+  - 00867
+  - 00880
+  - 00953
+  - 00963
+  - '01303'
+  - '01346'
+  - 01468
+  - '02014'
+  - '02115'
+  - '02171'
+  - 02483
+  - 02638
+  - '02712'
+  - 02925
+  - 02932
+  - '03015'
+  - '03032'
+  - '03167'
+  - '03231'
+  - 03287
+  - '03631'
+  - '03730'
+  - '04104'
+  - '04177'
+  - 04393
+  - '04466'
+  - '04642'
+  - '04745'
+  - '05142'
+  - 05397
+  - '05404'
+  - '05426'
+  - 05480
+  - '05705'
+  - 05779
+  - 05792
+  - 05856
+  - '06163'
+  - 06197
+  - '07370'
+  - '07374'
+  - '15000'
+  val_files:
+  - 00853
+  - 01358
+  - '01420'
+  - '01443'
+  - '01550'
+  - '01612'
+  - 01691
+  - 01975
+  - '02261'
+  - 02290
+  - 02559
+  - '02601'
+  - '02667'
+  - '03660'
+  - 03987
+  - 04911
+  - '05100'
+  - '15444'
+  test_files:
+  - '00342'
+  - '00701'
+  - 01048
+  - '01503'
+  - 01639
+  - 01684
+  - 03098
+  - '03366'
+  - 03668
+  - '03761'
+  - '04271'
+  - '04336'
+  - 04887
+  - 04928
+  - 05906
+  # Abschlussbewertung: 12 Monate Training, 12 Monate Test — ein voller
+  # Jahresgang im Test, damit die Bilanz nicht an einer Jahreszeit haengt.
+  # train_start bleibt 2023-08-01: ICON-D2 SL beginnt am 2023-07-24, der
+  # 15-UTC-Lauf erst am 2023-08-08. Juli 2023 gibt es schlicht nicht.
+  # Kein Puffer vor test_start: der Split greift auf 'starttime', also den NWP-Lauf
+  # (preprocessing.py:407). Ein Puffer verwirft die Laeufe dazwischen ersatzlos —
+  # 4 Tage x 4 Vorhersagestunden = 16 Laeufe je Station. Ohne Puffer reicht der
+  # letzte Trainingslauf ueber den Horizont (48 h) in den Testzeitraum: seine Ziele
+  # ueberschneiden 2 von 366 Testtagen, 0.55 %. Das ist der guenstigere Tausch.
+  train_start: '2023-08-01'
+  train_end: '2024-07-31'
+  test_start: '2024-08-01'
+  test_end: '2025-08-01'
+  train_frac: 1
+  scale_x: true
+  scale_y: false
+  use_pca: false
+  pca_components: 3
+  lag_in_col: false
+  n_neighbors: 5
+  retrain_interval: 1
+  eval_interval: 1
+  ecmwf_solar_path: /mnt/lambda1/nvme1/ecmwf/parquet/solar
+params:
+  icond2_features:
+  - ghi_nwp
+  - dhi_nwp
+  - bhi_nwp
+  - kt_nwp
+  - clct
+  - alb_rad
+  - h_snow
+  - rho_snow
+  - prr_gsp
+  known_features:
+  - ghi_nwp
+  - dhi_nwp
+  - bhi_nwp
+  - clct
+  - alb_rad
+  - h_snow
+  - rho_snow
+  - prr_gsp
+  - solar_zenith_cos
+  - solar_azimuth_sin
+  - solar_azimuth_cos
+  - dni_extra
+  - ghi_clearsky
+  - hour_sin
+  - hour_cos
+  - doy_sin
+  - doy_cos
+  - kt_nwp
+  - airmass
+  - dni_clearsky
+  - dhi_clearsky
+  - ecmwf_ghi
+  - ecmwf_dhi
+  - ecmwf_bhi
+  - ecmwf_toa
+  - ecmwf_bhi_clearsky
+  - ecmwf_t_2m
+  - ecmwf_tp
+  - ecmwf_fal
+  # Variante MIT Lag: das Modell sieht die eigenen Messungen der letzten 48 h.
+  observed_features:
+  - ghi
+  - dhi
+  static_features:
+  - altitude
+  - latitude
+  - longitude
+  next_n_grid_points: 1
+  get_next_grid_points_method: geodesic_next
+  next_n_stations: 0
+  topo_features_path: /mnt/lambda1/nvme1/topo_features
+  target_transform: nwp_residual
+  measurement_time_label: right
+  sub_hourly_fill: ffill
+  max_nan_frac: 0.5
+  nwp_baseline_col:
+    ghi: ghi_nwp
+    dhi: dhi_nwp
+  daytime_zenith_threshold: 85
+  nwp_workers: 8
+  nwp_models:
+  - icon-d2
+  - ecmwf
+  ecmwf_features:
+  - ecmwf_ghi
+  - ecmwf_dhi
+  - ecmwf_bhi
+  - ecmwf_toa
+  - ecmwf_bhi_clearsky
+  - ecmwf_t_2m
+  - ecmwf_tp
+  - ecmwf_fal
+  random_seed: 42
+model:
+  name: tft
+  num_workers: 4
+  output_dim: 96
+  lookback: 96
+  horizon: 96
+  step_size: 96
+  batch_size: 32
+  epochs: 100
+  lr: 0.0005
+  optimizer: adam
+  loss: mse
+  metrics:
+  - mae
+  - rmse
+  - r^2
+  tft:
+    n_heads: 4
+    hidden_dim: 32
+    dropout: 0.2
+    n_lstm_layers: 1
+    static_embedding_dim: 16
+    num_quantiles: 1
+    clipnorm: 10.0
+  fnn:
+    units: 128
+    n_layers: 2
+  cnn:
+    filters: 128
+    kernel_size: 3
+    n_cnn_layers: 10
+    increase_filters: false
+  rnn:
+    n_rnn_layers: 2
+    units: 64
+    dropout: 0.01
+  attention_heads: 32
+  callbacks: false
+  shuffle: true
+  force_retrain: true
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.0001
+    monitor: val_rmse
+    mode: min
+    restore_best_weights: true
+  parallelize: false
+  lookup_hpo: false
+  verbose: 1
+hpo:
+  studies_path: /mnt/nas/optuna_studies/optuna_viktor.db
+  objectives:
+  - metric: val_rmse
+    direction: minimize
+  # Fold-Wert = beste Epoche, nicht die letzte. epochs ist kein Suchparameter
+  # (hpo.py:670), stattdessen laeuft Early Stopping mit restore_best_weights —
+  # 'last' wuerde das zurueckgegebene Modell mit einer anderen Epoche bewerten
+  # als der, deren Gewichte es traegt. Default bleibt 'last' fuer Altstudien.
+  objective_reduction: best
+  trials: 150
+  kfolds: 12
+  min_train_date: '2024-06-30'
+  val_split: 1
+  pruning:
+    use_median_pruner: true
+    n_startup_trials: 10
+    n_warmup_steps: 2
+    interval_steps: 1
+    disable_pruning: false
+  batch_size:
+  - 32
+  - 1024
+  epochs:
+  - 1
+  - 150
+  n_layers:
+  - 1
+  - 4
+  n_cnn_layers:
+  - 1
+  - 10
+  n_rnn_layers:
+  - 1
+  - 7
+  learning_rate:
+  - 0.0001
+  - 0.01
+  attention_heads:
+  - 1
+  - 64
+  tft:
+    n_heads:
+    - 1
+    - 8
+    hidden_dim:
+    - 8
+    - 256
+    dropout:
+    - 0.01
+    - 0.8
+    n_lstm_layers:
+    - 1
+    - 5
+    static_embedding_dim:
+    - 8
+    - 128
+    num_quantiles:
+    - 1
+    clipnorm:
+    - 0
+    - 10.0
+  cnn:
+    filters:
+    - 16
+    - 128
+    kernel_size:
+    - 2
+    - 5
+    increase_filters: false
+  rnn:
+    units:
+    - 16
+    - 100
+    dropout:
+    - 0.0
+    - 0.8
+  fnn:
+    units:
+    - 32
+    - 256
+  fl:
+    strategy: fedavg
+    personalize: false
+    n_rounds:
+    - 1
+    - 20
+    server_lr:
+    - 0.0001
+    - 0.1
+    beta_1:
+    - 0
+    - 1
+    beta_2:
+    - 0
+    - 1
+    tau:
+    - 0.0001
+    - 0.1
+eval:
+  results_path: results/solar_ecmwf
+  eval_on_all_test_data: true
+  retrain_interval: 0
+  t_0: 12
+fl:
+  clients:
+    clientA:
+    - synth_00342
+    - synth_04928
+    clientB:
+    - synth_05158
+    - synth_01612
+    clientC:
+    - synth_00164
+  strategy: fedavg
+  n_rounds: 2
+  personalize: false
+  fedopt:
+    server_lr: 0.001
+    beta_1: 0.9
+    beta_2: 0.99
+    tau: 0.001
+  force_retrain: true
+  verbose: true
+  save_history: false
+  num_gpus: 1
+  num_cpus: 11

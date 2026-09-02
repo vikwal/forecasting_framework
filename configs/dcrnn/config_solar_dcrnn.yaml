@@ -1,36 +1,36 @@
 data:
   use_case: solar                                 # routes to solar preprocessing in train_dcrnn.py
   path: '/mnt/lambda1/nvme1/synthetic/raw/solar'          # Station_XXXXX.parquet with ghi, dhi, temperature_2m, …
-  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'          # SL files under {nwp_path}/SL/{run_hour:02d}/{station_id}/
-  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/solar'    # rk_pred per-station Parquets from run_solar_interpolation.py
-  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/solar' # KNN fallback Parquets ({col}_knn*.parquet)
+  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'          # flat SL files under {nwp_path}/SL/{run_hour:02d}/<lon>_<lat>_SL.parquet
+  # interpol_path / knnimputer_path erst setzen, wenn die Imputation für Solar
+  # tatsächlich gelaufen ist — die Verzeichnisse existieren derzeit nicht.
+  # interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/solar'
+  # knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/solar'
   stations_master: 'data/stations_master.csv'
+  # Nur die 93 Stationen mit tatsächlich vorhandenen ghi/dhi-Messungen; die
+  # Rollen entsprechen data/station_split.csv (identisch zum Wind-Experiment).
   files: [
-            '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
-            '03730', '05792', '05856', '15000', '05779', '04271', '02638', '02961', '05490', '05426',
-            '03761', '00303', '02483', '00596', '03513', '00691', '01200', '02014', '02667', '04036',
-            '04911', '00662', '00232', '05109', '01605', '05871', '15813', '05142', '01691', '01544',
-            '07370', '04931', '05797', '05705', '01001', '00161', '07341', '00433', '00298', '02932',
-            '02023', '01048', '02794', '13674', '03668', '05538', '01975', '04625', '01270', '02171',
-            '04104', '05100', '01503', '03093', '03098', '03287', '03086', '04393', '03402', '04094',
-            '00704', '05349', '01766', '02985', '06163', '01357', '01468', '00880', '04371', '01886',
-            '01420', '03015', '04464', '03196', '04466', '00853', '02044', '06344', '00963', '03321',
-            '02559', '07351', '04280', '02597', '00164', '07389', '03231', '01639', '06197', '06314',
-            '02485', '02856', '07396']
+            '00183', '00232', '00282', '00460', '00591', '00596', '00662', '00691', '00704', '00856',
+            '00867', '00880', '00953', '00963', '01303', '01346', '01468', '01605', '01766', '02014',
+            '02115', '02171', '02483', '02638', '02712', '02925', '02932', '03015', '03032', '03126',
+            '03167', '03231', '03287', '03631', '03730', '04104', '04177', '04393', '04466', '04642',
+            '04745', '05142', '05397', '05404', '05426', '05480', '05629', '05705', '05779', '05792',
+            '05856', '06163', '06197', '07370', '07374', '15000']
   val_files: [
-            '01550', '02907', '07393', '02497', '01757', '07367', '02812', '05397', '07412', '06159',
-            '00591', '05825', '03821', '04887', '03366', '05480', '05516', '02712', '05029', '07368',
-            '00701', '03167', '01358', '03126', '05800', '01587', '01694', '00282', '01869', '03925',
-            '03376', '19171', '07374', '00656', '02115', '01078', '03811', '03244', '04642', '15207',
-            '04745', '01580', '02261', '05629', '03379', '02252', '05930', '13965', '03028', '07369']
+            '00427', '00853', '01078', '01358', '01420', '01443', '01550', '01612', '01691', '01975',
+            '02261', '02290', '02559', '02601', '02667', '03660', '03987', '04911', '05100', '15444']
   test_files: [
-            '00096', '00427', '00603', '05371', '00840', '00867', '00891', '00953', '01262', '01303',
-            '05906', '01612', '01803', '01832', '02290', '02429', '02564', '02601', '07410', '02878',
-            '02925', '02928', '03166', '03268', '03362', '03660', '03897', '03946', '03987', '04024',
-            '04032', '00198', '04039', '04177', '04336', '13711', '04501', '04928', '05158', '05347',
-            '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342']
+            '00342', '00701', '01048', '01503', '01639', '01684', '02907', '03028', '03098', '03366',
+            '03668', '03761', '04271', '04336', '04887', '04928', '05906']
   test_start: '2025-08-01'
-  test_end:   '2025-10-31'
+  test_end:   '2026-06-27'
+  # ICON-D2 SL ist nativ 15-minütig (193 Schritte je Lauf), ML (Wind) nur stündlich.
+  # Zulässig ist jedes Vielfache von 15 min, das 48 h ganzzahlig teilt:
+  # '15min' → 192 Leads, '30min' → 96, '1h' → 48. Modell-Horizont mitziehen!
+  # BEWUSST noch 1h, waehrend CL/FL bereits auf '30min' stehen: der GNN-Solar-Pfad
+  # ist durch die Messluecken blockiert und daher ungetestet. Beim Umstellen auf
+  # '30min' muessen history_length/forecast_horizon auf 96 mit — und der
+  # rezeptive Bereich bzw. der VRAM-Bedarf ist dann neu zu pruefen.
   freq: '1h'
   train_frac: 1
   val_frac: 0.25
@@ -44,13 +44,17 @@ dcrnn:
   #   bhi_nwp       = aswdir_s                (direct beam on horizontal)
   #   wind_speed_nwp = sqrt(u_10m² + v_10m²)
   # All other names are treated as direct column names in the SL parquet.
-  icond2_features: ['ghi_nwp', 'dhi_nwp', 'clct', 'alb_rad', 't_2m']
+  icond2_features: ['ghi_nwp', 'dhi_nwp', 'bhi_nwp', 'clct', 'alb_rad', 'h_snow', 'rho_snow', 'prr_gsp']
   ecmwf_features: []             # set next_n_ecmwf: 0 to disable entirely
   measurement_features: ['ghi', 'dhi']
   target_col: 'ghi'
   n_workers: 16
   n_ahead_prefetch: 8
   prefetch_workers: 2
+  # DCRNN verlangt einen luecken­freien (T, N, M)-Block: 'break' bricht ab,
+  # 'drop' wuerde alle Solarstationen entfernen (jede hat mindestens eine Luecke).
+  # Der Solar-DCRNN-Lauf braucht daher zwingend die noch ausstehende Imputation
+  # (data.interpol_path / data.knnimputer_path, geostatistics/run_solar_interpolation.py).
   handle_nans: break
   interpolate_history: false
 
