@@ -1077,6 +1077,11 @@ Selbstkontrolle der Filterung auf denselben Zeilen: ICON-D2 **1.3036** gegen dok
 1.304 (Abweichung 0.0004), Persistenz **2.2342** gegen 2.240. Referenzen zur Einordnung:
 MOS-regional 1.1603, MOS-local 0.9452, TFT base 1.186.
 
+> **Nachtrag (§16.6):** Diese Tabelle ist unvollständig — `dcrnn_nwp_hist` (GRID+HIST)
+> fehlt, weil die Studie beim Erstellen dieser Ladder noch aktiv lief. Nachtrainiert
+> schlägt sie mit 1.0008 (gefiltert) alle fünf Arme hier, `dcrnn_idw_alt` (D')
+> eingeschlossen — s. §16.2/§16.6 für die vollständigen Zahlen.
+
 ### 15.3 Signifikanz auf Stationsebene
 
 Wilcoxon-Vorzeichen-Rangtest, zweiseitig, gepaart über die **Vereinigung** der drei Folds
@@ -1144,3 +1149,408 @@ identisch, nur fold3 (in der CSV-Zählung fold2) unterscheidet sich. `l1` hat ih
 abgelöst und liegt unter `archiv/stdhp_mtgnn_fold2_abgeloest_20260818/`. Ebenso
 archiviert: die älteren `ecmwf_test_fold0.csv` und `icon_d2_test_fold0.csv` auf `l2`, die
 das Notebook ohnehin in keiner Konfiguration als Referenz verwendet.
+
+---
+
+## 16. MTGNN (HPO-getunt) und tft_sp_base nachtrainiert, alle laufenden HPO-Studien gestoppt
+
+### 16.1 Anlass und Ablauf
+
+Am 2026-08-24 wurden alle noch laufenden HPO-Studien auf allen drei Hosts (lokal, `l1`,
+`ws`) gestoppt — DCRNN GRID+HIST, MTGNN (alle drei Varianten) und `tft_sp_base`.
+Reihenfolge wie in den Host-Notizen festgehalten: `hpo_keeper_plan.json` je Host auf
+leere `studies`-Liste gesetzt, `hpo_keeper` neu gestartet (damit er den leeren Plan
+übernimmt, bevor Worker beendet werden), erst danach alle Worker-Screens beendet. Keine
+verwaisten Screens oder Python-Prozesse zurückgeblieben (geprüft über `pstree` je Screen).
+
+Trial-Stand beim Stoppen (COMPLETE, bester gepoolter Wert):
+
+| Studie | COMPLETE | best_value |
+|---|---|---|
+| `cl_m-mtgnn_out-48_freq-1h_wind_mtgnn` | 110 | 1.2332 |
+| `cl_m-mtgnn_out-48_freq-1h_wind_mtgnn_nwp` | 113 | 1.2147 |
+| `cl_m-mtgnn_out-48_freq-1h_wind_mtgnn_nwp_hist` | 88 | 0.9785 |
+| `cl_m-tft-bc_out-48_freq-1h_wind_tft_sp_base` | 136 | 1.2433 |
+
+Alle vier Studien wurden mit demselben Rezept wie die DCRNN-Arme (§10/§13.3)
+nachtrainiert und ausgewertet: `train_mtgnn.py --hpo-study auto` (lädt den Optuna-
+Bestwert direkt aus Postgres) → `get_test_results_mtgnn.py --hpo-study auto`, analog für
+`tft_sp_base` über `train_cl_tft_bc.py` / `get_test_results_tft_bc.py` mit dem exakten
+Studiennamen `cl_m-tft-bc_out-48_freq-1h_wind_tft_sp_base` (kein `"auto"` — die
+tft_bc-Skripte verlangen den vollen Namen). Alle zwölf Läufe (vier Arme × drei Folds)
+liefen lokal auf vier GPUs parallel (train → eval je Fold sequenziell pro GPU), 0 Fehler,
+keine Tracebacks in den zwölf Trainingslogs.
+
+### 16.2 Haupttabelle, gefiltert, per Station, Mittel über drei Folds
+
+Dieselbe Filterung wie in §14/§15 (`build_imputation_mask`/`_lookup_imputed`,
+imputierte Zielstunden ausgeschlossen). Bei `tft_sp_base` normalisiert auf die bare
+Stations-ID (`synth_00161.csv` → `00161`), sonst identischer Code wie bei DCRNN/MTGNN.
+
+| Arm | fold1 | fold2 | fold3 | **Mittel** | imputierter Anteil |
+|---|---|---|---|---|---|
+| `mtgnn_nwp_hist` (GRID+HIST) | 0.9059 | 0.9611 | 1.0052 | **0.9574** | 0.60 / 0.68 / 0.86 % |
+| `dcrnn_nwp_hist` (GRID+HIST, s. §16.6) | 0.9642 | 1.0003 | 1.0379 | **1.0008** | 0.60 / 0.68 / 0.86 % |
+| `mtgnn_nwp` (GRID) | 1.1286 | 1.1650 | 1.2174 | **1.1703** | 0.60 / 0.68 / 0.86 % |
+| `tft_sp_base` | 1.1112 | 1.1769 | 1.2768 | **1.1883** | 0.00 % (dropna, s. §14.6/`tft_sp_hist`) |
+| `mtgnn` (BASE) | 1.1072 | 1.2617 | 1.2217 | **1.1969** | 0.60 / 0.68 / 0.86 % |
+
+Zur Einordnung gegen §15.2: `dcrnn_idw_alt` (D', bisheriger Spitzenreiter der dortigen
+Ladder) 1.0967, `dcrnn` (GRID) 1.1116, `dcrnn_base` 1.1782. Referenzen: ICON-D2 1.3036,
+Persistenz 2.2342, MOS-regional 1.1603, MOS-local 0.9452 (transduktive Obergrenze).
+
+`mtgnn_nwp_hist` unterbietet mit 0.9574 sowohl **alle** DCRNN-Arme (einschliesslich des
+nachträglich ergänzten `dcrnn_nwp_hist`, s. §16.6) als auch MOS-regional (1.1603)
+deutlich und nähert sich der transduktiven Obergrenze MOS-local (0.9452) auf 0.012 an —
+das ist das mit Abstand beste Modell der gesamten bisherigen Ablationsleiter.
+`dcrnn_nwp_hist` liegt mit 1.0008 klar auf Platz zwei, vor `dcrnn_idw_alt` (D', bisher
+Platz eins bei DCRNN). Die Rohwerte (ungefiltert) liegen je Fold nur 0.001–0.003 unter
+den gefilterten Zahlen, dieselbe kleine Verschiebung wie bei Wavenet in der vorigen
+Auswertung.
+
+### 16.3 Signifikanz auf Stationsebene
+
+Wilcoxon-Vorzeichen-Rangtest, zweiseitig, gepaart über die Vereinigung der drei Folds
+(N = 153), Holm-korrigiert — Methodik identisch zu §15.3, auf den ungefilterten
+Stations-CSVs. `dcrnn_idw_alt` (D') und `dcrnn_nwp_hist` (§16.6) als Referenz
+mitgeführt (gleiches `retrain_..._foldN.csv`-Namens- und Faltungsschema wie die vier
+neuen Arme, daher ohne Fold-Umrechnung direkt vergleichbar). 6 Arme, 15 Paare.
+
+| Vergleich | Median A−B | A besser | p (Holm) | signifikant |
+|---|---|---|---|---|
+| GRID gegen GRID+HIST | +0.1346 | 2.0 % | 1.7e-25 | ja |
+| BASE gegen GRID+HIST | +0.1303 | 5.9 % | 8.1e-25 | ja |
+| **GRID+HIST gegen tft_sp_base** | −0.1543 | 93.5 % | 1.7e-24 | **ja** |
+| GRID gegen `dcrnn_nwp_hist` | +0.1174 | 6.5 % | 4.4e-22 | ja |
+| **GRID+HIST gegen D'** | −0.0756 | 88.2 % | 7.1e-21 | **ja** |
+| tft_sp_base gegen `dcrnn_nwp_hist` | +0.1088 | 11.8 % | 1.1e-20 | ja |
+| BASE gegen `dcrnn_nwp_hist` | +0.1062 | 15.0 % | 5.2e-20 | ja |
+| **D' gegen `dcrnn_nwp_hist`** | +0.0430 | 20.3 % | 7.7e-16 | **ja** |
+| **GRID+HIST gegen `dcrnn_nwp_hist`** | −0.0283 | 75.2 % | 7.5e-10 | **ja** |
+| GRID gegen D' | +0.0534 | 31.4 % | 9.6e-07 | ja |
+| tft_sp_base gegen D' | +0.0541 | 30.7 % | 3.7e-06 | ja |
+| BASE gegen D' | +0.0483 | 34.6 % | 1.9e-05 | ja |
+| GRID gegen tft_sp_base | −0.0077 | 52.3 % | 0.81 | nein |
+| BASE gegen GRID | −0.0044 | 54.3 % | 1.0 | nein |
+| BASE gegen tft_sp_base | −0.0167 | 56.2 % | 1.0 | nein |
+
+"A besser" ist hier durchgehend der Anteil Stationen, an denen Arm A die *niedrigere*
+RMSE hat (kleiner ist besser) — bei "D' gegen `dcrnn_nwp_hist`" mit 20.3 % heisst das:
+`dcrnn_nwp_hist` gewinnt an 79.7 % der 153 Stationen.
+
+### 16.4 Befund
+
+`mtgnn_nwp_hist` (GRID+HIST) schlägt **jeden** anderen Arm in dieser Tabelle
+hochsignifikant, einschliesslich des bisherigen Spitzenreiters `dcrnn_idw_alt` (D',
+p_holm = 7.1e-21, an 88.2 % der 153 Stationen besser) und des nachträglich ergänzten
+`dcrnn_nwp_hist` (p_holm = 7.5e-10, an 75.2 % besser, s. §16.6). Die drei übrigen neuen
+Arme (`mtgnn`, `mtgnn_nwp`, `tft_sp_base`) sind untereinander statistisch nicht
+unterscheidbar (p_holm zwischen 0.81 und 1.0), liegen aber alle signifikant hinter D'
+**und** hinter `dcrnn_nwp_hist`.
+
+Zweiter, ebenso wichtiger Befund: `dcrnn_nwp_hist` schlägt `dcrnn_idw_alt` (D')
+signifikant (p_holm = 7.7e-16, an 79.7 % der Stationen besser). D' war in §15.2 als
+"bisheriger Spitzenreiter" der DCRNN-Ladder bezeichnet — das gilt nur, solange
+`dcrnn_nwp_hist` fehlt. Mit vollständiger Ladder ist `dcrnn_nwp_hist` der stärkste
+DCRNN-Arm, nicht D'.
+
+Das Ergebnis wiederholt qualitativ den DCRNN-Befund aus §15.4(a)/(b): die historischen
+NWP-Läufe als Zusatzfeature tragen den mit Abstand grössten Teil des gemessenen
+Gewinns — und zwar in **beiden** Architekturen (DCRNN wie MTGNN), nicht nur in einer.
+Anders als bei den übrigen DCRNN-Ablationen (B/C aus §15.1) liegt für `dcrnn_nwp_hist`
+und die MTGNN-Arme aber keine Zerlegung in Graph- vs. NWP-Knoten-Beitrag vor —
+`mtgnn`/`mtgnn_nwp` unterscheiden sich strukturell anders als `BASE`/`NOGRAPH` bei
+DCRNN (kein reines Analogon zu B/C), ein direkter Mechanismus-Vergleich mit §15.4 wäre
+Überinterpretation.
+
+### 16.5 Vorbehalte
+
+- Wie in §15.5: der Wilcoxon-Test läuft auf den **ungefilterten** CSVs, die Haupttabelle
+  in §16.2 ist gefiltert. Bei 0.6–0.9 % imputierten Stunden für MTGNN und 0 % für
+  `tft_sp_base` (dropna) ist ein Vorzeichenwechsel unwahrscheinlich, nicht geprüft.
+- Nur ein Retrain je Arm (kein Seed-Ensemble). Die in §14.4(a) gemessene
+  Lauf-zu-Lauf-Streuung (~0.014 RMSE, gemessen an `dcrnn_base`) liegt deutlich unter dem
+  Vorsprung von `mtgnn_nwp_hist` (~0.12–0.15 gegenüber den eigenen nächstbesten
+  Varianten, ~0.08 gegenüber D'). Für den Gesamtbefund also wahrscheinlich unbedenklich,
+  aber nicht durch Wiederholung abgesichert.
+- Die Budgets der Studien sind ungleich (88 bis 139 abgeschlossene Trials) und nicht
+  gegeneinander normalisiert, analog zu §15.5.
+- Alle fünf Arme (vier vom 2026-08-24, `dcrnn_nwp_hist` vom 2026-08-25, s. §16.6) wurden
+  auf einem einzelnen Host (lokal, vier bzw. eine GPU) nachtrainiert statt wie die
+  ursprüngliche DCRNN-Kampagne über drei Hosts verteilt — ein zu §5 analoges
+  Host-Vergleichsproblem entfällt damit hier per Konstruktion.
+
+### 16.6 Nachtrag: `dcrnn_nwp_hist` war in dieser Ladder zunächst nicht enthalten
+
+Direkt nach der ersten Fassung dieses Abschnitts fragte der Nutzer, ob DCRNN NWP+HIST
+noch fehle. Prüfung bestätigte das: die Studie
+`cl_m-dcrnn_out-48_freq-1h_wind_dcrnn_nwp_hist` war eine der beiden DCRNN-Studien, die
+beim Stoppen in §16.1 noch aktiv liefen (139 COMPLETE, best_value 1.0509, Trial #145) —
+sie war also nie in die finale HPO-getunte Retrain-Ladder aus §15 aufgenommen worden.
+Auf der Platte lagen für diesen Arm nur veraltete Checkpoints (Juni/Juli, vor mehreren
+zwischenzeitlichen Trial-Verbesserungen) und ein ungetunter `stdhp`-Trockenlauf, aber
+keine `retrain_dcrnn_nwp_hist_fold{1,2,3}.csv` im Namensschema der übrigen fünf
+DCRNN-Arme aus §15.2.
+
+Nachtrainiert mit demselben Rezept wie in §16.1 (`train_dcrnn.py --hpo-study auto` auf
+Trial #145 → `get_test_results_dcrnn.py --hpo-study auto`), eine GPU, drei Folds
+sequenziell, 0 Fehler. Die Zahlen sind bereits in §16.2 (Haupttabelle) und §16.3
+(Wilcoxon-Matrix) eingearbeitet. Kernbefund: `dcrnn_nwp_hist` (1.0008 gefiltert) ist der
+stärkste DCRNN-Arm der gesamten bisherigen Auswertung, signifikant vor `dcrnn_idw_alt`
+(D', bisher als Spitzenreiter geführt) — die in §15.2 berichtete DCRNN-Rangfolge war
+demnach unvollständig, nicht falsch: D' blieb dort nur vorn, weil der stärkere Arm nicht
+mitgerechnet wurde.
+
+## 17. Expanding-Window-Retraining der 5 Flagschiff-Arme
+
+Auftrag und Ausführung: `docs/expanding_window_retrain_handoff.md`. 5 Arme × 3 Folds
+× 3 Zeitschritte = 45 Trainings- und Eval-Läufe, 27.08.–29.08.2026 auf GPU 2
+(zwei parallele Worker, 50,6 h Wall-Clock, **45/45 mit `train=0 eval=0`, 0 Fehler**).
+Hyperparameter unverändert aus den bestehenden Optuna-Studies (`--hpo-study auto`),
+variiert wurde ausschliesslich das Zeitfenster. Auswertung: `scripts/eval_expwin.py`.
+
+### 17.1 Der Aufbau misst die gestellte Frage nicht direkt
+
+Die drei Zeitschritte haben nicht nur wachsende Trainingsfenster, sondern auch
+**verschiedene Validierungsfenster** — Aug–Nov / Dez–Mär / Apr–Jul. Ein Vergleich der
+RMSE über die Schritte hinweg misst daher Saison und Datenmenge zugleich. Die
+ungefilterten Rohzahlen zeigen in **allen fünf Armen** dasselbe Muster
+(Schritt 2 am schlechtesten, Schritt 3 am besten), und zwar auch dann, wenn das Modell
+gar nicht nachtrainiert wurde: das saisongleich geschnittene Kontrollmodell macht die
+Bewegung 1:1 mit. Der Effekt ist also Winter vs. Sommer, nicht Trainingsfenster.
+
+Auflösung ohne Neuberechnung: die Single-Window-Retrains aus §16 (fixes Fenster
+`train < 2024-08-01`) haben ihre Roh-Vorhersagen in
+`data/raw_preds/retrain_<arm>_fold<N>_raw.parquet` über den gesamten Zeitraum
+2024-08-01 … 2025-08-02 liegen. Auf die drei Schrittfenster geschnitten ergeben sie je
+Schritt ein **saisongleiches Kontrollmodell ohne Fenstererweiterung**. Verglichen wird
+also Expanding gegen Fix innerhalb desselben Fensters.
+
+Dabei ist **Schritt 1 eine Nullmessung**: sein Trainingsfenster (`< 2024-08-01`) ist
+identisch mit dem der Kontrolle. Beide Modelle unterscheiden sich nur in Seed und
+Early-Stopping-Fenster (4 statt 12 Monate). Was dort an Differenz auftaucht, ist
+Rauschen, kein Datenmengeneffekt — und liefert den Massstab für Schritt 2 und 3.
+
+### 17.2 Haupttabelle, gefiltert, per Station, Mittel über drei Folds
+
+Filterung wie in §14–16 (`build_imputation_mask`/`_lookup_imputed`, imputierte
+Zielstunden ausgeschlossen; imputierter Anteil 0,29–1,82 % je Fold/Schritt). Maske
+gegen die gt<0-Stunden validiert. EW = Expanding-Window-Retrain, Fix = saisongleicher
+Ausschnitt des Single-Window-Retrains.
+
+| Arm | S1 EW | S1 Fix | Δ1 | S2 EW | S2 Fix | Δ2 | S3 EW | S3 Fix | Δ3 |
+|---|---|---|---|---|---|---|---|---|---|
+| DCRNN GRID (A) | 1.0981 | 1.1010 | −0.0029 | 1.1427 | 1.1429 | −0.0003 | 1.0746 | 1.0831 | −0.0085 |
+| DCRNN IDW (D') | 1.0952 | 1.0918 | +0.0034 | 1.1425 | 1.1322 | +0.0103 | 1.0727 | 1.0554 | +0.0173 |
+| DCRNN GRID+HIST | 1.0045 | 0.9977 | +0.0068 | 1.0287 | 1.0228 | +0.0059 | **0.9637** | 0.9771 | **−0.0135** |
+| MTGNN GRID | 1.1421 | 1.1629 | −0.0208 | 1.2054 | 1.2254 | −0.0200 | 1.0850 | 1.1116 | −0.0267 |
+| MTGNN GRID+HIST | 0.9506 | 0.9508 | −0.0003 | 0.9923 | 0.9921 | +0.0001 | **0.9145** | 0.9245 | **−0.0099** |
+
+Negatives Δ = Expanding besser. Die absolute Rangfolge der Arme bleibt über alle drei
+Schritte die aus §16.2 bekannte: MTGNN GRID+HIST vorn, dahinter DCRNN GRID+HIST, dann
+die drei Arme ohne NWP-Historie.
+
+### 17.3 Signifikanz auf Stationsebene
+
+Wilcoxon-Vorzeichen-Rangtest, zweiseitig, gepaart über die Vereinigung der drei Folds
+(N = 153), Holm über alle 15 Vergleiche. Methodik wie §15.3/§16.3.
+
+| Arm | Schritt | Median Δ | EW besser | p (Holm) | signifikant |
+|---|---|---|---|---|---|
+| DCRNN GRID+HIST | 3 | −0.0114 | 65.4 % | 7.2e-03 | ja |
+| MTGNN GRID | 3 | −0.0300 | 65.4 % | 4.8e-02 | ja |
+| MTGNN GRID+HIST | 3 | −0.0111 | 71.9 % | 5.0e-06 | ja |
+| *alle übrigen 12 Vergleiche* | 1, 2 | −0.030 … +0.006 | 38–62 % | ≥ 0.29 | nein |
+
+### 17.4 Differenz-in-Differenzen gegen die Nullmessung
+
+Die Tabelle in §17.3 überschätzt den Effekt dort, wo schon Schritt 1 — der **keinen**
+Datenvorteil hat — in dieselbe Richtung ausschlägt. Sauberer ist je Station
+(EW − Fix)_Schritt N − (EW − Fix)_Schritt 1. Holm über 10 Vergleiche:
+
+| Arm | Schritt | Median DiD | besser | p (Holm) | signifikant |
+|---|---|---|---|---|---|
+| **DCRNN GRID+HIST** | **3** | **−0.0236** | 67.3 % | **3.1e-04** | **ja** |
+| **MTGNN GRID+HIST** | **3** | **−0.0105** | 63.4 % | **8.2e-04** | **ja** |
+| MTGNN GRID | 3 | −0.0091 | 52.9 % | 1.00 | nein |
+| MTGNN GRID | 2 | −0.0121 | 53.6 % | 1.00 | nein |
+| DCRNN IDW (D') | 2 / 3 | +0.0143 / +0.0104 | 43 / 44 % | 0.90 | nein |
+| DCRNN GRID | 2 / 3 | −0.0093 / −0.0080 | 52 / 57 % | 1.00 | nein |
+| DCRNN GRID+HIST | 2 | +0.0021 | 49.7 % | 1.00 | nein |
+| MTGNN GRID+HIST | 2 | −0.0020 | 52.3 % | 1.00 | nein |
+
+Der scheinbare Gewinn von MTGNN GRID aus §17.3 verschwindet hier: sein Schritt-3-Δ von
+−0.0300 steckt zu −0.0208 bereits in der Nullmessung, ist also grösstenteils Seed- und
+Early-Stopping-Rauschen, nicht Datenmenge.
+
+### 17.5 Befund
+
+**Nachtrainieren mit wachsendem Fenster hilft, aber nur den beiden Armen mit
+NWP-Historie und erst bei +8 Monaten.** `dcrnn_nwp_hist` gewinnt 0.0236 RMSE
+(an 67.3 % der 153 Stationen, p_holm = 3.1e-04), `mtgnn_nwp_hist` 0.0105
+(63.4 %, p_holm = 8.2e-04). Die drei Arme ohne Historie — DCRNN GRID, DCRNN IDW,
+MTGNN GRID — zeigen über alle Schritte **keinen** signifikanten Effekt.
+
+Bei +4 Monaten (Schritt 2) ist in **keinem** Arm etwas nachweisbar. Der Effekt setzt
+also erst zwischen +4 und +8 Monaten ein und ist auch dann klein: 0.010–0.024 m/s
+entsprechen 1,1–2,4 % relativ, gemessen an einem Rauschband von ±0.02 aus der
+Nullmessung.
+
+Das passt zum Mechanismuskapitel: die Arme, die zusätzlich NWP-Historie konsumieren,
+haben den grösseren Eingangsraum und profitieren als einzige davon, ihn mit mehr Daten
+zu füllen; die Arme ohne Historie sind bei ~12 Monaten Trainingsdaten bereits gesättigt.
+
+### 17.6 Vorbehalte
+
+- **Kein separater Testsatz.** Ausgewertet wird das Val-Fenster (die 51 je Fold nie
+  gesehenen Zielstationen), das zugleich das Early-Stopping-Fenster ist. Die Zahlen
+  sind damit leicht optimistisch — für den *Vergleich* EW gegen Fix unkritisch, da
+  beide Seiten denselben Bias tragen, für absolute Aussagen nicht zu verwenden. Der
+  zurückgehaltene Testsatz ab 2025-08-01 wurde nicht angerührt.
+- **Nur drei Zeitschritte, nur ein Seed je Zelle.** Das Rauschband aus der Nullmessung
+  (±0.02) liegt in derselben Grössenordnung wie die gefundenen Effekte. Die beiden
+  signifikanten Befunde stützen sich auf die Paarung über 153 Stationen, nicht auf
+  wiederholte Läufe.
+- **Schritt 1 ist nicht exakt deckungsgleich.** Der Kontroll-Ausschnitt hat dort
+  1 185 036 statt 1 194 624 Zeilen (die Roh-Vorhersagen der Single-Window-Retrains
+  beginnen bei `run_time` 2024-08-01 06:00). Betroffen sind 0,8 % der Zeilen am
+  Fensteranfang; die Paarung erfolgt ohnehin je Station, nicht je Zeile.
+- **Die Val-Fenster sind nicht gleich schwer.** Dez–Mär hat in allen Armen und auch in
+  der Kontrolle die höchste RMSE. Absolute Vergleiche *zwischen* Schritten bleiben
+  deshalb auch nach dieser Auswertung unzulässig — nur die Δ- und DiD-Spalten sind
+  über Schritte hinweg interpretierbar.
+
+## 18. Testjahr-Auswertung der 5 Flagschiff-Arme (vorläufig, 12 von 15 Läufen)
+
+**Stand 2026-09-01 08:40 — 12 der 15 Läufe fertig, 0 Fehler.** Es fehlen noch
+`mtgnn_nwp_hist` fold2/fold3 und `mtgnn_nwp` fold3 (laufen, s. § 18.6). Alle
+MTGNN-Zahlen unten sind daher noch nicht über drei Folds gemittelt und können
+sich verschieben. Auswertung: `scripts/eval_testyear.py`, Abbildungen unter
+`figures/testyear/`.
+
+### 18.1 Aufbau — und warum er vom Auftrag abweicht
+
+Geplant war die Auswertung auf dem reservierten Testsatz (`test_files`, 50
+Stationen, `--test-mode`). **Das ist derzeit nicht möglich:** 46 der 50
+Teststationen haben Messlücken, die die Imputationskette nicht füllt (55–405
+Stunden je Station, über den gesamten Zeitraum verteilt). `handle_nans: drop`
+würde den Testsatz auf 4 Stationen reduzieren. Die 102 Trainings- und 51
+Validierungsstationen sind dagegen lückenlos — deshalb ist das nie aufgefallen,
+alle bisherigen Läufe liefen im Dev-Modus.
+
+Die Lücken wären füllbar: die KNN-Imputation (`knnimputer_path`) ist für alle
+203 Stationen im Testfenster lückenlos. Der DCRNN-Pfad ruft sie aber nur für
+`wind_direction` auf (`get_test_results_dcrnn.py:274`), nicht für `wind_speed`.
+Das zu ändern ist ein Eingriff in die Preprocessing-Kette und stand vor einer
+finalen Auswertung nicht zur Debatte.
+
+**Stattdessen umgesetzt:** alle 5 Arme neu trainiert auf allem vor 2025-08-01
+(2 Jahre statt 1 — der Retrain, der laut § 17 nur den HIST-Armen nützt, den die
+übrigen drei hier aber zwangsläufig mitbekommen), Zero-Shot-Auswertung auf den
+**51 `val_files`-Zielstationen** im Fenster **2025-08-01 … 2026-06-01**.
+Early Stopping auf dem Testfenster.
+
+Zweite Einschränkung: das Fenster endet am 2026-06-01 statt 2026-07-31, weil die
+Interpolationsdaten (`interpol_path`) nur bis **2026-06-13** reichen — obwohl die
+Rohmessungen aller 205 Stationen bis mindestens 2026-07-28 vorliegen und der
+wöchentliche Cron am 2026-08-31 sauber durchlief. Vermutlich ein veralteter
+Cache-Key; ungeprüft. Das Testfenster umfasst damit 10 statt 12 Monate,
+deckt aber einen vollständigen Jahresgang minus Juni/Juli ab.
+
+Configs: `configs/testyear/` auf l1 (Dateinamen identisch zur Basis, s.
+[[expwin-namensschema-optuna]] bzw. § 8.1). Suffix `testyear`, Roh-Ergebnisse
+`data/raw_preds/testyear_<arm>_fold<N>_raw.parquet`.
+
+### 18.2 Haupttabelle, gefiltert, per Station
+
+Filterung wie §14–17 (imputierte Zielstunden ausgeschlossen).
+
+| Arm | fold1 | fold2 | fold3 | **Mittel** |
+|---|---|---|---|---|
+| **DCRNN GRID+HIST** | 1.0215 | 1.0563 | 1.1064 | **1.0614** |
+| MTGNN GRID+HIST | 1.0711 | *läuft* | *läuft* | *(1.0711)* |
+| DCRNN GRID | 1.1634 | 1.2081 | 1.2460 | 1.2058 |
+| DCRNN IDW (D') | 1.1898 | 1.2122 | 1.2423 | 1.2148 |
+| MTGNN GRID | 1.2247 | 1.2629 | *läuft* | *(1.2438)* |
+| ICON-D2 | 1.2668 | 1.2253 | 1.3284 | 1.2735 |
+| Persistenz | 2.0438 | 2.1352 | 2.1862 | 2.1217 |
+
+Alle Arme schlagen ICON-D2, aber die drei Arme ohne NWP-Historie nur um 3–5 %
+(1.21–1.24 gegen 1.27), die beiden HIST-Arme um 16 % (1.06–1.07).
+
+### 18.3 Signifikanz auf Stationsebene
+
+Wilcoxon, zweiseitig, gepaart über die Vereinigung der verfügbaren Folds,
+Holm über 10 Vergleiche. **n variiert**, weil für MTGNN noch Folds fehlen.
+
+| A | B | n | Median A−B | A besser | p (Holm) |
+|---|---|---|---|---|---|
+| DCRNN GRID+HIST | DCRNN IDW (D') | 153 | −0.1264 | 92.2 % | <1e-15 |
+| DCRNN GRID+HIST | DCRNN GRID | 153 | −0.0993 | 86.3 % | <1e-15 |
+| DCRNN GRID+HIST | MTGNN GRID | 102 | −0.1445 | 98.0 % | <1e-15 |
+| MTGNN GRID+HIST | MTGNN GRID | 51 | −0.0789 | 80.4 % | 1.0e-06 |
+| **DCRNN GRID+HIST** | **MTGNN GRID+HIST** | **51** | **−0.0560** | **82.4 %** | **4.7e-05** |
+| MTGNN GRID+HIST | DCRNN IDW (D') | 51 | −0.0676 | 76.5 % | 1.0e-04 |
+| MTGNN GRID | DCRNN GRID | 102 | +0.0668 | 31.4 % | 2.7e-03 |
+| MTGNN GRID | DCRNN IDW (D') | 102 | +0.0292 | 36.3 % | 2.1e-02 |
+| MTGNN GRID+HIST | DCRNN GRID | 51 | −0.0291 | 58.8 % | 2.6e-02 |
+| DCRNN GRID | DCRNN IDW (D') | 153 | −0.0131 | 54.2 % | 0.31 |
+
+### 18.4 Befund: die Gruppierung überträgt sich, die Rangfolge innerhalb nicht
+
+Der Abstand **mit gegen ohne NWP-Historie** ist auf dem Testjahr genauso deutlich
+wie im Validierungsjahr — 1.06 gegen 1.21–1.24, hochsignifikant in jedem
+Paarvergleich. Das ist der Befund, der trägt.
+
+**Innerhalb** der HIST-Gruppe kippt die Rangfolge: im Validierungsjahr war
+`mtgnn_nwp_hist` der beste Arm der gesamten Ladder (0.9145 in § 17.2, vor
+`dcrnn_nwp_hist` mit 0.9637), auf dem Testjahr liegt `dcrnn_nwp_hist` vorn
+(1.0215 gegen 1.0711 in fold1, an 82.4 % der Stationen besser, p_holm = 4.7e-05).
+**Dieser Befund steht und fällt mit den beiden fehlenden MTGNN-Folds** — er
+stützt sich derzeit auf fold1 allein und ist bis zum Nachzug nicht zitierfähig.
+
+`figures/testyear/04_error_by_horizon.png` zeigt den Mechanismus: die beiden
+HIST-Arme starten bei Stunde 1 mit 0.69–0.73 m/s (sie sehen die jüngsten
+Messungen), die drei anderen bei 1.17–1.20, praktisch auf ICON-D2-Niveau. Der
+Vorsprung schrumpft mit der Vorlaufzeit, verschwindet aber bis Stunde 48 nicht:
+dort liegen die HIST-Arme bei ~1.21–1.27, die übrigen bei ~1.33–1.39, ICON-D2
+bei 1.50.
+
+`figures/testyear/10_val_vs_test.png`: alle fünf Arme liegen über der Diagonale,
+das Testjahr ist durchgehend schwerer als das Validierungsjahr (auch für
+ICON-D2). Die Zwei-Gruppen-Struktur bleibt in beiden Jahren klar getrennt.
+
+### 18.5 Abbildungen
+
+Unter `figures/testyear/` je als PNG und PDF:
+
+| Datei | Inhalt |
+|---|---|
+| `01_bar_rmse` | Balkendiagramm RMSE je Arm mit Fold-Streuung, ICON-D2/Persistenz als Referenzlinien |
+| `02_fold_dispersion` | Streuung der Arme über die drei Folds |
+| `03_paired_diff_boxplots` | Gepaarte ΔRMSE je Station für alle Armpaare |
+| `04_error_by_horizon` | RMSE über den Prognosehorizont 1–48 h, mit ICON-D2 und Persistenz |
+| `05_error_by_windspeed_class` | RMSE nach gemessener Windklasse (0–2 … >12 m/s) |
+| `06_error_by_month` | RMSE über die Monate des Testfensters |
+| `07_scatter_best` | Hexbin Vorhersage gegen Messung, bester Arm |
+| `08_scatter_all` | Dasselbe als Panel über alle Arme |
+| `09_skill_nwp_distribution` | Verteilung des Skill gegenüber ICON-D2 über die Stationen |
+| `10_val_vs_test` | RMSE Validierungsjahr gegen Testjahr je Arm |
+
+Tabellen als CSV: `data/test_results/testyear_overview.csv`,
+`testyear_wilcoxon.csv`, `testyear_per_station.csv` (Stationsebene, für eigene
+Auswertungen und Abbildungen).
+
+### 18.6 Vorbehalte
+
+- **3 von 15 Läufen fehlen** (`mtgnn_nwp_hist` fold2/3, `mtgnn_nwp` fold3). Alle
+  MTGNN-Mittelwerte und jeder Vergleich mit n < 153 sind vorläufig.
+- **Kein separater Testsatz im Stationsraum.** Ausgewertet wird auf den 51
+  `val_files`, die im Dev-Training als Early-Stopping-Menge dienten. Zeitlich ist
+  der Hold-out sauber (das Testjahr war nie im Training), räumlich sind diese
+  Stationen zero-shot, aber nicht unberührt. Der reservierte 50-Stationen-Satz
+  bleibt bis zur Imputationsreparatur ungenutzt (§ 18.1).
+- **Early Stopping auf dem Testfenster** (so entschieden). Die Testzahlen sind
+  dadurch leicht optimistisch; der Effekt trifft alle fünf Arme gleich und
+  verzerrt den Armvergleich nicht.
+- **10 statt 12 Monate**, Juni/Juli 2026 fehlen (§ 18.1).
