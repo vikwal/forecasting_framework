@@ -37,13 +37,11 @@ from geostatistics.train_stgnn2 import (          # noqa: E402
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
-    load_interpol_imputation,
-    apply_interpol_imputation,
+    impute_meas_raw_from_interpol,
     load_knn_imputation,
     apply_knn_imputation,
     require_nwp_elevation_env,
 )
-from utils.era5_imputation import load_era5_imputation
 from geostatistics.train_dcrnn import encode_circular_measurements, apply_dir_encoding  # noqa: E402
 from geostatistics.stgnn.utils.topo_features import (      # noqa: E402
     load_topo_station_features_dict, TOPO_FEATURE_ORDER,
@@ -155,17 +153,19 @@ def load_context(
 
     interpol_path = data_cfg.get("interpol_path")
     if interpol_path:
-        rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)  # rk_pred no longer used for imputation itself (kept: harmless, no other consumer in this script)
-        era5_pred, era5_coefs, era5_diag = load_era5_imputation(
-            all_ids, timestamps, meas_raw, measurement_cols, target_col,
+        # wind_speed gaps are filled from the TFT closing model's 'imputed'
+        # column under interpol_path (docs/imputation_tft_switch.md) — it
+        # replaced both Regression-Kriging and the ERA5-OLS path. No
+        # fallback: cells it does not cover stay NaN by design.
+        meas_raw, imput_diag = impute_meas_raw_from_interpol(
+            meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
         )
-        meas_raw = apply_interpol_imputation(meas_raw, era5_pred, measurement_cols, target_col)
 
     knnimputer_path = data_cfg.get("knnimputer_path")
     if knnimputer_path:
         for col in measurement_cols:
             if col == target_col:
-                continue  # wind_speed: ERA5-only, NO KNN fallback (docs/imputation_era5_only.md)
+                continue  # wind_speed: interpol/TFT only, NO KNN fallback (docs/imputation_tft_switch.md)
             feat_idx = measurement_cols.index(col)
             if not np.isnan(meas_raw[:, :, feat_idx]).any():
                 continue

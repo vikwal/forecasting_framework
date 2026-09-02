@@ -112,6 +112,23 @@ class DataCache:
             hash_data['cv_mode'] = 'spatial'
             hash_data['val_start'] = config['data'].get('val_start')
 
+        # ECMWF: 'next_n_grid_ecmwf' oben ist der Schluessel des Wind-/Open-Meteo-Pfades
+        # (preprocessing.py:2486). Der Solar-Pfad liest einen anderen Namen
+        # (solar.py:1376 -> params.next_n_grid_points_ecmwf) und den Parquet-Ordner
+        # (solar.py:1363 -> data.ecmwf_solar_path); beide gingen bis hierher gar nicht
+        # in den Schluessel ein. Ein Wechsel von 1 auf 4 ECMWF-Gitterpunkte oder auf
+        # einen anderen Parquet-Satz haette also stillschweigend den alten Cache
+        # weiterverwendet. Nur aufnehmen, wenn tatsaechlich gesetzt: sonst aendert sich
+        # der Hash *jeder* bestehenden Config und der komplette data_cache/ waere
+        # entwertet — dieselbe Ueberlegung wie beim cv_mode-Guard darueber.
+        _ecmwf_extra = {
+            'next_n_grid_points_ecmwf': config['params'].get('next_n_grid_points_ecmwf'),
+            'ecmwf_solar_path': config['data'].get('ecmwf_solar_path'),
+        }
+        for _k, _v in _ecmwf_extra.items():
+            if _v is not None:
+                hash_data[_k] = _v
+
         # Convert to string and hash
         hash_string = str(sorted(hash_data.items()))
         return hashlib.md5(hash_string.encode()).hexdigest()
@@ -1109,7 +1126,23 @@ def create_or_load_preprocessed_data_spatial(config: Dict,
 # no-fallback ones. wind_direction (still KNN, unchanged) is unaffected in
 # value, but every cache entry's meas_raw blob is versioned as a whole, so
 # the bump applies to it too. See docs/imputation_era5_only.md.
-IMPUTATION_GUARD_VERSION = 3
+#
+# 3 -> 4 on 2026-09-02: wind_speed imputation switched from the ERA5
+# per-station OLS (utils/era5_imputation.py, now retired) to the `imputed`
+# column of the TFT closing model's per-station Parquets under
+# interpol_path. The files under .../synthetic/interpol/wind were REPLACED
+# in place on that date -- same directory, different producer, different
+# columns (rk_pred/idw_pred/ok_pred gone, imputed/n_fenster/kontextfrei
+# added) and a longer window (26 496 h to 2026-07-31 instead of 25 326 h to
+# 2026-06-13). interpol_fingerprint alone would catch the file rewrite, but
+# NOT the code switch away from ERA5 -- the ERA5 Parquet cache is not
+# referenced by any data_cfg path this key hashes, exactly as for the 2 -> 3
+# bump. Every cache entry built under guard version 3 therefore holds
+# ERA5-OLS-filled wind_speed for 153 stations to 2026-06-30 and must not be
+# served for the new TFT-filled tensors. wind_direction (still KNN) is
+# unchanged in value but shares the versioned meas_raw blob. See
+# docs/imputation_tft_switch.md.
+IMPUTATION_GUARD_VERSION = 4
 
 
 def _imputation_dir_fingerprint(path: str) -> str:

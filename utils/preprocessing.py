@@ -300,8 +300,10 @@ def get_data(data_dir: str,
                    separate validation/test set whose scaler is fitted on 'files'.
 
     Optional config keys applied after loading (config['data']):
-        interpol_path    : path to per-station Kriging rk_pred parquets; fills NaN
-                           in target_col before the downstream pipeline.
+        interpol_path    : path to per-station interpol parquets; fills NaN in
+                           target_col before the downstream pipeline. Wind takes
+                           the TFT column 'imputed' (docs/imputation_tft_switch.md),
+                           solar still the older 'rk_pred' — resolved per file.
         knnimputer_path  : path to wide spatial-KNN parquets; fills NaN in the
                            columns listed under knn_impute_cols.
         knn_impute_cols  : list of column names to spatial-KNN impute (e.g. ['dhi']).
@@ -313,12 +315,14 @@ def get_data(data_dir: str,
         data_cfg = config.get('data', {})
         _target = data_cfg.get('target_col', target_col)
 
-        # Kriging imputation: fill NaN in target_col
+        # Interpol imputation: fill NaN in target_col from interpol_path.
+        # Wind = the TFT closing model's 'imputed' column since 2026-09-02
+        # (docs/imputation_tft_switch.md); solar = the older 'rk_pred'.
         interpol_path = data_cfg.get('interpol_path')
         if interpol_path:
-            from utils.imputation import impute_dfs_with_kriging
-            logging.info("Kriging imputation (interpol_path) for '%s' …", _target)
-            dfs = impute_dfs_with_kriging(dfs, interpol_path, _target)
+            from utils.imputation import impute_dfs_from_interpol
+            logging.info("Interpol imputation (interpol_path) for '%s' …", _target)
+            dfs = impute_dfs_from_interpol(dfs, interpol_path, _target)
 
         # Spatial-KNN imputation: fill NaN in secondary columns
         knnimputer_path = data_cfg.get('knnimputer_path')
@@ -1819,13 +1823,18 @@ def _fetch_ecmwf_data(station_lat: float,
     db_col_names = [re.sub(r'(\D)(\d+m)', r'\1_\2', col) for col in raw_columns]
     select_cols = ", ".join(f"e.{col}" for col in db_col_names)
     query = f"""
+    -- Ranking is geodesic (::geography). `<->` on plain geometry orders by
+    -- degrees, and at German latitudes one degree of longitude is only ~0.62 of
+    -- a degree of latitude, so a degree-space ranking stretches the
+    -- neighbourhood east-west. On the 0.25 deg ECMWF grid that is enough to put
+    -- a farther point ahead of a nearer one and change which points are picked.
     WITH nearest_points AS (
         SELECT geom,
                ROW_NUMBER() OVER (
-                   ORDER BY geom <-> ST_SetSRID(ST_MakePoint({station_lon}, {station_lat}), 4326)
+                   ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint({station_lon}, {station_lat}), 4326)::geography
                ) AS rank
         FROM ecmwf_grid_points
-        ORDER BY geom <-> ST_SetSRID(ST_MakePoint({station_lon}, {station_lat}), 4326)
+        ORDER BY geom::geography <-> ST_SetSRID(ST_MakePoint({station_lon}, {station_lat}), 4326)::geography
         LIMIT {next_n_grid_points}
     )
     SELECT e.starttime, e.forecasttime, {select_cols}, n.rank
@@ -4014,6 +4023,25 @@ def prepare_data_for_tft(data: pd.DataFrame,
         future_horizon,
         step_size
     )
+
+    # Nicht-leerer Split heisst noch nicht: mindestens ein vollstaendiges Fenster.
+    # Die Pruefung oben (Zeile ~3815) zaehlt Zeilen, hier zaehlen NWP-Laeufe: eine
+    # Station, deren Reihe kurz nach test_start endet, liefert ein paar hundert
+    # Zeilen, aber keinen Lauf mit history_length + future_horizon Schritten.
+    # create_tft_sequences gibt dann np.array([]) zurueck — eindimensional — und der
+    # naechste Zugriff [:, history_length:, 0] stirbt mit "too many indices for
+    # array". Gemessen an synth_04887: 488 Trainings-, aber nur 4 Testlaeufe.
+    # Als EmptySplitError faellt die Station wie jede andere lueckenhafte durch den
+    # bestehenden Filter, statt den gesamten Lauf ueber alle Stationen abzubrechen.
+    for _name, _arr, _rows in (('Training', y_train, len(train_df)),
+                               ('Test', y_test, len(test_df))):
+        if len(_arr) == 0:
+            raise EmptySplitError(
+                f"Kein vollstaendiges Fenster im {_name}zeitraum: {_rows} Zeilen "
+                f"vorhanden, aber keine reicht fuer lookback={history_length} + "
+                f"horizon={future_horizon} Schritte. Die Reihe der Station endet "
+                f"vermutlich kurz nach Beginn des Zeitraums."
+            )
 
     # --- Window raw NWP data with the same logic, then extract horizon portion ---
     nwp_raw_test_windowed = None

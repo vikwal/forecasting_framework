@@ -72,13 +72,11 @@ from geostatistics.train_stgnn2 import (
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
     load_nwp_elevations,
-    load_interpol_imputation,
-    apply_interpol_imputation,
+    impute_meas_raw_from_interpol,
     load_knn_imputation,
     apply_knn_imputation,
     require_nwp_elevation_env,
 )
-from utils.era5_imputation import load_era5_imputation
 from geostatistics.shared.resolution import freq_to_hours
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.dcrnn.training import DCRNNTrainer
@@ -399,6 +397,15 @@ def main() -> None:
             max_next_n_icond2, max_next_n_ecmwf,
         )
     interpolate_history = dcrnn_cfg.get("interpolate_history", False)
+    if interpolate_history:
+        raise NotImplementedError(
+            "dcrnn.interpolate_history: true is unavailable since the wind imputation "
+            "switched to the TFT files on 2026-09-02 (docs/imputation_tft_switch.md). "
+            "The extra lag channel fed on the Kriging column 'rk_pred', which those "
+            "files no longer carry: 'imputed' exists only inside the gaps and "
+            "'wind_speed_observed' is the measurement itself outside them, so neither "
+            "is a drop-in. Decide what the channel should carry before re-enabling it."
+        )
     nwp_path      = data_cfg.get("nwp_path")
     data_path     = data_cfg["path"]
 
@@ -523,32 +530,16 @@ def main() -> None:
         meas_raw, timestamps = load_station_measurements(data_path, all_ids, cols=measurement_cols, freq=freq)
         T = len(timestamps)
 
-        # ERA5 per-station OLS correction is the primary imputation source
-        # (docs/imputation_era5_switch.md); rk_pred is kept loaded ONLY for
-        # the optional Kriging lag feature further below, no longer used to
-        # fill meas_raw.
-        rk_pred = None   # kept for optional Kriging lag feature below
+        # wind_speed gaps come from the TFT closing model's 'imputed' column
+        # under interpol_path (docs/imputation_tft_switch.md) -- it replaced
+        # both Regression-Kriging (rk_pred) and the ERA5 per-station OLS.
+        # NO KNN fallback for target_col: cells the TFT does not cover stay
+        # NaN by design.
         interpol_path = data_cfg.get("interpol_path")
         if interpol_path:
-            logger.info("Loading interpolation (rk_pred) — kept for Kriging lag feature only, from %s …", interpol_path)
-            rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)  # noqa: kept for Kriging lag feature
-            nan_before = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
-            era5_pred, era5_coefs, era5_diag = load_era5_imputation(
-                all_ids, timestamps, meas_raw, measurement_cols, target_col,
-            )
-            meas_raw = apply_interpol_imputation(meas_raw, era5_pred, measurement_cols, target_col)
-            nan_after = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
-            logger.info("ERA5 imputation: %d NaN → %d NaN in '%s'", nan_before, nan_after, target_col)
-
-        # NO KNN fallback for target_col (wind_speed): ERA5 + per-station OLS
-        # is the sole imputation source now (docs/imputation_era5_only.md).
-        # Hours/stations ERA5 does not cover stay NaN by design.
-        remaining_nan = int(np.isnan(meas_raw[:, :, measurement_cols.index(target_col)]).sum())
-        if remaining_nan > 0:
-            logger.info(
-                "ERA5 left %d NaN in '%s' -- left as NaN, no fallback "
-                "(docs/imputation_era5_only.md).",
-                remaining_nan, target_col,
+            logger.info("Loading interpolation ('imputed', TFT) from %s …", interpol_path)
+            meas_raw, imput_diag = impute_meas_raw_from_interpol(
+                meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
             )
 
         # Secondary-column KNN imputation (e.g. wind_direction, dhi, …)
@@ -1267,13 +1258,11 @@ def main() -> None:
                 station_ecmwf_scaled = np.empty((T, len(all_ids),  0), dtype=np.float32)
                 ecmwf_nwp_scaled     = np.empty((T, 0,             0), dtype=np.float32)
 
-            # Kriging lag feature: scale rk_pred per-fold using fold training mean/std
-            if interpolate_history and rk_pred is not None:
-                tidx = measurement_cols.index(target_col)
-                rk_s = (rk_pred - fold_meas_scaler.mean_[tidx]) / (fold_meas_scaler.std_[tidx] + fold_meas_scaler.eps)
-                fold_interpol_meas = np.nan_to_num(rk_s, nan=0.0).astype(np.float32)
-            else:
-                fold_interpol_meas = None
+            # Extra lag channel (dcrnn.interpolate_history) — see the same
+            # block in train_dcrnn.py: it fed on the Kriging column 'rk_pred',
+            # which the TFT files no longer carry
+            # (docs/imputation_tft_switch.md). Raised, not silently swapped.
+            fold_interpol_meas = None   # see the raise at the config-parse point above
 
             _trial_k  = model_cfg.graph.next_n_icond2_grid_points
             _trial_ke = model_cfg.graph.next_n_ecmwf_grid_points

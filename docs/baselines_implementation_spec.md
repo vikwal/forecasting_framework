@@ -233,9 +233,13 @@ identisch**. Ein Random Forest kann die beiden Varianten daher nicht unterscheid
 1. `load_station_measurements` (`train_stgnn2.py:85-119`): pro Station
    `Station_{sid}.parquet`, Spalten `wind_speed, wind_direction`, resample `1h`,
    `closed="left", label="left"`, Mittelwert.
-2. `load_interpol_imputation` + `apply_interpol_imputation`
-   (`utils/imputation.py:48-71` / `121-143`): Regression-Kriging `rk_pred` füllt NaN
-   **nur im Zielkanal** `wind_speed`.
+2. ~~`load_interpol_imputation` + `apply_interpol_imputation`: Regression-Kriging
+   `rk_pred` füllt NaN **nur im Zielkanal** `wind_speed`.~~ **Überholt.** Seit
+   2026-08-11 füllte stattdessen die ERA5-OLS (`docs/imputation_era5_only.md`), seit
+   2026-09-02 `impute_meas_raw_from_interpol` aus der TFT-Spalte `imputed`
+   (`docs/imputation_tft_switch.md`); `rk_pred` existiert in `interpol/wind` nicht mehr.
+   Der Rest dieses Abschnitts inklusive der Abdeckungstabelle beschreibt den Stand vor
+   diesen beiden Umstellungen.
 3. `load_knn_imputation` + `apply_knn_imputation` (`utils/imputation.py:74-118` / `146-170`):
    KNN-Parquet füllt den Rest, **je Kanal**, nur wo der KNN-Wert selbst nicht NaN ist.
    `matches[-1]` wählt die Datei — sortiert gewinnt `wind_speed_knn10_start_end_67558851.parquet`

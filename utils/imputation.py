@@ -1,16 +1,55 @@
 """
 utils/imputation.py — Shared spatial imputation utilities.
 
+WIND-SPEED IMPUTATION SOURCE (since 2026-09-02, docs/imputation_tft_switch.md)
+-----------------------------------------------------------------------------
+Gaps in `wind_speed` are filled from the per-station Parquets under
+`data.interpol_path` (…/synthetic/interpol/wind), column **`imputed`** —
+the prediction of the Temporal-Fusion-Transformer wind closing model
+(203 stations, ERA5 + neighbour stations + statics, 2023-07-24 00:00 UTC …
+2026-07-31 23:00 UTC hourly).
+
+That replaces BOTH earlier paths:
+  * Regression-Kriging (`rk_pred`) — the column no longer exists in those
+    files at all, so anything still reading it raises instead of degrading
+    silently. Kept only for reference in
+    …/synthetic/interpol/wind_vor_tft_20260902.
+  * the per-station ERA5-OLS of `utils/era5_imputation.py`
+    (docs/imputation_era5_only.md) — that module is no longer called by any
+    pipeline; it covered 153 stations and ended 2026-06-30, the TFT covers
+    203 stations to 2026-07-31.
+
+`imputed` is non-NaN EXACTLY at the hours where `wind_speed_raw` is NaN, so
+it slots into the same "fill NaN in meas_raw" contract the previous arrays
+had. There is NO fallback layered on top of it: cells it does not cover
+(hours outside the file's window, stations without a file) stay NaN by
+design, same rule as the ERA5-only path before it.
+
+The imputed values carry NO validated error metric — the closing model's
+skill was measured on artificially hidden but truly observed hours, not on
+the real gaps. `kontextfrei` (True = no own measurement anywhere in the
+48-h window, ~36 % of all filled hours) is the honest way to separate
+well-supported from weakly-supported fills in an evaluation; it is carried
+through the diagnostics of every function below.
+
+`wind_direction` is NOT covered — it stays on the spatial-KNN path
+(load_knn_imputation / apply_knn_imputation), unchanged.
+
+SOLAR is not affected: `interpol/solar` still carries `rk_pred`, and the
+loaders below resolve the value column from the file's own schema
+(`imputed` preferred, `rk_pred` accepted) instead of hard-coding one.
+
 Provides two layers:
 
 Array-based (used by train_dcrnn.py / hpo_dcrnn.py via train_stgnn2.py):
-  load_interpol_imputation   — load Kriging rk_pred → (T, N) float32
-  load_knn_imputation        — load spatial-KNN parquet → (T, N) float32
-  apply_interpol_imputation  — fill NaN in (T, N, M) meas_raw with rk_pred
-  apply_knn_imputation       — fill NaN in (T, N, M) meas_raw with knn_arr
+  load_gap_imputation          — load the gap-filling column → (T, N) float32
+  load_knn_imputation          — load spatial-KNN parquet → (T, N) float32
+  apply_imputation             — fill NaN in (T, N, M) meas_raw with a (T, N) array
+  apply_knn_imputation         — fill NaN in (T, N, M) meas_raw with knn_arr
+  impute_meas_raw_from_interpol— load + apply + diagnostics, one call
 
 DataFrame-based (used by preprocessing.py / train_cl.py / hpo_cl.py):
-  impute_dfs_with_kriging    — fill NaN in target_col of {key: DataFrame} dict
+  impute_dfs_from_interpol   — fill NaN in target_col of {key: DataFrame} dict
   impute_dfs_with_knn        — fill NaN in feature cols using spatial-KNN parquets
 """
 from __future__ import annotations
@@ -21,14 +60,53 @@ import os
 
 import numpy as np
 import pandas as pd
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Interpol-file schema
 # ---------------------------------------------------------------------------
+
+# Value column holding the gap fill, in order of preference. 'imputed' is the
+# TFT prediction written on 2026-09-02 for wind; 'rk_pred' is the older
+# Regression-Kriging column, still what interpol/solar carries.
+IMPUTATION_VALUE_COLUMNS = ("imputed", "rk_pred")
+
+# Per-hour flag written by the TFT closing model: True = the whole 48-h window
+# around this hour held no measurement of this station, so the value rests on
+# ERA5 + neighbours + statics alone. Absent in the older Kriging files.
+CONTEXTFREE_COLUMN = "kontextfrei"
+
+
+def _parquet_columns(fpath: str) -> list[str]:
+    """Column names of a Parquet file, read from its footer only."""
+    try:
+        import pyarrow.parquet as pq
+        return list(pq.ParquetFile(fpath).schema_arrow.names)
+    except Exception:  # pragma: no cover — engine without a footer reader
+        return list(pd.read_parquet(fpath).columns)
+
+
+def resolve_imputation_column(fpath: str) -> str:
+    """Pick the gap-fill value column of one interpol Parquet.
+
+    Raises KeyError if the file carries none of IMPUTATION_VALUE_COLUMNS —
+    deliberately loud: a file without a usable column means the directory is
+    not what the caller thinks it is.
+    """
+    cols = _parquet_columns(fpath)
+    for cand in IMPUTATION_VALUE_COLUMNS:
+        if cand in cols:
+            return cand
+    raise KeyError(
+        f"{fpath} carries none of the known imputation columns "
+        f"{IMPUTATION_VALUE_COLUMNS} — found {cols}. "
+        "Wind files written before 2026-09-02 had 'rk_pred'; the TFT files "
+        "written since have 'imputed' (docs/imputation_tft_switch.md)."
+    )
+
 
 def _station_id_from_key(key: str) -> str:
     """Extract 5-digit station ID from dict keys used by preprocessing.get_data().
@@ -45,30 +123,69 @@ def _station_id_from_key(key: str) -> str:
 # Array-based functions  (T, N, M) — used by the DCRNN/STGNN pipeline
 # ---------------------------------------------------------------------------
 
-def load_interpol_imputation(
+def load_gap_imputation(
     interpol_path: str,
     station_ids: list[str],
     timestamps: pd.DatetimeIndex,
-) -> np.ndarray:
-    """Load Regression-Kriging predictions (rk_pred) and align to timestamps.
+    value_col: Optional[str] = None,
+    with_kontextfrei: bool = False,
+):
+    """Load the gap-filling values from *interpol_path* and align to timestamps.
+
+    For wind this is the TFT column `imputed` (non-NaN only at the hours the
+    station has no raw measurement); for the older solar files it is
+    `rk_pred`. The column is resolved from each file's own schema unless
+    *value_col* is given.
+
+    Parameters
+    ----------
+    interpol_path    : directory with Station_XXXXX.parquet files
+    station_ids      : station IDs, defines the N axis order
+    timestamps       : DatetimeIndex, defines the T axis
+    value_col        : force a column name instead of resolving it per file
+    with_kontextfrei : also return the (T, N) bool mask of context-free fills
+                       (all-False where a file has no such column)
 
     Returns
     -------
-    rk_pred : (T, N) float32 — NaN where no interpol file exists for a station.
+    values : (T, N) float32 — NaN where the file has no value for that hour
+             (including: no file for that station, hour outside the file).
+    kontextfrei : (T, N) bool — only if with_kontextfrei=True.
     """
-    series = []
+    val_series, ctx_series = [], []
+    n_files = 0
+    cols_seen: set[str] = set()
     for sid in station_ids:
         fpath = os.path.join(interpol_path, f"Station_{sid}.parquet")
+        empty = pd.Series(np.nan, index=timestamps, name=sid, dtype="float32")
         if not os.path.exists(fpath):
-            series.append(pd.Series(np.nan, index=timestamps, name=sid, dtype="float32"))
+            val_series.append(empty)
+            ctx_series.append(pd.Series(False, index=timestamps, name=sid, dtype=bool))
             continue
-        df = pd.read_parquet(fpath, columns=["timestamp", "rk_pred"])
+        n_files += 1
+        col = value_col or resolve_imputation_column(fpath)
+        cols_seen.add(col)
+        wanted = ["timestamp", col]
+        has_ctx = with_kontextfrei and CONTEXTFREE_COLUMN in _parquet_columns(fpath)
+        if has_ctx:
+            wanted.append(CONTEXTFREE_COLUMN)
+        df = pd.read_parquet(fpath, columns=wanted)
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        s = df.set_index("timestamp")["rk_pred"].rename(sid)
-        series.append(s)
+        df = df.set_index("timestamp")
+        val_series.append(df[col].astype("float32").rename(sid))
+        if with_kontextfrei:
+            ctx = df[CONTEXTFREE_COLUMN] if has_ctx else pd.Series(False, index=df.index)
+            ctx_series.append(ctx.astype(bool).rename(sid))
 
-    pivot = pd.concat(series, axis=1).reindex(timestamps)
-    return pivot.values.astype(np.float32)
+    values = pd.concat(val_series, axis=1).reindex(timestamps).values.astype(np.float32)
+    logger.info(
+        "Interpol imputation: %d/%d stations have a file under %s, column(s) %s",
+        n_files, len(station_ids), interpol_path, sorted(cols_seen) or ["—"],
+    )
+    if not with_kontextfrei:
+        return values
+    ctx = pd.concat(ctx_series, axis=1).reindex(timestamps).astype("boolean").fillna(False)
+    return values, ctx.to_numpy(dtype=bool)
 
 
 def load_knn_imputation(
@@ -118,29 +235,108 @@ def load_knn_imputation(
     return df.values.astype(np.float32)
 
 
-def apply_interpol_imputation(
+def apply_imputation(
     meas_raw: np.ndarray,
-    rk_pred: np.ndarray,
+    values: np.ndarray,
     measurement_cols: list[str],
     target_col: str = "wind_speed",
 ) -> np.ndarray:
-    """Fill NaN in *target_col* channel of *meas_raw* with *rk_pred* values.
+    """Fill NaN in *target_col* channel of *meas_raw* with *values*.
 
     Parameters
     ----------
     meas_raw         : (T, N, M) float32
-    rk_pred          : (T, N) float32
+    values           : (T, N) float32 — the imputation source
     measurement_cols : ordered list of column names (last dim of meas_raw)
     target_col       : which column to fill
 
-    Returns *meas_raw* modified in-place.
+    Returns *meas_raw* modified in-place. Cells where *values* is NaN stay
+    NaN — no fallback (docs/imputation_tft_switch.md).
     """
     if target_col not in measurement_cols:
         return meas_raw
     idx  = measurement_cols.index(target_col)
     mask = np.isnan(meas_raw[:, :, idx])
-    meas_raw[:, :, idx][mask] = rk_pred[mask]
+    meas_raw[:, :, idx][mask] = values[mask]
     return meas_raw
+
+
+def impute_meas_raw_from_interpol(
+    meas_raw: np.ndarray,
+    station_ids: list[str],
+    timestamps: pd.DatetimeIndex,
+    measurement_cols: list[str],
+    interpol_path: str,
+    target_col: str = "wind_speed",
+) -> Tuple[np.ndarray, Dict[str, object]]:
+    """Fill NaN in *target_col* of *meas_raw* from the interpol directory.
+
+    The single entry point every geostatistics pipeline uses — replaces the
+    former `load_interpol_imputation` + `load_era5_imputation` +
+    `apply_interpol_imputation` sequence (docs/imputation_tft_switch.md).
+
+    Returns
+    -------
+    meas_raw : modified in place
+    diag     : counts for the switch report —
+               value_col, n_cells_missing_total, n_cells_filled,
+               n_cells_still_missing, n_cells_filled_kontextfrei,
+               n_cells_offered_unused (an imputed value existed where the
+               measurement was NOT missing — a raster mismatch between the
+               interpol files and load_station_measurements, expected 0).
+    """
+    if target_col not in measurement_cols:
+        logger.info(
+            "Interpol imputation skipped: '%s' not in measurement_cols=%s",
+            target_col, measurement_cols,
+        )
+        return meas_raw, {"value_col": None, "n_cells_filled": 0}
+
+    tidx = measurement_cols.index(target_col)
+    # Resolve the value column once, from the first station file that exists,
+    # and use it for the whole directory: a directory where only some files
+    # carry 'imputed' is not a state any pipeline should quietly average over.
+    value_col = None
+    for sid in station_ids:
+        fpath = os.path.join(interpol_path, f"Station_{sid}.parquet")
+        if os.path.exists(fpath):
+            value_col = resolve_imputation_column(fpath)
+            break
+    if value_col is None:
+        raise FileNotFoundError(
+            f"interpol_path {interpol_path} holds no Station_*.parquet for any of the "
+            f"{len(station_ids)} requested stations."
+        )
+    values, kontextfrei = load_gap_imputation(
+        interpol_path, station_ids, timestamps,
+        value_col=value_col, with_kontextfrei=True,
+    )
+    have = ~np.isnan(values)
+    missing = np.isnan(meas_raw[:, :, tidx])
+
+    n_missing = int(missing.sum())
+    fill_mask = missing & have
+    n_filled = int(fill_mask.sum())
+
+    meas_raw = apply_imputation(meas_raw, values, measurement_cols, target_col)
+
+    diag: Dict[str, object] = {
+        "value_col": value_col,
+        "n_stations": len(station_ids),
+        "n_cells_missing_total": n_missing,
+        "n_cells_filled": n_filled,
+        "n_cells_still_missing": n_missing - n_filled,
+        "n_cells_filled_kontextfrei": int((fill_mask & kontextfrei).sum()),
+        "n_cells_offered_unused": int((have & ~missing).sum()),
+    }
+    logger.info(
+        "Interpol imputation '%s' from column '%s': %d NaN → %d NaN (%d filled, of them %d "
+        "kontextfrei; %d offered values fell on non-missing cells). No fallback — remaining "
+        "NaN stay NaN (docs/imputation_tft_switch.md).",
+        target_col, value_col, n_missing, n_missing - n_filled, n_filled,
+        diag["n_cells_filled_kontextfrei"], diag["n_cells_offered_unused"],
+    )
+    return meas_raw, diag
 
 
 def apply_knn_imputation(
@@ -172,23 +368,31 @@ def apply_knn_imputation(
 # DataFrame-based functions  {key: DataFrame} — used by the CL pipeline
 # ---------------------------------------------------------------------------
 
-def impute_dfs_with_kriging(
+def impute_dfs_from_interpol(
     dfs: Dict[str, pd.DataFrame],
     interpol_path: str,
     target_col: str,
 ) -> Dict[str, pd.DataFrame]:
-    """Fill NaN in *target_col* of each per-station DataFrame using Kriging rk_pred.
+    """Fill NaN in *target_col* of each per-station DataFrame from *interpol_path*.
 
-    Reads per-station parquets from *interpol_path*/Station_{sid}.parquet.
+    Reads per-station parquets from *interpol_path*/Station_{sid}.parquet and
+    takes the gap-fill column resolved from the file's schema — `imputed`
+    (TFT, wind since 2026-09-02) or `rk_pred` (older Kriging files, solar).
     Alignment is done via the DataFrame's own DatetimeIndex — no resampling.
+
+    Cells the file does not cover stay NaN; there is no fallback
+    (docs/imputation_tft_switch.md).
 
     Parameters
     ----------
     dfs          : {file_key: DataFrame} as returned by preprocessing.get_data()
-    interpol_path: directory with Station_XXXXX.parquet files containing 'rk_pred'
+    interpol_path: directory with Station_XXXXX.parquet files
     target_col   : column to fill (e.g. 'ghi', 'wind_speed')
     """
     filled_total = 0
+    ctxfree_total = 0
+    remaining_total = 0
+    cols_seen: set[str] = set()
     for key, df in dfs.items():
         if target_col not in df.columns:
             continue
@@ -198,24 +402,38 @@ def impute_dfs_with_kriging(
         sid = _station_id_from_key(key)
         fpath = os.path.join(interpol_path, f"Station_{sid}.parquet")
         if not os.path.exists(fpath):
-            logger.debug("Kriging imputation: no file for station %s — skipping", sid)
+            logger.debug("Interpol imputation: no file for station %s — skipping", sid)
+            remaining_total += int(nan_mask.sum())
             continue
-        rk_df = pd.read_parquet(fpath, columns=["timestamp", "rk_pred"])
-        rk_df["timestamp"] = pd.to_datetime(rk_df["timestamp"], utc=True)
-        rk_series = rk_df.set_index("timestamp")["rk_pred"].reindex(df.index)
-        fill_mask = nan_mask & rk_series.notna()
+        file_cols = _parquet_columns(fpath)
+        col = resolve_imputation_column(fpath)
+        cols_seen.add(col)
+        wanted = ["timestamp", col]
+        if CONTEXTFREE_COLUMN in file_cols:
+            wanted.append(CONTEXTFREE_COLUMN)
+        src = pd.read_parquet(fpath, columns=wanted)
+        src["timestamp"] = pd.to_datetime(src["timestamp"], utc=True)
+        src = src.set_index("timestamp")
+        values = src[col].reindex(df.index)
+        fill_mask = nan_mask & values.notna()
         n_filled = int(fill_mask.sum())
         if n_filled:
-            df.loc[fill_mask, target_col] = rk_series[fill_mask].values
+            df.loc[fill_mask, target_col] = values[fill_mask].values
             filled_total += n_filled
+            if CONTEXTFREE_COLUMN in src.columns:
+                ctx = src[CONTEXTFREE_COLUMN].reindex(df.index).astype("boolean").fillna(False).astype(bool)
+                ctxfree_total += int((fill_mask & ctx).sum())
         nan_after = int(df[target_col].isna().sum())
+        remaining_total += nan_after
         logger.debug(
-            "Kriging imputation station %s '%s': %d NaN → %d NaN (%d filled)",
-            sid, target_col, int(nan_mask.sum()), nan_after, n_filled,
+            "Interpol imputation station %s '%s' (column '%s'): %d NaN → %d NaN (%d filled)",
+            sid, target_col, col, int(nan_mask.sum()), nan_after, n_filled,
         )
     logger.info(
-        "Kriging imputation: filled %d NaN values in '%s' across %d stations",
-        filled_total, target_col, len(dfs),
+        "Interpol imputation: filled %d NaN values in '%s' across %d stations "
+        "(column(s) %s, %d of the fills kontextfrei); %d NaN remain — no fallback.",
+        filled_total, target_col, len(dfs), sorted(cols_seen) or ["—"],
+        ctxfree_total, remaining_total,
     )
     return dfs
 

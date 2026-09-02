@@ -232,10 +232,11 @@ def load_station_measurements(
 
 
 from utils.imputation import (                          # noqa: re-exported
-    load_interpol_imputation,
+    load_gap_imputation,
     load_knn_imputation,
-    apply_interpol_imputation,
+    apply_imputation,
     apply_knn_imputation,
+    impute_meas_raw_from_interpol,
 )
 
 

@@ -47,12 +47,10 @@ from geostatistics.train_stgnn2 import (
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
     load_nwp_elevations,
-    load_interpol_imputation,
-    apply_interpol_imputation,
+    impute_meas_raw_from_interpol,
     load_knn_imputation,
     apply_knn_imputation,
 )
-from utils.era5_imputation import load_era5_imputation
 from geostatistics.train_dcrnn import resolve_feature_mode, encode_circular_measurements, apply_dir_encoding
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.stgnn import HeterogeneousGraphBuilder
@@ -224,11 +222,21 @@ def main() -> None:
     
     H_hist = dcrnn_cfg.get("history_length", 48)
     H_fore = dcrnn_cfg.get("forecast_horizon", 48)
-    # Kriging lag channel — mirrors train_dcrnn.py:517. With interpolate_history
-    # the model is built with station_meas_features = M + 1, so the eval batch has
+    # Extra lag channel — mirrors train_dcrnn.py. With interpolate_history the
+    # model is built with station_meas_features = M + 1, so the eval batch has
     # to carry the same extra channel; without this the eval path silently fed M
-    # channels into an (M+1)-wide model (review round 2, R2).
+    # channels into an (M+1)-wide model (review round 2, R2). Unavailable since
+    # the TFT switch, see the raise further below.
     interpolate_history = dcrnn_cfg.get("interpolate_history", False)
+    if interpolate_history:
+        raise NotImplementedError(
+            "dcrnn.interpolate_history: true is unavailable since the wind imputation "
+            "switched to the TFT files on 2026-09-02 (docs/imputation_tft_switch.md). "
+            "The extra lag channel fed on the Kriging column 'rk_pred', which those "
+            "files no longer carry: 'imputed' exists only inside the gaps and "
+            "'wind_speed_observed' is the measurement itself outside them, so neither "
+            "is a drop-in. Decide what the channel should carry before re-enabling it."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Device: %s", device)
@@ -268,15 +276,15 @@ def main() -> None:
     )
     T = len(timestamps)
 
-    # Imputation (if paths present)
-    rk_pred = None   # kept for the optional Kriging lag feature below
+    # Imputation (if paths present) — wind_speed gaps come from the TFT
+    # closing model's 'imputed' column under interpol_path
+    # (docs/imputation_tft_switch.md), which replaced both Regression-Kriging
+    # and the ERA5 per-station OLS. No fallback for target_col.
     interpol_path = data_cfg.get("interpol_path")
     if interpol_path:
-        rk_pred = load_interpol_imputation(interpol_path, all_ids, timestamps)  # kept: Kriging lag feature elsewhere / no longer used for imputation itself
-        era5_pred, era5_coefs, era5_diag = load_era5_imputation(
-            all_ids, timestamps, meas_raw, measurement_cols, target_col,
+        meas_raw, imput_diag = impute_meas_raw_from_interpol(
+            meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
         )
-        meas_raw = apply_interpol_imputation(meas_raw, era5_pred, measurement_cols, target_col)
     
     knnimputer_path = data_cfg.get("knnimputer_path")
     if knnimputer_path and "wind_direction" in measurement_cols:
@@ -395,22 +403,11 @@ def main() -> None:
     meas_scaler.fit(meas_raw[:split_t, :N_train].reshape(-1, M_meas))
     meas_scaled = meas_scaler.transform(meas_raw.reshape(-1, M_meas)).reshape(T, len(all_ids), M_meas)
 
-    # Kriging lag feature — literal mirror of train_dcrnn.py:814-826, including
-    # the scaling with the target column's mean/std and the NaN→0 fill.
-    interpol_meas_scaled = None
-    if interpolate_history:
-        if rk_pred is None:
-            raise ValueError(
-                "dcrnn.interpolate_history: true requires data.interpol_path to be set "
-                "and the Kriging parquet files to be present."
-            )
-        tidx = measurement_cols.index(target_col)
-        rk_s = (rk_pred - meas_scaler.mean_[tidx]) / (meas_scaler.std_[tidx] + meas_scaler.eps)
-        interpol_meas_scaled = np.nan_to_num(rk_s, nan=0.0).astype(np.float32)
-        logger.info(
-            "Kriging lag feature (interpolate_history=True): shape=%s, NaN→0 filled",
-            interpol_meas_scaled.shape,
-        )
+    # Extra lag channel — literal mirror of the same block in train_dcrnn.py:
+    # it fed on the Kriging column 'rk_pred', which the TFT files no longer
+    # carry (docs/imputation_tft_switch.md). Raised, not silently swapped, so
+    # eval can never disagree with training about what the channel holds.
+    interpol_meas_scaled = None   # see the raise at the config-parse point above
 
     train_r_mask = run_times < split_time
     i2_scaler = StandardScaler()

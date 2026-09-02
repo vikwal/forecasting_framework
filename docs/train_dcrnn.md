@@ -164,7 +164,10 @@ Identische Funktionen wie `hpo_dcrnn.py` — alle aus `train_stgnn2.py` importie
 
 ```
 Stationsmessungen     load_station_measurements(...)   → (T, N, M)
-Interpol-Imputation   load_interpol_imputation(...)    → NaN-Füllung in target_col
+Interpol-Imputation   impute_meas_raw_from_interpol(...) → NaN-Füllung in target_col
+                                                         (TFT-Spalte `imputed`, seit
+                                                          2026-09-02, kein Fallback —
+                                                          docs/imputation_tft_switch.md)
 KNN-Imputation        load_knn_imputation(...)         → NaN-Füllung in wind_direction
 Stationsmetadaten     load_station_metadata(...)       → lats, lons, alts
 ICON-D2 ML runs       load_icond2_ml_runs(...)         → (R, 48, N_grid, I2)

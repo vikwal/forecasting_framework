@@ -1,11 +1,23 @@
 """
 utils/era5_imputation.py — ERA5-reanalysis-based imputation for wind_speed.
 
-The SOLE imputation path for wind_speed. Regression-Kriging and the KNN
-imputer are no longer used for wind_speed anywhere in this module or at its
-call sites (docs/imputation_era5_only.md) — replaces the earlier two-stage
-setup (docs/imputation_era5_switch.md) that still fell back to KNN for
-stations/hours outside ERA5 coverage. Established by the read-only comparison
+RETIRED on 2026-09-02 — NOT the imputation path anymore, and no longer
+called from anywhere in this repo. wind_speed gaps are now filled from the
+TFT closing model's `imputed` column under `data.interpol_path`
+(utils/imputation.impute_meas_raw_from_interpol,
+docs/imputation_tft_switch.md), which covers 203 stations up to
+2026-07-31 where this module covered 153 up to 2026-06-30. The code below
+is kept unchanged as the documented record of the previous path and for
+one-off comparisons against it; do not re-wire a pipeline to it without
+saying so in docs/.
+
+Everything below describes the state up to 2026-09-02.
+
+It WAS the sole imputation path for wind_speed. Regression-Kriging and the
+KNN imputer are no longer used for wind_speed anywhere in this module or at
+its call sites (docs/imputation_era5_only.md) — replaces the earlier
+two-stage setup (docs/imputation_era5_switch.md) that still fell back to KNN
+for stations/hours outside ERA5 coverage. Established by the read-only comparison
 analysis in docs/imputation_era5_comparison.md (per-station OLS on four
 ERA5-derived features beats Kriging by ~19% RMSE on 20034 artificially-hidden
 but truly observed station-hours) and the composite-vs-pure-OLS measurement in
