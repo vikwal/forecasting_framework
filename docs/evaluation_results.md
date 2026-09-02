@@ -31,7 +31,7 @@ Aussagen von Unteragenten übernommen.
 | `/tmp/apply_n1_fix.py` (l2, l1, ws) | Anwendung des N1-Fixes mit Exact-Match-Absicherung |
 | `/tmp/hpo_param_summary.csv`, `/tmp/hpo_param_robust.csv` (l2) | Ergebnistabellen der beiden Durchgänge |
 | `geostatistics/get_test_results_dcrnn.py` | N1-Fix, committet in `e15d778` |
-| `~/hpo_keeper_plan.json` (l2) | auf 2 Sollworker reduziert, Sicherung `.bak-20260817-eval` |
+| `~/hpo_keeper_plan.json` (l2) | auf 2 Sollworker reduziert; die Sicherung `.bak-20260817-eval` wurde am 2026-09-02 beim Aufräumen gelöscht, ihr Inhalt steht als Tabelle in §9.3 |
 | `docs/evaluation_results.md` | dieses Dokument |
 
 Die Diagnoseskripte liegen unter `/tmp`. Für dauerhafte Reproduzierbarkeit gehören sie
@@ -456,8 +456,9 @@ laufender HPO-Worker benutzt diese Datei.
 
 ### 9.3 Kampagne auf l2 zurückgefahren
 
-`~/hpo_keeper_plan.json` auf `l2` reduziert von 8 auf 2 Sollworker, Sicherung unter
-`~/hpo_keeper_plan.json.bak-20260817-eval`:
+`~/hpo_keeper_plan.json` auf `l2` reduziert von 8 auf 2 Sollworker. Die Sicherung lag
+unter `~/hpo_keeper_plan.json.bak-20260817-eval` und wurde am 2026-09-02 beim Aufräumen
+des Stammverzeichnisses gelöscht; der Stand vorher ist die Spalte "Soll vorher":
 
 | Studie | Soll vorher | Soll jetzt | Grund |
 |---|---|---|---|
