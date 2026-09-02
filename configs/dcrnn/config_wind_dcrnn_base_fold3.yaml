@@ -101,7 +101,7 @@ dcrnn:
   lr: 3.0e-4
   weight_decay: 1.0e-3
   batch_size: 64
-  max_epochs: 50
+  max_epochs: 200
   patience: 10
   gradient_clip: 1.0
   scheduler: plateau
