@@ -195,3 +195,8 @@ cython_debug/
 
 # Trianel-Experimente — bleiben im Arbeitsverzeichnis, aber nicht in git
 *trianel*
+
+# HPO-/Retrain-Steuerdateien (Stop- und Skip-Marker, hostlokal)
+.hpo_stop*
+.retrain_skip*
+.testmode_stop

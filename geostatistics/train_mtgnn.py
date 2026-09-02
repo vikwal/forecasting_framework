@@ -408,8 +408,17 @@ def main() -> None:
     # bis test_start, im --test-mode bis test_end bzw. Datenende. Sonst schlaegt
     # der Check auf einem Randstueck an, das nie benutzt wird — seit test_end aus
     # den Fold-Configs raus ist, reicht der geladene Zeitraum bis ans Datenende.
+    # Reihenfolge wie in train_dcrnn.py:583-594 — test_end zuerst, sonst
+    # test_start im Dev-Lauf, sonst das Datenende. Der frueher hier stehende
+    # else-Zweig pruefte im --test-mode bis ans Datenende und damit auch den
+    # 2-Tage-Schwanz jenseits von test_end, den meas_raw nur mitfuehrt, damit
+    # der letzte Lauf sein 48-h-Fenster fuellen kann. Dort endet die
+    # TFT-Imputation (2026-07-31 23:00 UTC) und der harte Audit schlug an,
+    # obwohl kein einziges Run-Paar diese Stunden als Ziel hat.
     _ts_dev = data_cfg.get("test_start")
-    if _ts_dev and not args.test_mode:
+    if run_cutoff is not None:
+        audit_t = int(np.searchsorted(timestamps, run_cutoff, side="right"))
+    elif _ts_dev and not args.test_mode:
         audit_t = int(np.searchsorted(timestamps, pd.Timestamp(_ts_dev, tz="UTC"), side="left"))
     else:
         audit_t = len(timestamps)

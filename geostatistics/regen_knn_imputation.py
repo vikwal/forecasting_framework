@@ -33,8 +33,22 @@ from sklearn.impute import KNNImputer
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-DATA_PATH = "/mnt/lambda1/nvme1/synthetic/raw/wind"
-CACHE_DIR = "/mnt/lambda1/nvme1/synthetic/knnimputer/wind"
+# Die Ablage ist EIN Speicher unter zwei Pfadkonventionen: l1 ist der Besitzer
+# und sieht sie nativ als /mnt/nvme1, l2 und ws mounten sie per NFS als
+# /mnt/lambda1/nvme1. Zur Laufzeit aufloesen, damit das Skript auf dem Host
+# laufen kann, der die Platte lokal hat (Muster aus utils/era5_imputation.py).
+def _resolve(*candidates: str) -> str:
+    return next((c for c in candidates if os.path.isdir(c)), candidates[0])
+
+
+DATA_PATH = _resolve(
+    "/mnt/nvme1/synthetic/raw/wind",            # l1
+    "/mnt/lambda1/nvme1/synthetic/raw/wind",    # l2, ws
+)
+CACHE_DIR = _resolve(
+    "/mnt/nvme1/synthetic/knnimputer/wind",           # l1
+    "/mnt/lambda1/nvme1/synthetic/knnimputer/wind",   # l2, ws
+)
 EXCLUDE = {"14138"}
 KNN_K = 10
 
