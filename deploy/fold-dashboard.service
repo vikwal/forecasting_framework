@@ -1,0 +1,25 @@
+# Streamlit-Dashboard fuer die raeumlichen Fold-Splits (Wind und Solar).
+#
+# Installation:
+#   sudo cp deploy/fold-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fold-dashboard
+#
+# Danach erreichbar unter http://localhost:8511
+# Ports 8504 (optuna-dashboard) und 8510 (optuna-native) sind bereits belegt.
+[Unit]
+Description=Spatial Fold Dashboard (Streamlit)
+After=network.target
+
+[Service]
+User=viktorwalter
+WorkingDirectory=/home/viktor/Work/forecasting_framework
+ExecStart=/home/viktor/Work/forecasting_framework/frcst/bin/streamlit run geostatistics/fold_dashboard.py \
+--server.port 8511 \
+--server.address 0.0.0.0 \
+--server.headless true
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

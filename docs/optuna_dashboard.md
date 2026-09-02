@@ -4,7 +4,7 @@ Streamlit-basiertes Dashboard zur Visualisierung und Verwaltung von Optuna HPO-S
 
 ## Deployment
 
-Läuft als systemd-Service auf Port `8503`:
+Läuft als systemd-Service auf Port `8504`:
 
 ```
 /etc/systemd/system/optuna-dashboard.service

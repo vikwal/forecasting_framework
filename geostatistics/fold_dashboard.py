@@ -91,13 +91,31 @@ def coords_of(master: pd.DataFrame, ids: list[str]) -> np.ndarray:
 # ──────────────────────────────────────────────────────────────────────────────
 
 st.sidebar.header("Quellen")
+
+#: Voreinstellungen je Use-Case. Wind steht zuerst, damit die bisherige Ansicht
+#: die Standardansicht bleibt. Die Felder darunter bleiben frei editierbar —
+#: das Preset fuellt sie nur vor.
+PRESETS = {
+    "Wind (153 Stationen, 3 Folds)": (
+        "configs/spatial_folds.yaml",
+        "configs/mtgnn/config_wind_mtgnn_nwp_fold1.yaml",
+    ),
+    "Solar (83 Stationen, 4 Folds)": (
+        "configs/solar_folds.yaml",
+        "configs/solar_baseline/config_solar_base_lag.yaml",
+    ),
+}
+preset = st.sidebar.selectbox("Use-Case", list(PRESETS), index=0)
+_folds_default, _cfg_default = PRESETS[preset]
+
 folds_path = st.sidebar.text_input(
-    "Fold-Definition (YAML)", str(REPO / "configs/spatial_folds.yaml"),
-    help="Datei mit spatial_fold1/2/3 → {files, val_files}",
+    "Fold-Definition (YAML)", str(REPO / _folds_default),
+    help="Datei mit spatial_fold1/2/3 -> {files, val_files}",
+    key=f"folds_{preset}",
 )
 base_cfg_path = st.sidebar.text_input(
-    "Basis-Config (fuer test_files & Pfade)",
-    str(REPO / "configs/mtgnn/config_wind_mtgnn_nwp_fold1.yaml"),
+    "Basis-Config (fuer test_files & Pfade)", str(REPO / _cfg_default),
+    key=f"cfg_{preset}",
 )
 
 try:
@@ -133,7 +151,11 @@ mark_far = st.sidebar.slider(
 
 all_ids = sorted({norm_id(x) for f in fold_names
                   for x in folds[f]["files"] + folds[f]["val_files"]})
-test_ids = [norm_id(x) for x in data_cfg.get("test_files", [])]
+# Testsatz: bevorzugt aus der Fold-Datei selbst (dort steht er seit dem
+# Solar-Entwurf, siehe scripts/make_solar_folds.py), sonst wie bisher aus der
+# Basis-Config. So bleibt die Wind-Ansicht unveraendert.
+test_ids = [norm_id(x) for x in (folds.get("test_files")
+                                 or data_cfg.get("test_files", []))]
 
 # Fold-Zugehoerigkeit: -1 = in jedem Fold Train
 assign = pd.Series(-1, index=all_ids, dtype=int)
