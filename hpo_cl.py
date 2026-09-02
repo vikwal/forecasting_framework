@@ -19,6 +19,32 @@ from utils import preprocessing, tools, hpo, data_cache
 
 optuna.logging.set_verbosity(optuna.logging.INFO)
 
+#: Wie der Wert eines Folds aus der Epochen-History gezogen wird.
+#: ``last``  — letzter Epochenwert (historisches Verhalten).
+#: ``best``  — bester Epochenwert gemaess ``direction`` des Objectives.
+#:
+#: Warum das eine Rolle spielt: ``epochs`` ist kein Suchparameter (hpo.py:670 ist
+#: bewusst auskommentiert), stattdessen laeuft Early Stopping auf dem Validierungsset
+#: mit ``restore_best_weights``. Der Trial gibt also das Modell der *besten* Epoche
+#: zurueck, ``last`` bewertet es aber mit der Epoche, die ``patience`` Schritte spaeter
+#: den Abbruch ausgeloest hat. Der Aufschlag ist nicht konstant, sondern pro Trial
+#: zufaellig (gemessen auf den Solar-Laeufen: ~0.5 RMSE Schwankung zwischen benachbarten
+#: Epochen bei ~3 RMSE Gesamteffekt der besten Feature-Variante) und verrauscht damit
+#: Ranking wie Pruning.
+#:
+#: Default bleibt ``last``, damit bestehende Studien in sich vergleichbar bleiben —
+#: eine laufende Studie darf ihre Zielgroesse nicht mitten im Lauf wechseln. Neue
+#: Studien setzen ``hpo.objective_reduction: best``.
+_REDUCTIONS = ('last', 'best')
+
+
+def _reduce(values: list, obj: dict, mode: str = 'last'):
+    """Einen Fold-Wert aus der Epochen-History ziehen."""
+    if mode == 'last':
+        return values[-1]
+    return min(values) if obj.get('direction', 'minimize') == 'minimize' else max(values)
+
+
 def main() -> None:
     # Argument parser
     parser = argparse.ArgumentParser(description="Hyperparameter Optimization")
@@ -120,6 +146,20 @@ def main() -> None:
     # Format objectives list for logging (can't use nested f-strings with backslashes)
     obj_strs = [f"{obj['metric']} ({obj['direction']})" for obj in objectives]
     logging.info(f"Objectives: {obj_strs}")
+
+    reduction = str(config.get('hpo', {}).get('objective_reduction', 'last')).lower()
+    if reduction not in _REDUCTIONS:
+        raise ValueError(
+            f"Unbekanntes hpo.objective_reduction: {reduction!r} "
+            f"(erlaubt: {', '.join(_REDUCTIONS)})"
+        )
+    logging.info(
+        "Fold-Wert je Trial: %s%s", reduction,
+        ' — Early Stopping mit restore_best_weights ist aktiv, "last" bewertet damit '
+        'eine andere Epoche als die, deren Gewichte zurueckgegeben werden'
+        if reduction == 'last'
+        and config['model'].get('early_stopping', {}).get('enabled', False) else ''
+    )
 
     # Load preprocessed data with caching
     use_cache = not args.no_cache
@@ -238,10 +278,10 @@ def main() -> None:
 
                     # Try to get the metric (with mapping support)
                     if metric_key in history and len(history[metric_key]) > 0:
-                        fold_metrics[metric_key] = history[metric_key][-1]
+                        fold_metrics[metric_key] = _reduce(history[metric_key], obj, reduction)
                     elif metric_map.get(metric_key) in history and len(history[metric_map.get(metric_key, '')]) > 0:
                         mapped_key = metric_map.get(metric_key)
-                        fold_metrics[metric_key] = history[mapped_key][-1]
+                        fold_metrics[metric_key] = _reduce(history[mapped_key], obj, reduction)
                     else:
                         # Better error message showing which metrics are available and non-empty
                         available_metrics = [k for k in history.keys() if len(history[k]) > 0]
