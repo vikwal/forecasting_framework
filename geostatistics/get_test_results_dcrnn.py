@@ -280,14 +280,21 @@ def main() -> None:
     # closing model's 'imputed' column under interpol_path
     # (docs/imputation_tft_switch.md), which replaced both Regression-Kriging
     # and the ERA5 per-station OLS. No fallback for target_col.
+    imput_diag = None
     interpol_path = data_cfg.get("interpol_path")
     if interpol_path:
         meas_raw, imput_diag = impute_meas_raw_from_interpol(
             meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
         )
     
+    # Spalten, die schon aus interpol/ kamen, bleiben aussen vor: keine zwei
+    # Quellen in einer Spalte, und eine dort verbliebene Luecke soll den
+    # NaN-Audit erreichen statt still vom KNN gefuellt zu werden. Seit dem
+    # 2026-09-03 fuellt interpol/wind_richtung die Richtung selbst.
     knnimputer_path = data_cfg.get("knnimputer_path")
-    if knnimputer_path and "wind_direction" in measurement_cols:
+    _handled = set(imput_diag.get("handled_cols", ())) if imput_diag else set()
+    if (knnimputer_path and "wind_direction" in measurement_cols
+            and "wind_direction" not in _handled):
         knn_wd = load_knn_imputation(knnimputer_path, "wind_direction", all_ids, timestamps)
         meas_raw = apply_knn_imputation(meas_raw, knn_wd, measurement_cols, "wind_direction")
 

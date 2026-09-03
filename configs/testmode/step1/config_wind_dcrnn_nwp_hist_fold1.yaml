@@ -39,8 +39,10 @@ data:
   test_end: '2025-12-01'
   # Optional: restrict to a time window for evaluation (comment out to use all data)
   wind_parameter_path: 'data/stations_master.csv'
-  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind_richtung'
+  # knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'   # bewusst aus: wind_speed UND wind_direction
+  # kommen aus interpol/wind_richtung, ein Rueckfall wuerde eine Luecke
+  # verdecken statt den NaN-Audit ausloesen (Nutzerentscheidung 2026-09-03)
   power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
   stations_master: 'data/stations_master.csv'
   freq: '1h'

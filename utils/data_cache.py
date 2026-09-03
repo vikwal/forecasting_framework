@@ -1142,7 +1142,7 @@ def create_or_load_preprocessed_data_spatial(config: Dict,
 # served for the new TFT-filled tensors. wind_direction (still KNN) is
 # unchanged in value but shares the versioned meas_raw blob. See
 # docs/imputation_tft_switch.md.
-IMPUTATION_GUARD_VERSION = 4
+IMPUTATION_GUARD_VERSION = 5
 
 
 def _imputation_dir_fingerprint(path: str) -> str:

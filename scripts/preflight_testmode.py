@@ -36,11 +36,22 @@ for f in cfgs:
             use_case=d.get("use_case", "wind"), stations_master=d.get("stations_master"),
             time_label=c.get("params", {}).get("measurement_time_label", "right"))
         meas, diag = impute_meas_raw_from_interpol(meas, ids, ts, cols, d["interpol_path"], target)
-        for sec in [x for x in cols if x != target]:
+        handled = set(diag.get("handled_cols", ()))
+        # KNN nur fuer Spalten, die interpol/ nicht liefert. Steht kein
+        # knnimputer_path in der Config, gibt es ueberhaupt keinen Rueckfall —
+        # so ist es fuer die finale Testauswertung gewollt.
+        knn_path = d.get("knnimputer_path")
+        for sec in [x for x in cols if x != target and x not in handled]:
             if int(np.isnan(meas[:, :, cols.index(sec)]).sum()) == 0:
                 continue
-            knn = load_knn_imputation(d["knnimputer_path"], sec, ids, ts, freq=d.get("freq", "1h"))
+            if not knn_path:
+                print(f"    [!] '{sec}' hat Luecken und keinen KNN-Pfad — bleibt NaN")
+                continue
+            knn = load_knn_imputation(knn_path, sec, ids, ts, freq=d.get("freq", "1h"))
             meas = apply_knn_imputation(meas, knn, cols, sec)
+        print(f"    Quellen: {diag.get('value_col')} fuer {target}; "
+              f"aus interpol/ gefuellt: {sorted(handled)}; "
+              f"sekundaer: { {k: v['value_col'] for k, v in diag.get('secondary', {}).items()} }")
         cache[ck] = (meas, ts)
         print(f"  [geladen] {len(ids)} St., T={len(ts)}, {ts[0]} .. {ts[-1]}", flush=True)
     meas, ts = cache[ck]

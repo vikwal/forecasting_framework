@@ -74,6 +74,17 @@ logger = logging.getLogger(__name__)
 # Regression-Kriging column, still what interpol/solar carries.
 IMPUTATION_VALUE_COLUMNS = ("imputed", "rk_pred")
 
+# Welche Spalte die Luecke einer bestimmten Messgroesse fuellt, in
+# Vorzugsreihenfolge. Seit dem 2026-09-03 fuehrt der Wind-Baum
+# (interpol/wind_richtung) neben 'imputed' auch 'imputed_dir' — die Richtung in
+# Grad, aus demselben Abschlussmodell. Eine Messgroesse ohne Eintrag hier wird
+# aus dem Interpol-Baum NICHT gefuellt; fuer sie bleibt der KNN-Pfad zustaendig
+# (so bleibt Solar unberuehrt, dessen Baum nur 'rk_pred' kennt).
+IMPUTATION_COLUMN_BY_FEATURE = {
+    "wind_speed":     ("imputed", "rk_pred"),
+    "wind_direction": ("imputed_dir",),
+}
+
 # Per-hour flag written by the TFT closing model: True = the whole 48-h window
 # around this hour held no measurement of this station, so the value rests on
 # ERA5 + neighbours + statics alone. Absent in the older Kriging files.
@@ -89,14 +100,25 @@ def _parquet_columns(fpath: str) -> list[str]:
         return list(pd.read_parquet(fpath).columns)
 
 
-def resolve_imputation_column(fpath: str) -> str:
+def resolve_imputation_column(fpath: str, feature: str | None = None) -> str | None:
     """Pick the gap-fill value column of one interpol Parquet.
 
-    Raises KeyError if the file carries none of IMPUTATION_VALUE_COLUMNS —
+    Without *feature* this resolves the target column as before and raises
+    KeyError if the file carries none of IMPUTATION_VALUE_COLUMNS —
     deliberately loud: a file without a usable column means the directory is
     not what the caller thinks it is.
+
+    With *feature* it resolves that measurement's column from
+    IMPUTATION_COLUMN_BY_FEATURE and returns None when the tree does not carry
+    it. None is a normal answer here, not an error: it says "this directory has
+    nothing for this measurement", and the caller decides what follows.
     """
     cols = _parquet_columns(fpath)
+    if feature is not None:
+        for cand in IMPUTATION_COLUMN_BY_FEATURE.get(feature, ()):
+            if cand in cols:
+                return cand
+        return None
     for cand in IMPUTATION_VALUE_COLUMNS:
         if cand in cols:
             return cand
@@ -268,8 +290,10 @@ def impute_meas_raw_from_interpol(
     measurement_cols: list[str],
     interpol_path: str,
     target_col: str = "wind_speed",
+    secondary_cols: bool = True,
 ) -> Tuple[np.ndarray, Dict[str, object]]:
-    """Fill NaN in *target_col* of *meas_raw* from the interpol directory.
+    """Fill NaN in *target_col* — and, if the tree carries them, in the other
+    measurement columns — of *meas_raw* from the interpol directory.
 
     The single entry point every geostatistics pipeline uses — replaces the
     former `load_interpol_imputation` + `load_era5_imputation` +
@@ -283,23 +307,38 @@ def impute_meas_raw_from_interpol(
                n_cells_still_missing, n_cells_filled_kontextfrei,
                n_cells_offered_unused (an imputed value existed where the
                measurement was NOT missing — a raster mismatch between the
-               interpol files and load_station_measurements, expected 0).
+               interpol files and load_station_measurements, expected 0);
+               handled_cols (every measurement column this call filled, so the
+               caller can skip the KNN path for exactly those) and
+               secondary, a per-column breakdown of the same counts.
+
+    secondary_cols
+        When True (default), every measurement column other than *target_col*
+        that IMPUTATION_COLUMN_BY_FEATURE knows AND the tree actually carries is
+        filled from the same files — for wind that is 'wind_direction' from
+        'imputed_dir' since 2026-09-03. Columns the tree does not cover are left
+        untouched and stay the KNN path's business. There is no fallback in
+        either direction: a column filled from here is NOT topped up by KNN, so
+        a gap the tree does not cover reaches the NaN audit and stops the run.
     """
     if target_col not in measurement_cols:
         logger.info(
             "Interpol imputation skipped: '%s' not in measurement_cols=%s",
             target_col, measurement_cols,
         )
-        return meas_raw, {"value_col": None, "n_cells_filled": 0}
+        return meas_raw, {"value_col": None, "n_cells_filled": 0,
+                          "handled_cols": [], "secondary": {}}
 
     tidx = measurement_cols.index(target_col)
     # Resolve the value column once, from the first station file that exists,
     # and use it for the whole directory: a directory where only some files
     # carry 'imputed' is not a state any pipeline should quietly average over.
     value_col = None
+    probe_path = None
     for sid in station_ids:
         fpath = os.path.join(interpol_path, f"Station_{sid}.parquet")
         if os.path.exists(fpath):
+            probe_path = fpath
             value_col = resolve_imputation_column(fpath)
             break
     if value_col is None:
@@ -336,6 +375,46 @@ def impute_meas_raw_from_interpol(
         target_col, value_col, n_missing, n_missing - n_filled, n_filled,
         diag["n_cells_filled_kontextfrei"], diag["n_cells_offered_unused"],
     )
+
+    # ---- Sekundaerspalten aus demselben Baum -----------------------------
+    # Bis zum 2026-09-03 kam die Windrichtung ausschliesslich aus dem
+    # KNN-Cache. Seither fuehrt interpol/wind_richtung sie als 'imputed_dir'
+    # aus demselben Abschlussmodell wie die Geschwindigkeit. Was hier gefuellt
+    # wird, steht in diag['handled_cols'] — der Aufrufer laesst genau diese
+    # Spalten beim KNN-Schritt aus, damit keine zwei Quellen in einer Spalte
+    # landen.
+    handled = [target_col]
+    sec_diag: Dict[str, Dict[str, object]] = {}
+    if secondary_cols:
+        for col in measurement_cols:
+            if col == target_col:
+                continue
+            col_name = resolve_imputation_column(probe_path, feature=col)
+            if col_name is None:
+                continue
+            sec_values = load_gap_imputation(
+                interpol_path, station_ids, timestamps, value_col=col_name,
+            )
+            cidx = measurement_cols.index(col)
+            sec_missing = np.isnan(meas_raw[:, :, cidx])
+            sec_have = ~np.isnan(sec_values)
+            n_sec_missing = int(sec_missing.sum())
+            n_sec_filled = int((sec_missing & sec_have).sum())
+            meas_raw = apply_imputation(meas_raw, sec_values, measurement_cols, col)
+            sec_diag[col] = {
+                "value_col": col_name,
+                "n_cells_missing_total": n_sec_missing,
+                "n_cells_filled": n_sec_filled,
+                "n_cells_still_missing": n_sec_missing - n_sec_filled,
+            }
+            handled.append(col)
+            logger.info(
+                "Interpol imputation '%s' from column '%s': %d NaN → %d NaN (%d filled). "
+                "No KNN fallback for this column.",
+                col, col_name, n_sec_missing, n_sec_missing - n_sec_filled, n_sec_filled,
+            )
+    diag["handled_cols"] = handled
+    diag["secondary"] = sec_diag
     return meas_raw, diag
 
 

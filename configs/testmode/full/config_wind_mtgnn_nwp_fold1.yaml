@@ -36,8 +36,10 @@ data:
   val_start:  '2024-08-01'   # Train davor, Validierung danach
   test_start: '2025-08-01'
   test_end: '2026-07-31'
-  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind_richtung'
+  # knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'   # bewusst aus: wind_speed UND wind_direction
+  # kommen aus interpol/wind_richtung, ein Rueckfall wuerde eine Luecke
+  # verdecken statt den NaN-Audit ausloesen (Nutzerentscheidung 2026-09-03)
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   use_case: wind

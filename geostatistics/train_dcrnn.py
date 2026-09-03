@@ -545,7 +545,11 @@ def main() -> None:
     # Secondary-column KNN imputation (e.g. wind_direction, dhi, …)
     knnimputer_path = data_cfg.get("knnimputer_path")
     if knnimputer_path:
-        secondary_cols = [c for c in measurement_cols if c != target_col]
+        # Spalten, die schon aus interpol/ kamen, bleiben aussen vor: keine zwei
+        # Quellen in einer Spalte, und eine dort verbliebene Luecke soll den
+        # NaN-Audit erreichen statt still vom KNN gefuellt zu werden.
+        _handled = set(imput_diag.get("handled_cols", ())) if imput_diag else set()
+        secondary_cols = [c for c in measurement_cols if c != target_col and c not in _handled]
         for sec_col in secondary_cols:
             if int(np.isnan(meas_raw[:, :, measurement_cols.index(sec_col)]).sum()) == 0:
                 continue
