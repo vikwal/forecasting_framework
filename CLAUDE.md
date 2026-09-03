@@ -78,6 +78,7 @@ forecasting_framework/
 ## Docs-Verzeichnis
 
 Detaillierte Feature-Dokumentation in `docs/`:
+- [handoff.md](docs/handoff.md) — **AKTUELLER STAND (Sep 2026)**: die neun Laeufe der finalen Testauswertung laufen auf l1/l2/ws, wo sie liegen, wie man sie beobachtet und stoppt, was danach zu tun ist; dazu die Imputationskette in ihrer heutigen Form und die offenen Stolperfallen
 - [dcrnn_implementation_fixes.md](docs/dcrnn_implementation_fixes.md) — **NEU (Mai 2026)**: Analyse der Paper-Abweichungen, Fixes für BiDirDiffConv + zeitabhängige NWP-Attention, Performanz-Implikationen
 - [imputation_tft_switch.md](docs/imputation_tft_switch.md) — **NEU (Sep 2026)**: wind_speed-Imputation auf die TFT-Werte (`imputed` in `interpol/wind`) umgestellt. Loest Regression-Kriging UND den ERA5-OLS-Pfad ab, `IMPUTATION_GUARD_VERSION` 3→4, Belegmessung, `kontextfrei`-Konvention, offener Punkt `dcrnn.interpolate_history`
 - [imputation_knn_regen_20260902.md](docs/imputation_knn_regen_20260902.md) — **NEU (Sep 2026)**: KNN-Cache fuer `wind_direction` neu gerechnet (Abdeckung endete 2026-07-14, jetzt 2026-09-01), Stationssatz 203→204, alter Stand unter `knnimputer/wind_vor_regen_20260902`. Dazu der angeglichene NaN-Audit in `train_mtgnn.py`/`train_wavenet.py`
