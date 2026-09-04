@@ -1,9 +1,16 @@
-# Handoff — Stand 2026-09-03, 14:00 CEST
+# Handoff — Stand 2026-09-04, 07:30 CEST
 
-**Kurzfassung: die neun Läufe der finalen Testauswertung laufen. Es ist nichts zu
-tun, außer auf sie zu warten.** Sie hängen nicht an einer SSH-Sitzung und laufen
-weiter, wenn niemand zusieht. Erwartetes Ende: **später am 2026-09-03 bis früher
-2026-09-04**, bestimmt von den MTGNN-Läufen.
+> **ERLEDIGT.** Alle neun Läufe sind am 2026-09-04 um 01:20 fertig geworden,
+> **9/9 mit `train=0 eval=0`**, Gesamtlaufzeit 12 h 50 min. Ergebnisse
+> zusammengeführt, ausgewertet und als **§19 in `evaluation_results.md`**
+> dokumentiert. Kernbefund: die beiden Arme mit NWP-Historie und Retraining
+> liegen bei RMSE 1,12 / 1,14 gegen 1,42–1,44 der drei übrigen und 1,51 für
+> ICON-D2; DCRNN und MTGNN sind untereinander nicht unterscheidbar. Offen ist
+> nur noch, ob die beiden HIST-Arme zusätzlich **ohne** Retraining über das
+> volle Jahr gerechnet werden sollen (§19.5) — zwei Läufe.
+>
+> Der Rest dieses Dokuments beschreibt den Zustand *während* der Läufe und
+> bleibt als Betriebsanleitung für einen Neustart stehen.
 
 Detaildokumente: Zuschnitt und Vorgeschichte in
 [handoff_testmode.md](handoff_testmode.md), die beiden Imputationsumstellungen in

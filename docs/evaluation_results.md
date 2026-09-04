@@ -1555,3 +1555,166 @@ Auswertungen und Abbildungen).
   dadurch leicht optimistisch; der Effekt trifft alle fünf Arme gleich und
   verzerrt den Armvergleich nicht.
 - **10 statt 12 Monate**, Juni/Juli 2026 fehlen (§ 18.1).
+
+---
+
+## 19. Finale Testauswertung im `--test-mode` (vollständig, 9 von 9 Läufen)
+
+Der eigentliche Abschluss: Training auf den vollen **153 Trainingsknoten**
+(`files` + `val_files`), zero-shot ausgewertet auf den **50 nie gesehenen
+Testknoten** über das Testjahr **2025-08-01 … 2026-07-31**. Zuschnitt, Rezept
+und Ausführungsstand in `docs/handoff_testmode.md`.
+
+Neun Läufe, weil die beiden Arme mit NWP-Historie zusätzlich alle vier Monate
+mit wachsendem Trainingsfenster nachtrainiert wurden:
+
+| Arm | Läufe | Trainingsfenster | Testfenster |
+|---|---|---|---|
+| `dcrnn`, `dcrnn_idw_alt`, `mtgnn_nwp` | je 1 | alles vor 2025-08-01 | ganzes Testjahr |
+| `dcrnn_nwp_hist`, `mtgnn_nwp_hist` | je 3 | < 2025-08-01 / < 2025-12-01 / < 2026-04-01 | Aug–Nov 25 / Dez 25–Mär 26 / Apr–Jul 26 |
+
+Gerechnet am 2026-09-03 auf l1 (6 GPUs), l2 (1) und ws (2), **9/9 mit
+`train=0 eval=0`**, Gesamtlaufzeit 12 h 50 min. Eingangsdaten: Geschwindigkeit
+und Richtung beide aus `interpol/wind_richtung`, **ohne KNN-Rückfall**
+(`docs/imputation_richtung_tft_20260903.md`), ICON-D2 nach der
+Koordinaturreparatur neu geschrieben.
+
+### 19.1 Die Abdeckung ist über alle Arme identisch
+
+| | |
+|---|---|
+| Roh-Zeilen je Arm | 3 480 000 |
+| nach Filterung (imputierte Zielstunden raus) | **3 446 021 (99,02 %)** |
+| Stationen | 50 |
+| Run-Zeitpunkte | 1450, 2025-08-01 06:00 … 2026-07-29 15:00 UTC |
+
+**Bei allen fünf Armen dieselben Zahlen.** Damit fallen die beiden
+Tabellenvarianten aus `scripts/eval_testmode.py` — je Arm auf eigenen Zeilen und
+auf dem gemeinsamen Zeilenschnitt — auf die Stelle genau zusammen. Der
+Armvergleich ist frei von Abdeckungsartefakten; anders als in §14–18 gab es hier
+keine armabhängigen Run-Paar-Ausschlüsse (`grid-NaN: 0` in allen neun Läufen,
+ein sichtbarer Gewinn der ICON-D2-Neuschreibung).
+
+### 19.2 Ergebnis
+
+Gefiltertes Stationsmittel-RMSE über die 50 Teststationen, m/s:
+
+| Arm | RMSE | sd über Stationen | Retraining |
+|---|---:|---:|---|
+| **MTGNN GRID+HIST** | **1,1196** | 0,3744 | ja |
+| **DCRNN GRID+HIST** | **1,1361** | 0,3817 | ja |
+| DCRNN GRID | 1,4171 | 0,5699 | nein |
+| DCRNN IDW (D′) | 1,4321 | 0,6229 | nein |
+| MTGNN GRID | 1,4428 | 0,5083 | nein |
+| *ICON-D2* | *1,5139* | *1,0133* | — |
+| *Persistenz* | *2,2381* | *0,6736* | — |
+
+Alle fünf Arme schlagen ICON-D2 und die Persistenz. Wilcoxon gepaart über die
+50 Stationen, Holm-korrigiert, zeigt **zwei sauber getrennte Gruppen und
+innerhalb der Gruppen nichts**:
+
+| Vergleich | Median ΔRMSE | Anteil A besser | p (Holm) |
+|---|---:|---:|---:|
+| MTGNN GRID+HIST − MTGNN GRID | −0,2586 | 100 % | <0,001 |
+| DCRNN GRID+HIST − MTGNN GRID | −0,2605 | 98 % | <0,001 |
+| DCRNN GRID+HIST − DCRNN GRID | −0,2279 | 96 % | <0,001 |
+| MTGNN GRID+HIST − DCRNN GRID | −0,2039 | 98 % | <0,001 |
+| MTGNN GRID+HIST − DCRNN IDW (D′) | −0,2030 | 96 % | <0,001 |
+| DCRNN GRID+HIST − DCRNN IDW (D′) | −0,1797 | 96 % | <0,001 |
+| MTGNN GRID − DCRNN GRID | +0,0572 | 34 % | 0,189 |
+| MTGNN GRID − DCRNN IDW (D′) | +0,0394 | 38 % | 0,189 |
+| DCRNN GRID+HIST − MTGNN GRID+HIST | +0,0043 | 42 % | 0,776 |
+| DCRNN GRID − DCRNN IDW (D′) | −0,0025 | 52 % | 0,776 |
+
+**DCRNN und MTGNN sind nicht unterscheidbar** — weder mit NWP-Historie
+(p = 0,776) noch ohne (p = 0,189). Auch Delaunay gegen IDW (D′) trennt nichts
+(p = 0,776). Was trennt, ist ausschließlich die NWP-Historie plus Retraining.
+
+### 19.3 Die Vermengung lässt sich zum großen Teil auflösen
+
+Der Vergleich HIST gegen Nicht-HIST vermengt zwei Dinge: den Arm (NWP-Historie)
+und das Trainingsprotokoll (Retraining). Die Chunk-Tabelle trennt sie
+weitgehend, weil **die Trainingsfenster im ersten Chunk identisch sind**:
+
+| Chunk | HIST-Arme trainiert bis | Nicht-HIST trainiert bis | |
+|---|---|---|---|
+| Aug–Nov 2025 | 2025-08-01 | 2025-08-01 | **identisch** |
+| Dez 25–Mär 26 | 2025-12-01 | 2025-08-01 | HIST +4 Monate |
+| Apr–Jul 2026 | 2026-04-01 | 2025-08-01 | HIST +8 Monate |
+
+RMSE je Fenster:
+
+| Arm | Aug–Nov 25 | Dez 25–Mär 26 | Apr–Jul 26 |
+|---|---:|---:|---:|
+| MTGNN GRID+HIST | 0,9816 | 1,2553 | 1,0944 |
+| DCRNN GRID+HIST | 1,0405 | 1,2528 | 1,0904 |
+| DCRNN IDW (D′) | 1,2565 | 1,4813 | 1,5031 |
+| MTGNN GRID | 1,2570 | 1,4859 | 1,5153 |
+| DCRNN GRID | 1,2693 | 1,4632 | 1,4655 |
+| *ICON-D2* | *1,5043* | *1,6283* | *1,3781* |
+| *Persistenz* | *2,1452* | *2,3722* | *2,1649* |
+
+Daraus die Differenz HIST minus Basis je Familie:
+
+| | Aug–Nov 25 (gleiches Training) | Dez 25–Mär 26 (+4 M) | Apr–Jul 26 (+8 M) |
+|---|---:|---:|---:|
+| MTGNN | **−0,2754** | −0,2305 | −0,4209 |
+| DCRNN | **−0,2287** | −0,2103 | −0,3751 |
+
+**Der Arm-Effekt allein liegt bei rund −0,23 bis −0,28 RMSE** — das ist die
+Spalte, in der beide Seiten dasselbe Trainingsfenster haben. Der Rest des
+Abstands im letzten Chunk (weitere ≈ −0,15) geht auf das Retraining.
+Bemerkenswert: bei **+4 Monaten wird der Abstand nicht größer** (−0,23/−0,21
+gegenüber −0,28/−0,23), erst bei +8 Monaten springt er. Das deckt sich mit dem
+Befund aus §17, wo mehr Trainingsdaten ebenfalls **erst bei +8 Monaten** wirkten.
+
+### 19.4 Modelle ohne Retraining driften, die Referenzen nicht
+
+Vom ersten zum dritten Fenster:
+
+| | Aug–Nov 25 → Apr–Jul 26 |
+|---|---:|
+| MTGNN GRID | +0,2583 |
+| DCRNN IDW (D′) | +0,2465 |
+| DCRNN GRID | +0,1962 |
+| MTGNN GRID+HIST | +0,1128 |
+| DCRNN GRID+HIST | +0,0498 |
+| *Persistenz* | *+0,0197* |
+| *ICON-D2* | *−0,1262* |
+
+Die drei nicht nachtrainierten Arme verschlechtern sich um 0,20–0,26, während
+die Persistenz praktisch flach bleibt und **ICON-D2 sich sogar verbessert**. Das
+Testjahr wird also nicht schwerer — die festen Modelle entfernen sich von ihrem
+Trainingsfenster. Im letzten Fenster sind alle drei (1,4655 / 1,5031 / 1,5153)
+**schlechter als ICON-D2** (1,3781); ihr Vorsprung im Jahresmittel stammt
+vollständig aus der ersten Jahreshälfte. Die nachtrainierten Arme halten den
+Abstand (+0,05 / +0,11).
+
+Für den Betrieb ist das die praktisch wichtigste Zahl dieses Abschnitts: ein
+einmal trainiertes Modell unterbietet ICON-D2 nach etwa einem Jahr nicht mehr.
+
+### 19.5 Was diese Zahlen nicht hergeben
+
+- **Early Stopping läuft auf dem Testfenster.** `--test-mode` setzt
+  `val_ids = test_files`; die Modellauswahl sieht also die Teststationen. So
+  entschieden und in `handoff_testmode.md` festgehalten — die Zahlen sind
+  dadurch leicht optimistisch. Der Effekt trifft alle fünf Arme gleich und
+  verzerrt den Armvergleich nicht, wohl aber das absolute Niveau gegenüber
+  ICON-D2.
+- **Ein Lauf je Arm, kein Seed-Mittel.** Der Unterschied zwischen DCRNN und
+  MTGNN (0,0043) liegt weit unter dem, was ein einzelner Lauf auflösen kann.
+- **Die Zerlegung in §19.3 ist keine saubere Faktorisierung.** Die drei Fenster
+  sind verschiedene Jahreszeiten; der Sprung im dritten Chunk enthält
+  Retraining *und* Saison. Sauber wären die beiden HIST-Arme zusätzlich **ohne**
+  Retraining über das volle Jahr — zwei weitere Läufe, bisher nicht gerechnet.
+- **Zur Imputation gibt es keine Gütezahl an den echten Lücken**
+  (`imputation_richtung_tft_20260903.md` §3). Die Filterung schließt imputierte
+  Zielstunden aus, imputierte *Eingangs*stunden bleiben drin.
+
+### 19.6 Artefakte
+
+Tabellen `data/test_results/testmode_{overview,overview_paired,by_chunk,wilcoxon,coverage,per_station}.csv`,
+Abbildungen `figures/testmode/01..08` (Balken-RMSE, RMSE je Fenster, gepaarte
+Differenz-Boxplots, Fehler über Prognosehorizont / Windklasse / Monat, Scatter,
+Skill-Verteilung). Rohvorhersagen `data/raw_preds/testmode_*_raw.parquet`,
+Modelle `models/wind_*_testmode*.pt`. Erzeugt von `scripts/eval_testmode.py`.
