@@ -59,6 +59,11 @@ VAL = {
     "mos_reg":       [f"mos_regional_2nwp_fold{i}" for i in (0, 1, 2)],
     "mos_near":      [f"mos_nearest_2nwp_fold{i}" for i in (0, 1, 2)],
     "mos_loc":       [f"mos_local_2nwp_fold{i}" for i in (0, 1, 2)],
+    # --- added 2026-09-05: seed replicates of A and D' (new imputation chain, see seedrep_worker.sh on ws)
+    "dcrnn_rep2":     [f"rep2_dcrnn_fold{i}" for i in (1, 2, 3)],
+    "dcrnn_rep3":     [f"rep3_dcrnn_fold{i}" for i in (1, 2, 3)],
+    "dcrnn_idw_rep2": [f"rep2_dcrnn_idw_alt_fold{i}" for i in (1, 2, 3)],
+    "dcrnn_idw_rep3": [f"rep3_dcrnn_idw_alt_fold{i}" for i in (1, 2, 3)],
 }
 TEST = {
     "dcrnn":      ["testmode_dcrnn"],
@@ -68,6 +73,23 @@ TEST = {
     "mtgnn_hist": [f"testmode_mtgnn_nwp_hist_s{s}" for s in (1, 2, 3)],
     "icon":       ["icon_d2_test_fold7"],
     "ecmwf":      ["ecmwf_test_fold7"],
+    # --- added 2026-09-05; a missing parquet is skipped, so these may be listed early ---
+    # fixed-epoch test-year models (--fixed-epochs, no checkpoint selection on test stations)
+    "dcrnn_fe":       ["testmode_fe_dcrnn"],
+    "dcrnn_idw_fe":   ["testmode_fe_dcrnn_idw_alt"],
+    "mtgnn_fe":       ["testmode_fe_mtgnn_nwp"],
+    "dcrnn_hist_fe":  [f"testmode_fe_dcrnn_nwp_hist_s{s}" for s in (1, 2, 3)],
+    "mtgnn_hist_fe":  [f"testmode_fe_mtgnn_nwp_hist_s{s}" for s in (1, 2, 3)],
+    # HIST arms trained once (step-1 checkpoint), scored over the full year: retraining contrast
+    "dcrnn_hist_once": ["testmode_dcrnn_nwp_hist_once"],
+    "mtgnn_hist_once": ["testmode_mtgnn_nwp_hist_once"],
+    # MOS in --test-mode on the test year (configs/baselines/config_wind_mos_testyear_fold1.yaml)
+    "mos_reg":  ["testyear_mos_regional_2nwp_test_fold0"],
+    "mos_near": ["testyear_mos_nearest_2nwp_test_fold0"],
+    "mos_loc":  ["testyear_mos_local_2nwp_test_fold0"],
+    # TFT sp_base / sp_hist in --test-mode on the test year
+    "tft":      ["testmode_tft_base"],
+    "tft_hist": ["testmode_tft_hist"],
 }
 CHUNKS = [("Aug-Nov 2025", "2025-08-01", "2025-12-01"),
           ("Dec 2025-Mar 2026", "2025-12-01", "2026-04-01"),
