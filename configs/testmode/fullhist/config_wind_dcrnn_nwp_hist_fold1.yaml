@@ -1,5 +1,6 @@
 # Finale Testauswertung im --test-mode (docs/handoff_testmode.md).
-# HIST-Arme EINMAL trainiert (Training < 2025-08-01), Test ueber das volle Testjahr (2026-09-05): Schritt-1-Checkpoint mit dieser Config auswerten, oder fixed-epochs-Lauf.
+# HIST-Arme EINMAL trainiert (Training < 2025-08-01), Test ueber das VOLLE Testjahr 2025-08-01 .. 2026-07-31
+# (angelegt 2026-09-05, abgeleitet aus step1): Schritt-1-Checkpoint hiermit auswerten oder --fixed-epochs-Lauf.
 # train_ids = files + val_files (153), Eval zero-shot auf test_files (50).
 # val_start ist im --test-mode wirkungslos; die Grenze ist test_start.
 # Dateiname absichtlich identisch zur Basis-Config: die Optuna-Study-Aufloesung
@@ -39,8 +40,10 @@ data:
   test_end: '2026-07-31'
   # Optional: restrict to a time window for evaluation (comment out to use all data)
   wind_parameter_path: 'data/stations_master.csv'
-  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
+  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind_richtung'
+  # knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'   # bewusst aus: wind_speed UND wind_direction
+  # kommen aus interpol/wind_richtung, ein Rueckfall wuerde eine Luecke
+  # verdecken statt den NaN-Audit ausloesen (Nutzerentscheidung 2026-09-03)
   power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
   stations_master: 'data/stations_master.csv'
   freq: '1h'

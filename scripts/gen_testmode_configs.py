@@ -36,10 +36,11 @@ PLAN = [
     ("step3", ["dcrnn_nwp_hist", "mtgnn_nwp_hist"],
      "2026-04-01", "2026-07-31",
      "Expanding-Window-Retrain 3/3: Training < 2026-04-01, Test Apr-Jul 2026."),
-    ("fullhist", ["dcrnn_nwp_hist", "mtgnn_nwp_hist"],
-     "2025-08-01", "2026-07-31",
-     "HIST-Arme EINMAL trainiert (Training < 2025-08-01), Test ueber das volle Testjahr "
-     "(2026-09-05): Schritt-1-Checkpoint mit dieser Config auswerten, oder fixed-epochs-Lauf."),
+    # "fullhist" (HIST-Arme einmal trainiert, volles Testjahr) wird NICHT hier erzeugt,
+    # sondern ist aus step1 abgeleitet (nur test_end geaendert), weil die Basis-Configs
+    # seit dem 2026-09-02 andere Imputationspfade tragen als die gerechneten Testmode-Laeufe.
+    # Dieses Skript nicht mehr blind laufen lassen: es ueberschreibt die neun Configs der
+    # Testjahr-Laeufe vom 2026-09-03/04 mit dem heutigen Stand der Basis-Configs.
 ]
 
 HEADER = """# Finale Testauswertung im --test-mode (docs/handoff_testmode.md).
