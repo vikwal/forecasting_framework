@@ -307,6 +307,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--fixed-epochs", type=int, default=None, metavar="N",
+        help=(
+            "Train for exactly N epochs: early stopping off, checkpoint = weights of the "
+            "final epoch, schedules (teacher forcing, LR) keep max_epochs from the config. "
+            "Meant for --test-mode, so that the test stations play no role in checkpoint "
+            "selection; N comes from the stopping epochs of the validation-year folds."
+        ),
+    )
+    parser.add_argument(
         "--station-node-features", default=None, metavar="NAMES",
         help=(
             "Absolute topographic node features on the station nodes, overriding the "
@@ -1021,7 +1030,10 @@ def main() -> None:
         n_val=N_val,
         checkpoint_path=str(model_path),
         station_node_features=args.station_node_features,
+        fixed_epochs=args.fixed_epochs,
     )
+    if args.fixed_epochs:
+        logger.info("--fixed-epochs %d: early stopping disabled, final-epoch weights will be saved.", args.fixed_epochs)
 
     # ------------------------------------------------------------------
     # k-nearest grid indices for nwp_nodes=False
@@ -1214,6 +1226,7 @@ def main() -> None:
         "history":            fit_result["history"],
         "best_val_rmse":      fit_result["best_val_rmse"],
         "stopped_epoch":      fit_result["stopped_epoch"],
+        "fixed_epochs":       args.fixed_epochs,
         "evaluation":         eval_df,
         "hpo_study_name":     hpo_study_name,
         "hpo_best_params":    hpo_best_params,

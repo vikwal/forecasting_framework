@@ -36,6 +36,10 @@ PLAN = [
     ("step3", ["dcrnn_nwp_hist", "mtgnn_nwp_hist"],
      "2026-04-01", "2026-07-31",
      "Expanding-Window-Retrain 3/3: Training < 2026-04-01, Test Apr-Jul 2026."),
+    ("fullhist", ["dcrnn_nwp_hist", "mtgnn_nwp_hist"],
+     "2025-08-01", "2026-07-31",
+     "HIST-Arme EINMAL trainiert (Training < 2025-08-01), Test ueber das volle Testjahr "
+     "(2026-09-05): Schritt-1-Checkpoint mit dieser Config auswerten, oder fixed-epochs-Lauf."),
 ]
 
 HEADER = """# Finale Testauswertung im --test-mode (docs/handoff_testmode.md).

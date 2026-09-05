@@ -450,6 +450,23 @@ class DCRNNTrainer:
             history["lr"].append(lr_now)
 
             # ── Early stopping + checkpoint ───────────────────────────────
+            # Fester Epochenzaehler (--fixed-epochs): kein Early Stopping und keine
+            # Checkpoint-Auswahl nach val (im --test-mode waeren das die Teststationen);
+            # gespeichert werden die Gewichte der letzten Epoche.
+            fixed_epochs = getattr(tc, "fixed_epochs", None)
+            if fixed_epochs:
+                if v_rmse_phys < self._best_val_rmse:
+                    self._best_val_rmse = v_rmse_phys
+                if epoch >= fixed_epochs:
+                    self._ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                    torch.save(self.model.state_dict(), self._ckpt_path)
+                    stopped_epoch = epoch
+                    logger.info(
+                        "Fixed-epoch training: stopped after %d epochs, final weights saved "
+                        "(no early stopping, no checkpoint selection on val).", epoch,
+                    )
+                    break
+                continue
             if v_rmse_phys < self._best_val_rmse:
                 self._best_val_rmse    = v_rmse_phys
                 self._patience_counter = 0

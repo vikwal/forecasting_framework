@@ -283,6 +283,7 @@ class DCRNNConfig:
         n_val: int,
         checkpoint_path: str,
         station_node_features=None,
+        fixed_epochs=None,
     ) -> "DCRNNConfig":
         use_distance, use_direction, use_altitude_diff, topo_names = parse_edge_features(d)
         node_feat_names = parse_station_node_features(d, station_node_features)
@@ -322,6 +323,7 @@ class DCRNNConfig:
             patience=d["patience"],
             checkpoint_path=checkpoint_path,
             val_stations=list(range(n_train, n_train + n_val)),
+            fixed_epochs=fixed_epochs,
         )
 
         # Parsed here (ahead of its previous position below) because the

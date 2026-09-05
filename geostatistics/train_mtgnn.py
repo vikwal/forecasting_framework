@@ -254,6 +254,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--fixed-epochs", type=int, default=None, metavar="N",
+        help=(
+            "Train for exactly N epochs: early stopping off, checkpoint = weights of the "
+            "final epoch, the cosine schedule keeps max_epochs. Meant for --test-mode, so "
+            "that the test stations play no role in checkpoint selection."
+        ),
+    )
+    parser.add_argument(
         "--shuffle-node-features", action="store_true",
         help=(
             "Permutation control: shuffle the topographic node features across "
@@ -841,6 +849,19 @@ def main() -> None:
             writer.add_scalar("val/r2",     val_r2,     epoch)
             writer.add_scalar("cl_steps",   cl_steps,   epoch)
 
+        if args.fixed_epochs:
+            # Fester Epochenzaehler (--fixed-epochs): kein Early Stopping und keine
+            # Checkpoint-Auswahl nach val (im --test-mode waeren das die Teststationen);
+            # gespeichert werden die Gewichte der letzten Epoche.
+            best_val = min(best_val, val_rmse)
+            if epoch >= args.fixed_epochs:
+                torch.save(model.state_dict(), model_path)
+                logger.info(
+                    "Fixed-epoch training: stopped after %d epochs, final weights saved "
+                    "(no early stopping, no checkpoint selection on val).", epoch,
+                )
+                break
+            continue
         if val_rmse < best_val:
             best_val = val_rmse
             no_improve = 0
@@ -907,6 +928,7 @@ def main() -> None:
                 "history":       history,
                 "best_val_rmse": best_val,
                 "stopped_epoch": history[-1]["epoch"],
+                "fixed_epochs":  args.fixed_epochs,
                 "evaluation":    eval_df,
             },
             f,

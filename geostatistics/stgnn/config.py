@@ -121,6 +121,11 @@ class TrainingConfig:
     next_n_neighbors: Optional[int] = None      # when set: pick N spatially nearest neighbors instead of random
     val_stations: Optional[List[int]] = None
     test_stations: Optional[List[int]] = None
+    # Fester Epochenzaehler (2026-09-05, --fixed-epochs): wenn gesetzt, wird genau so
+    # lange trainiert, ohne Early Stopping und ohne Checkpoint-Auswahl nach val;
+    # gespeichert werden die Gewichte der LETZTEN Epoche. Die Zeitplaene (Teacher
+    # Forcing, LR-Scheduler) laufen unveraendert ueber max_epochs.
+    fixed_epochs: Optional[int] = None
 
 
 @dataclass
