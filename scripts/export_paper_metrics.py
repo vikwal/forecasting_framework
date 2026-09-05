@@ -74,12 +74,8 @@ TEST = {
     "icon":       ["icon_d2_test_fold7"],
     "ecmwf":      ["ecmwf_test_fold7"],
     # --- added 2026-09-05; a missing parquet is skipped, so these may be listed early ---
-    # fixed-epoch test-year models (--fixed-epochs, no checkpoint selection on test stations)
-    "dcrnn_fe":       ["testmode_fe_dcrnn"],
-    "dcrnn_idw_fe":   ["testmode_fe_dcrnn_idw_alt"],
-    "mtgnn_fe":       ["testmode_fe_mtgnn_nwp"],
-    "dcrnn_hist_fe":  [f"testmode_fe_dcrnn_nwp_hist_s{s}" for s in (1, 2, 3)],
-    "mtgnn_hist_fe":  [f"testmode_fe_mtgnn_nwp_hist_s{s}" for s in (1, 2, 3)],
+    # (the --fixed-epochs test-year runs were abandoned the same day, user decision:
+    #  early stopping on the test stations stays; see docs/handoff_testmode.md)
     # HIST arms trained once (step-1 checkpoint), scored over the full year: retraining contrast
     "dcrnn_hist_once": ["testmode_dcrnn_nwp_hist_once"],
     "mtgnn_hist_once": ["testmode_mtgnn_nwp_hist_once"],

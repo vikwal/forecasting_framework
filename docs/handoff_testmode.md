@@ -245,3 +245,27 @@ Tabellenvarianten (je Arm auf eigenen Zeilen / auf dem gemeinsamen Schnitt über
 `station_id, run_time, horizon`), dazu die Tabelle je 4-Monats-Fenster und acht
 Abbildungen unter `figures/testmode/`. Ergebnis kommt als § 19 in
 `docs/evaluation_results.md`.
+
+---
+
+## Entscheidung 2026-09-05: Early Stopping auf den Teststationen bleibt
+
+`--test-mode` setzt `val_ids = test_files`, das vorzeitige Abbrechen und die Wahl des
+gespeicherten Checkpoints laufen also auf den 50 Teststationen ueber das Testfenster
+(§ 19.5 in `evaluation_results.md`). Das ist formal eine Leckage der Teststationen in
+die Epochenwahl eines einzelnen Laufs. **Nutzerentscheidung: so belassen, im Setting
+vernachlaessigbar, muss im Paper nicht eigens genannt werden.**
+
+Alternative, die dafuer verworfen wurde: `--fixed-epochs N` (seit Commit d19bed5 in
+`train_dcrnn.py`/`train_mtgnn.py`; N = gespeicherte beste Epoche der Validierungs-Retrains,
+A 5/2/8, D' 9/17/26, DCRNN+HIST 45/25/21, MTGNN 55/53/82, MTGNN+HIST 109/79/53). Neun
+solche Laeufe wurden am 2026-09-05 gestartet und nach der Entscheidung abgebrochen; Reste
+unter `archiv/testmode_fixed_epochs_abgebrochen_20260905/` auf l1 und l2. Die Option
+bleibt im Code, wird aber fuer das Paper nicht benutzt.
+
+Unabhaengig davon (und weiter gueltig): `configs/testmode/fullhist/` wertet die
+Schritt-1-HIST-Checkpoints ueber das volle Testjahr aus (`testmode_*_nwp_hist_once`,
+gerechnet 2026-09-05 auf l1), MOS und TFT laufen im Testjahr auf l2
+(`configs/baselines/config_wind_mos_testyear_fold1.yaml`, `configs/tft_bc/*_testyear.yaml`),
+Seed-Wiederholungen A/D' auf ws (`~/queue_scripts/seedrep_worker.sh`). Sammeln und
+exportieren: `bash scripts/collect_testyear_20260905.sh && ./frcst/bin/python scripts/export_paper_metrics.py all`.
