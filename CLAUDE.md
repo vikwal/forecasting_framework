@@ -84,6 +84,19 @@ Study-Löschen mit Passwort), [fold_dashboard.md](docs/fold_dashboard.md) (räum
 **Reviews & Pläne** — `review_round2_{findings,fixes}.md`, `topo_features_review_brief.md`,
 `topo_rehpo_plan.md`, `solar_irradiance_plan.md`, `prompt_baselines_implementation.md`
 
+## Arbeitskonventionen
+
+- **Definition of Done** für eine Änderung: getestet → committed → `/sync` (push +
+  l1/ws nachziehen) → Einmal-Skripte und überholte Docs aufräumen → Docs-Index
+  oben nachziehen. `/status` zeigt, was gerade wo läuft.
+- **`docs/` ist Referenz.** Prozess-Artefakte (Prompts, Review-Protokolle,
+  Implementierungspläne) gehören nach `docs/archive/`, sobald das daraus
+  entstandene Referenz-Doc steht. `handoff.md` ist die **einzige** Stand-Datei —
+  kein zweites `handoff_*.md` anlegen, sondern dort ersetzen.
+- **Einmal-Skripte** (`run_solar_<variante>.sh`, `eval_<lauf>.py`, `compare_*.py`)
+  nach Abschluss nach `archiv/` (gitignored, bleibt lokal). Was ein laufender
+  Worker, Cron oder systemd-Dienst referenziert, wird nicht verschoben.
+
 ## Wichtige Hinweise
 
 - README.md erwähnt TensorFlow — das Framework nutzt **PyTorch**.
