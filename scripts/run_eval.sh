@@ -17,7 +17,7 @@ LOG="logs/eval_${TAG}.log"
 
 cd "$REPO" || exit 1
 source frcst/bin/activate
-eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)"
+eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE|DATA_ROOT)=' ~/.bashrc)"
 
 PKL=$(ls -t results/${STEM}_*.pkl 2>/dev/null | head -1)
 [ -n "$PKL" ] || { echo "kein pkl fuer $STEM"; exit 1; }

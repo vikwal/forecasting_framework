@@ -1,7 +1,7 @@
 data:
   use_case: solar
-  path: /mnt/lambda1/nvme1/synthetic/raw/solar
-  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
+  path: !ENV '${DATA_ROOT}/synthetic/raw/solar'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
   stations_master: data/stations_master.csv
   forecast_hours:
   - '06'
@@ -113,7 +113,7 @@ data:
   n_neighbors: 5
   retrain_interval: 1
   eval_interval: 1
-  ecmwf_solar_path: /mnt/lambda1/nvme1/ecmwf/parquet/solar
+  ecmwf_solar_path: !ENV '${DATA_ROOT}/ecmwf/parquet/solar'
 params:
   icond2_features:
   - ghi_nwp
@@ -165,7 +165,7 @@ params:
   next_n_grid_points: 1
   get_next_grid_points_method: geodesic_next
   next_n_stations: 0
-  topo_features_path: /mnt/lambda1/nvme1/topo_features
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   target_transform: nwp_residual
   measurement_time_label: right
   sub_hourly_fill: ffill

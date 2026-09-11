@@ -1,5 +1,5 @@
 data:
-  path: '/mnt/lambda1/nvme1/synthetic/wind/era5_fric_wind_hourly_age'
+  path: !ENV '${DATA_ROOT}/synthetic/wind/era5_fric_wind_hourly_age'
   files: ['00298', '02907', '02564', '01303', '03015', '00183', '01759', '07403', '05546', '00662',
           '00596', '07410', '03631', '03366', '07374', '03362', '05800', '00591', '02812', '03946',
           '03196', '00891', '00867', '02961', '01694', '05490', '01605', '07351', '00656', '04024',
@@ -17,8 +17,8 @@ data:
             '03231', '05516', '05856', '00953', '04466', '07393', '04928', '05142', '02429', '02290',
             '05158', '01048', '13674', '01684', '04177', '03287', '04887', '02985', '03897', '00701']
 
-  power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
-  nwp_path: '/mnt/lambda1/nvme1/icon-d2/csv'
+  power_curves_path: !ENV '${DATA_ROOT}/synthetic/wind/power_curves'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/csv'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1

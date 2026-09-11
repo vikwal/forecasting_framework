@@ -1,5 +1,5 @@
 data:
-  ecmwf_path: /mnt/lambda1/nvme1/ecmwf/parquet
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet'
   files:
   - 00183
   - '00460'
@@ -105,10 +105,10 @@ data:
   - 02856
   - 07396
   freq: 1h
-  interpol_path: /mnt/lambda1/nvme1/synthetic/interpol/wind
-  knnimputer_path: /mnt/lambda1/nvme1/synthetic/knnimputer/wind
-  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
-  path: /mnt/lambda1/nvme1/synthetic/raw/wind
+  interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/wind'
+  knnimputer_path: !ENV '${DATA_ROOT}/synthetic/knnimputer/wind'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
   stations_master: data/stations_master.csv
   test_end: '2025-10-31'
   test_files:
@@ -353,7 +353,7 @@ wavenet:
   n_blocks: 12
   n_workers: 8
   station_node_features: all
-  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   next_n_ecmwf: 4
   next_n_icond2: 4
   next_n_neighbors: 90

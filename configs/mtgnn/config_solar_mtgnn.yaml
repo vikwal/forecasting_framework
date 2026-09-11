@@ -3,8 +3,8 @@
 # Modellsektion aus configs/mtgnn/config_wind_mtgnn.yaml uebernommen.
 data:
   use_case: solar                                 # routes to solar preprocessing in train_dcrnn.py
-  path: '/mnt/lambda1/nvme1/synthetic/raw/solar'          # Station_XXXXX.parquet with ghi, dhi, temperature_2m, …
-  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'          # flat SL files under {nwp_path}/SL/{run_hour:02d}/<lon>_<lat>_SL.parquet
+  path: !ENV '${DATA_ROOT}/synthetic/raw/solar'          # Station_XXXXX.parquet with ghi, dhi, temperature_2m, …
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'          # flat SL files under {nwp_path}/SL/{run_hour:02d}/<lon>_<lat>_SL.parquet
   # interpol_path / knnimputer_path erst setzen, wenn die Imputation für Solar
   # tatsächlich gelaufen ist — die Verzeichnisse existieren derzeit nicht.
   # interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/solar'
@@ -51,7 +51,7 @@ mtgnn:
   measurement_features: ['ghi', 'dhi']
   target_col: 'ghi'
   edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
-  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   # Alle neun Topo-Features als absolute Knotenfeatures. Ohne diesen
   # Schluessel bekam DCRNN gar keine (parse_station_node_features hat
   # keinen edge_features-Fallback) und MTGNN/WaveNet nur die acht aus

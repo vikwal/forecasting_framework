@@ -3,7 +3,7 @@
 set -euo pipefail
 cd /home/viktorwalter/Work/forecasting_framework
 source frcst/bin/activate
-eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)"
+eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE|DATA_ROOT)=' ~/.bashrc)"
 FOLD_IDX="$1"
 CONFIG="$2"
 mkdir -p logs

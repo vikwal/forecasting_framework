@@ -5,7 +5,7 @@
 # configs/dcrnn/config_wind_dcrnn_nwp_hist_new.yaml so folds & held-out stations
 # are directly comparable to the DCRNN/MTGNN benchmarks.
 data:
-  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
   raw_station_source: True
   files: [
             '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',

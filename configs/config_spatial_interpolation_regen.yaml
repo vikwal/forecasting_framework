@@ -1,5 +1,5 @@
 data:
-  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
   exclude_stations: ['14138']
   stations_master: 'data/stations_master.csv'
   # No test_start/test_end -> use full available raw-data range (matches the
@@ -26,4 +26,4 @@ interpolation:
 output:
   path: 'results/geostatistics'
   prefix: 'spatial_interp_regen'
-  target_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
+  target_path: !ENV '${DATA_ROOT}/synthetic/interpol/wind'

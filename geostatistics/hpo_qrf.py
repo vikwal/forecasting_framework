@@ -16,7 +16,7 @@ EIN Worker fuer diese Studie starten.
 Usage
 -----
     cd ~/Work/forecasting_framework
-    eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)"
+    eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE|DATA_ROOT)=' ~/.bashrc)"
     source frcst/bin/activate
     CUDA_VISIBLE_DEVICES="" nice -n 19 python geostatistics/hpo_qrf.py \\
         --config configs/baselines/config_wind_qrf_local_fold1.yaml --n-jobs 32

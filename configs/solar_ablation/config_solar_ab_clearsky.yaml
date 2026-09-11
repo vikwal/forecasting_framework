@@ -27,8 +27,8 @@
 
 data:
   use_case: solar
-  path: /mnt/lambda1/nvme1/synthetic/raw/solar
-  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
+  path: !ENV '${DATA_ROOT}/synthetic/raw/solar'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
   stations_master: data/stations_master.csv
   forecast_hours:
   - '06'
@@ -189,7 +189,7 @@ params:
   next_n_grid_points: 1
   get_next_grid_points_method: geodesic_next
   next_n_stations: 0
-  topo_features_path: /mnt/lambda1/nvme1/topo_features
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   target_transform: clearsky_index
   measurement_time_label: right
   sub_hourly_fill: ffill

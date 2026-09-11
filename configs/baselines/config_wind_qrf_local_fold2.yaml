@@ -6,9 +6,9 @@
 # (Spezifikation 1.1).
 
 data:
-  path: /mnt/lambda1/nvme1/synthetic/raw/wind
-  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
-  ecmwf_path: /mnt/lambda1/nvme1/ecmwf/parquet
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet'
   files: ['00161', '00164', 00183, '00232', 00298, '00303', '00433', '00460', 00596, '00662', 00691, '00701',
     '00704', 00853, 00880, 00963, '01001', 01048, 01078, '01357', 01358, '01420', 01468, '01544', '01550',
     01580, 01587, '01605', 01639, 01691, '01766', 01869, 01886, 01975, '02014', '02023', '02044', '02252',
@@ -31,8 +31,8 @@ data:
   val_start: '2024-08-01'
   test_start: '2025-08-01'
   test_end: '2026-03-31'
-  interpol_path: /mnt/lambda1/nvme1/synthetic/interpol/wind
-  knnimputer_path: /mnt/lambda1/nvme1/synthetic/knnimputer/wind
+  interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/wind'
+  knnimputer_path: !ENV '${DATA_ROOT}/synthetic/knnimputer/wind'
   stations_master: data/stations_master.csv
   freq: 1h
   use_case: wind
@@ -48,7 +48,7 @@ qrf:
   history_length: 48
   forecast_horizon: 48
   n_workers: 8
-  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   k_i2: 4
   k_e2: 4
   random_state: 20260810

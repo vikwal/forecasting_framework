@@ -1,7 +1,7 @@
 data:
-  path: /mnt/lambda1/nvme1/synthetic/raw/wind
-  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
-  ecmwf_path: /mnt/lambda1/nvme1/ecmwf/parquet
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet'
   files:
   - '00183'
   - '00282'
@@ -211,8 +211,8 @@ data:
   val_start:  '2024-08-01'   # Train davor, Validierung danach
   test_start: '2025-08-01'   # ab hier zurueckgehalten (finaler Test)
   test_end: '2026-03-31'   # Grenze gegen NaN in ECMWF-Parquets ab 2026-05-01
-  interpol_path: /mnt/lambda1/nvme1/synthetic/interpol/wind
-  knnimputer_path: /mnt/lambda1/nvme1/synthetic/knnimputer/wind
+  interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/wind'
+  knnimputer_path: !ENV '${DATA_ROOT}/synthetic/knnimputer/wind'
   stations_master: data/stations_master.csv
   freq: 1h
   use_case: wind
@@ -220,7 +220,7 @@ wavenet:
   K_hop: 2
   # Only read when station_node_features / --station-node-features requests
   # topographic features; no effect otherwise.
-  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   station_node_features: all
   aggregate_nwp: false
   dropout: 0.2

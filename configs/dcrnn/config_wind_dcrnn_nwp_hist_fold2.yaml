@@ -1,7 +1,7 @@
 data:
-  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
-  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
-  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet' #ecmwf_wind_sl_full_prefect.parquet'
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet' #ecmwf_wind_sl_full_prefect.parquet'
   files: [
             '00161', '00164', '00183', '00232', '00298', '00303', '00433', '00460', '00596', '00662',
             '00691', '00701', '00704', '00853', '00880', '00963', '01001', '01048', '01078', '01357',
@@ -33,9 +33,9 @@ data:
   test_end: '2026-03-31'   # Grenze gegen NaN in ECMWF-Parquets ab 2026-05-01
   # Optional: restrict to a time window for evaluation (comment out to use all data)
   wind_parameter_path: 'data/stations_master.csv'
-  interpol_path: '/mnt/lambda1/nvme1/synthetic/interpol/wind'
-  knnimputer_path: '/mnt/lambda1/nvme1/synthetic/knnimputer/wind'
-  power_curves_path: '/mnt/lambda1/nvme1/synthetic/wind/power_curves'
+  interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/wind'
+  knnimputer_path: !ENV '${DATA_ROOT}/synthetic/knnimputer/wind'
+  power_curves_path: !ENV '${DATA_ROOT}/synthetic/wind/power_curves'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
@@ -70,7 +70,7 @@ dcrnn:
   use_direction_features: true
   use_distance_features: true
   edge_features: [distance, direction, altitude_diff, z0, slope, tdi, tpi5, tpi75, aspect_sin, aspect_cos, dist_coast]
-  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   station_node_features: all
   icond2_run_hours: [6,9,12,15]
 

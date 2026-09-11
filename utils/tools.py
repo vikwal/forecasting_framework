@@ -11,6 +11,7 @@ from typing import Dict, Tuple, Any, Optional
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
 import os
+import re
 import logging
 import gc
 
@@ -43,11 +44,33 @@ def _pinball_loss(predictions: torch.Tensor, targets: torch.Tensor, quantiles: l
 
 
 def _env_var_constructor(loader, node):
-    var_name = loader.construct_scalar(node)
-    value = os.environ.get(var_name)
-    if value is None:
-        raise ValueError(f"Environment variable '{var_name}' not set (required by YAML !ENV tag)")
-    return value
+    """Resolve the YAML ``!ENV`` tag.
+
+    Two forms are accepted:
+      ``!ENV NAME``              -> value of $NAME
+      ``!ENV '${NAME}/rest'``    -> string with every ${NAME} substituted
+
+    The second form keeps host-specific prefixes (e.g. DATA_ROOT, which is
+    /mnt/nvme1 on l1 but /mnt/lambda1/nvme1 on l2/ws) out of the config files,
+    so the same YAML works on every host. An unset variable fails loudly rather
+    than silently producing a wrong path.
+    """
+    raw = loader.construct_scalar(node)
+    if '${' not in raw:
+        value = os.environ.get(raw)
+        if value is None:
+            raise ValueError(f"Environment variable '{raw}' not set (required by YAML !ENV tag)")
+        return value
+
+    def substitute(match):
+        name = match.group(1)
+        value = os.environ.get(name)
+        if value is None:
+            raise ValueError(f"Environment variable '{name}' not set "
+                             f"(required by YAML !ENV tag in '{raw}')")
+        return value
+
+    return re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}', substitute, raw)
 
 _env_loader = yaml.SafeLoader
 yaml.add_constructor('!ENV', _env_var_constructor, Loader=_env_loader)

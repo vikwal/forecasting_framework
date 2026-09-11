@@ -4,7 +4,7 @@
 # wie configs/tft_bc/config_wind_tft_base_test.yaml). cv_mode entfernt (temporal), test_end
 # auf 2026-07-31. Hyperparameter aus der Studie cl_m-tft-bc_out-48_freq-1h_wind_tft_sp_hist.
 data:
-  path: /mnt/lambda1/nvme1/synthetic/raw/wind
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
   raw_station_source: true
   files: [00183, '00460', 00856, '05404', '01443', 01684, 01759, '03032', 03158, '03631', '03730', 05792, 05856, '15000',
     05779, '04271', 02638, 02961, 05490, '05426', '03761', '00303', 02483, 00596, '03513', 00691, '01200', '02014', '02667',
@@ -22,8 +22,8 @@ data:
     '04032', 00198, 04039, '04177', '04336', '13711', '04501', 04928, 05158, '05347', '01346', '05440', '05546', 07394, 07395,
     '07403', '15444', '19207', '00722', '00342']
   power_curves_path: /mnt/nas/synthetic/wind/power_curves
-  nwp_path: /mnt/lambda1/nvme1/icon-d2/parquet
-  ecmwf_path: /mnt/lambda1/nvme1/ecmwf/parquet
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet'
   stations_master: data/stations_master.csv
   freq: 1h
   train_frac: 1
@@ -52,7 +52,7 @@ params:
   next_n_grid_points: 4
   next_n_grid_ecmwf: 4
   next_n_stations: 5
-  topo_features_path: /mnt/lambda1/nvme1/topo_features
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   nwp_models: [icon-d2, ecmwf]
   ecmwf_features: [u_wind10m, v_wind10m]
   aggregate_grid_points: false

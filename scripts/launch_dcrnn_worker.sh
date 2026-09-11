@@ -15,10 +15,11 @@
 REPO="$1"; CFG="$2"; GPU="$3"; SUF="$4"
 cd "$REPO" || { echo "REPO nicht gefunden: $REPO"; exec bash; }
 source frcst/bin/activate
-eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)"
+eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE|DATA_ROOT)=' ~/.bashrc)"
 : "${WEATHER_DB_URL:?WEATHER_DB_URL fehlt}"
 : "${ECMWF_WIND_SL_URL:?ECMWF_WIND_SL_URL fehlt}"
 : "${OPTUNA_STORAGE:?OPTUNA_STORAGE fehlt}"
+: "${DATA_ROOT:?DATA_ROOT fehlt}"
 echo "== $(date -Is) $CFG gpu=$GPU suffix=$SUF commit=$(git rev-parse --short HEAD)"
 python geostatistics/hpo_dcrnn.py --config "$CFG" --gpu "$GPU" --suffix "$SUF"
 echo "== Worker beendet, Exit $?"

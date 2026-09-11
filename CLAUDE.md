@@ -93,5 +93,9 @@ Study-Löschen mit Passwort), [fold_dashboard.md](docs/fold_dashboard.md) (räum
   in systemd-Diensten ist sie unsichtbar (siehe `~/docs/services.md`).
 - GPU 0 ist oft von anderen Prozessen belegt → in Configs ausschließen.
 - `frcst/` ist das virtuelle Environment.
+- **`DATA_ROOT`** muss gesetzt sein (`.bashrc`: l1 `/mnt/nvme1`, l2/ws `/mnt/lambda1/nvme1`).
+  Datenpfade in Configs stehen als `!ENV '${DATA_ROOT}/…'`, nie als absoluter
+  Mountpfad — sonst laufen die Hosts auseinander. Fehlt die Variable, bricht
+  `load_config` laut ab; in bereits offenen Terminals `source ~/.bashrc`.
 - Skalierung mit StandardScaler; der Scaler wird für den Inverse-Transform bei
   der Evaluation gespeichert.

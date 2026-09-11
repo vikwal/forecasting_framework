@@ -7,8 +7,8 @@ data:
   val_files: ['01550', '02907']
   test_files: ['00096', '00427']
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
-  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
-  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
@@ -55,7 +55,7 @@ params:
   next_n_grid_points: 4
   next_n_grid_ecmwf: 4
   next_n_stations: 2
-  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   nwp_models: ['icon-d2', 'ecmwf']
   ecmwf_features: ['u_wind10m', 'v_wind10m']
   aggregate_grid_points: False

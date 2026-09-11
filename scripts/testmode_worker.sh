@@ -33,12 +33,12 @@ cd "$REPO" || exit 1
 # .bashrc kehrt auf ws in nicht-interaktiven Shells frueh zurueck (Debian-Standard),
 # ein blosses `source` liefert die Exporte dort nicht. Deshalb gezielt nur die
 # beiden benoetigten Zeilen auswerten — funktioniert auf allen drei Hosts.
-if [[ -z "${OPTUNA_STORAGE:-}" || -z "${WEATHER_DB_URL:-}" ]]; then
+if [[ -z "${OPTUNA_STORAGE:-}" || -z "${WEATHER_DB_URL:-}" || -z "${DATA_ROOT:-}" ]]; then
   set +u
-  eval "$(grep -E '^[[:space:]]*export (OPTUNA_STORAGE|WEATHER_DB_URL)=' "$HOME/.bashrc" 2>/dev/null)" || true
+  eval "$(grep -E '^[[:space:]]*export (OPTUNA_STORAGE|WEATHER_DB_URL|DATA_ROOT)=' "$HOME/.bashrc" 2>/dev/null)" || true
   set -u
 fi
-for v in OPTUNA_STORAGE WEATHER_DB_URL; do
+for v in OPTUNA_STORAGE WEATHER_DB_URL DATA_ROOT; do
   if [[ -z "${!v:-}" ]]; then
     echo "$(date '+%F %T') [w$WID gpu$GPU] ABBRUCH: $v ist nicht gesetzt" | tee -a "$STATUS"
     exit 1

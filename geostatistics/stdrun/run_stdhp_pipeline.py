@@ -34,12 +34,12 @@ Unterschiede zu den Kampagnen-Launchern (bewusst):
     wird neu trainiert; liegt nur eine der beiden Eval-Ausgaben vor, laeuft
     die Eval erneut. Nur vollstaendige Teilergebnisse werden uebersprungen.
 
-Env-Guard: WEATHER_DB_URL, ECMWF_WIND_SL_URL, OPTUNA_STORAGE muessen in der
+Env-Guard: WEATHER_DB_URL, ECMWF_WIND_SL_URL, OPTUNA_STORAGE, DATA_ROOT muessen in der
 Umgebung gesetzt sein (siehe Befund K3 — ein Worker ohne WEATHER_DB_URL
 schreibt still NWP-Hoehen = 0). Diese Variablen werden NICHT aus ~/.bashrc
 nachgeladen (das bricht in ssh-non-interactive-Shells vor Zeile 118-122 ab) —
 der Aufrufer muss sie vor dem Start exportiert haben, z.B.:
-  eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)"
+  eval "$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE|DATA_ROOT)=' ~/.bashrc)"
 
 Reihenfolge: WaveNet base, WaveNet nwp, DCRNN nomeas, DCRNN nograph zuerst
 (nie end-to-end gelaufene Pfade), danach der Rest in GROUPS-Reihenfolge.
@@ -78,7 +78,7 @@ from gen_stdhp_configs import new_stem                  # noqa: E402
 from launch_train_pipeline import GROUPS as TRAIN_GROUPS  # noqa: E402
 from launch_eval_pipeline import JOBS as EVAL_JOBS       # noqa: E402
 
-REQUIRED_ENV = ["WEATHER_DB_URL", "ECMWF_WIND_SL_URL", "OPTUNA_STORAGE"]
+REQUIRED_ENV = ["WEATHER_DB_URL", "ECMWF_WIND_SL_URL", "OPTUNA_STORAGE", "DATA_ROOT"]
 
 # Groups that never had an end-to-end retrain+eval run before this dry-run —
 # scheduled first so the new paths produce results early. DCRNN_IDW (Ablation
@@ -451,7 +451,7 @@ def check_env_guard() -> None:
             "These are silently substituted with unsafe defaults otherwise (K3: a worker "
             "without WEATHER_DB_URL writes NWP heights = 0 without erroring). Export them "
             "before running this driver, e.g. on l2:\n"
-            "  eval \"$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)\"",
+            "  eval \"$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE|DATA_ROOT)=' ~/.bashrc)\"",
             file=sys.stderr,
         )
         sys.exit(1)

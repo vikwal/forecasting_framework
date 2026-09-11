@@ -16,7 +16,7 @@
 # config_wind_tft_sp_hist.yaml (cv_mode: spatial) for a benchmark that is
 # actually comparable to the current DCRNN/MTGNN/WaveNet studies.
 data:
-  path: '/mnt/lambda1/nvme1/synthetic/raw/wind'
+  path: !ENV '${DATA_ROOT}/synthetic/raw/wind'
   raw_station_source: True
   files: [
             '00183', '00460', '00856', '05404', '01443', '01684', '01759', '03032', '03158', '03631',
@@ -44,8 +44,8 @@ data:
             '01346', '05440', '05546', '07394', '07395', '07403', '15444', '19207', '00722', '00342'
             ]
   power_curves_path: '/mnt/nas/synthetic/wind/power_curves'
-  nwp_path: '/mnt/lambda1/nvme1/icon-d2/parquet'
-  ecmwf_path: '/mnt/lambda1/nvme1/ecmwf/parquet'
+  nwp_path: !ENV '${DATA_ROOT}/icon-d2/parquet'
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet'
   stations_master: 'data/stations_master.csv'
   freq: '1h'
   train_frac: 1
@@ -92,7 +92,7 @@ params:
   next_n_grid_points: 4       # ICON-D2 nearest grid points — HPO param in hpo_cl_tft_bc.py
   next_n_grid_ecmwf: 4        # ECMWF nearest grid points — HPO param
   next_n_stations: 5          # nearest neighbor stations feeding observed window — HPO param
-  topo_features_path: '/mnt/lambda1/nvme1/topo_features'
+  topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   nwp_models: ['icon-d2', 'ecmwf']
   ecmwf_features: ['u_wind10m', 'v_wind10m']
   aggregate_grid_points: False
