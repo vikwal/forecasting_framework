@@ -38,7 +38,7 @@ report() {
     [ -z "$pid" ] && continue
     idx=$(grep "$uuid" <<<"$uuidmap" | cut -d, -f1); gpu_of[$pid]=$idx
     local owner; owner=$(ps -o user= -p "$pid" 2>/dev/null || echo '?')
-    [ "$owner" != "$USER" ] && foreign+=$(printf "   gpu%-2s %-14s pid %-8s %6s MiB  %s\n" "$idx" "$owner" "$pid" "$mem" "$(ps -o comm= -p "$pid" 2>/dev/null)")
+    [ "$owner" != "$USER" ] && foreign+="$(printf "   gpu%-2s %-14s pid %-8s %6s MiB  %s" "$idx" "$owner" "$pid" "$mem" "$(ps -o comm= -p "$pid" 2>/dev/null)")"$'\n'
   done < <(nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits 2>/dev/null)
   if [ -n "$foreign" ]; then echo "-- fremde gpu-prozesse"; printf '%b' "$foreign"; fi
 
