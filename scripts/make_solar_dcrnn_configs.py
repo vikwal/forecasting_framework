@@ -160,6 +160,19 @@ def main() -> int:
         # vergleichbar, weil die Auswertung zurueckrechnet — der Unterschied
         # ist der Induktivbias: das Modell muss nur die Korrektur lernen.
         g['target_transform'] = 'nwp_residual'
+
+        # Alle vier ICON-D2-Laeufe, wie der TFT sie nutzt. Die Solar-Vorlage
+        # stand auf [6] — ein Ueberbleibsel aus der Zeit, als der GNN-Pfad durch
+        # die Messluecken blockiert und daher nie gelaufen war. Folge: das DCRNN
+        # sah 1100 Laeufe ueber drei Jahre, also einen pro Tag, waehrend der TFT
+        # mit vieren je Tag trainiert. Gemessen 349 nutzbare Trainings-Run-Paare
+        # gegen 55624 TFT-Fenster.
+        g['icond2_run_hours'] = [6, 9, 12, 15]
+
+        # K_hop 2 statt 1: die Diffusionstiefe des Wind-DCRNN, die dort eine HPO
+        # hinter sich hat. Fuer Solar gibt es keine; der Entwurfswert 1 ist
+        # schlechter begruendet als der erprobte.
+        g['K_hop'] = 2
         # handle_nans bleibt 'break': nach der Imputation darf keine Luecke mehr
         # kommen, und wenn doch, soll der Lauf abbrechen statt Stationen
         # stillschweigend zu verwerfen.

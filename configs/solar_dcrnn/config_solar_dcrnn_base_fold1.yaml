@@ -142,12 +142,15 @@ dcrnn:
   use_distance_features: true
   icond2_run_hours:
   - 6
+  - 9
+  - 12
+  - 15
   history_length: 96
   forecast_horizon: 96
   temporal_encoding: gru
   hidden: 64
   num_layers: 1
-  K_hop: 1
+  K_hop: 2
   nwp_out_dim: 64
   nwp_heads: 4
   dropout: 0.1
