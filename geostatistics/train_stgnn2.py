@@ -237,6 +237,7 @@ from utils.imputation import (                          # noqa: re-exported
     apply_imputation,
     apply_knn_imputation,
     impute_meas_raw_from_interpol,
+    impute_meas_raw_solar,
 )
 
 
