@@ -444,7 +444,13 @@ def main() -> None:
     train_r_mask = run_times < split_time
     i2_scaler = StandardScaler()
     i2_scaler.fit(grid_icond2_runs_raw[train_r_mask].reshape(-1, len(icond2_features)))
-    grid_icond2_runs_scaled = i2_scaler.transform(grid_icond2_runs_raw.reshape(-1, len(icond2_features))).reshape(R, 48, N_igrid, len(icond2_features))
+    # Leads je Lauf aus dem Array nehmen, nicht auf 48 festnageln: bei
+    # stuendlichem Raster sind es 48, bei 30 min 96 (dieselbe Falle wie in
+    # 88eae9d und 935dbca, hier im Auswertungsskript).
+    _L_i2 = grid_icond2_runs_raw.shape[1]
+    grid_icond2_runs_scaled = i2_scaler.transform(
+        grid_icond2_runs_raw.reshape(-1, len(icond2_features))
+    ).reshape(R, _L_i2, N_igrid, len(icond2_features))
 
     e2_scaler = StandardScaler()
     e2_scaler.fit(station_ecmwf_nwp[:split_t, :N_train].reshape(-1, E2))
