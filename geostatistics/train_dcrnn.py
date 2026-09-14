@@ -444,6 +444,12 @@ def main() -> None:
 
     icond2_features_all = dcrnn_cfg.get("icond2_features") or []
     ecmwf_features_all  = dcrnn_cfg.get("ecmwf_features")  or []
+    # Vorbelegen, bevor der Zweig sie ueberschreibt: icond2_feature_mode und
+    # ecmwf_feature_mode sind Windbegriffe (Richtungskodierung der u/v-Felder),
+    # werden aber weiter unten unbedingt gelesen. Im Solar-Zweig blieben sie
+    # bisher undefiniert — der Lauf brach nach dem Laden aller NWP-Daten mit
+    # UnboundLocalError ab. Aufgefallen beim ersten Solar-DCRNN-Lauf ueberhaupt.
+    i2_mode = e2_mode = "both"
     if use_case == "wind":
         i2_mode = dcrnn_cfg.get("icond2_feature_mode", "both")
         e2_mode = dcrnn_cfg.get("ecmwf_feature_mode",  "both")
