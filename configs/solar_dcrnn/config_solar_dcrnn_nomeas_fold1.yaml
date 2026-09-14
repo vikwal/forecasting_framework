@@ -103,6 +103,7 @@ data:
   val_frac: 0.25
   val_start: '2024-08-01'
   interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/solar'
+  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet/solar'
 dcrnn:
   icond2_features:
   - ghi_nwp
@@ -113,7 +114,15 @@ dcrnn:
   - h_snow
   - rho_snow
   - prr_gsp
-  ecmwf_features: []
+  ecmwf_features:
+  - ecmwf_ghi
+  - ecmwf_dhi
+  - ecmwf_bhi
+  - ecmwf_toa
+  - ecmwf_bhi_clearsky
+  - ecmwf_t_2m
+  - ecmwf_tp
+  - ecmwf_fal
   measurement_features:
   - ghi
   - dhi
@@ -126,7 +135,7 @@ dcrnn:
   handle_nans: break
   interpolate_history: false
   next_n_icond2: 4
-  next_n_ecmwf: 0
+  next_n_ecmwf: 4
   station_connectivity: delaunay
   use_altitude_diff: true
   use_direction_features: true

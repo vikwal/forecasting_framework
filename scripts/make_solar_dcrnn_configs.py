@@ -28,6 +28,8 @@ Unterschiede zur Wind-Leiter, alle aus den Solar-Entscheidungen vom 14.09.2026:
   zusammenhaengende Block misst 31 Schritte — bei 96+96 gebrauchten gibt das
   null nutzbare Fenster. Mit Imputation sind es 100 % und ein durchgehender
   Block ueber beide Jahre.
+* **ECMWF als zweite NWP-Quelle**, wie beim TFT. Ohne sie misst der Vergleich
+  zwischen den Architekturen nur den Featuresatz.
 * **Fold 1 only.** Die Ablationen laufen auf Fold 1, die drei Folds sind erst
   fuer die HPO vorgesehen (Entscheidung Viktor, 14.09.2026).
 
@@ -124,6 +126,27 @@ def main() -> int:
         d['test_end'] = '2026-07-31'      # Ende von ICON-D2 SL und der Imputation
         d['interpol_path'] = EnvTag('${DATA_ROOT}/synthetic/interpol/solar')
         d.pop('knnimputer_path', None)    # fuer Solar gibt es keinen KNN-Baum
+
+        # --- ECMWF als zweite NWP-Quelle -----------------------------
+        # Die Config-Notiz „ECMWF disabled for solar (no surface radiation
+        # fields)" stammt vom August und ist ueberholt: seither liegen 759
+        # Gitterpunkte unter ecmwf/parquet/solar. Ohne ECMWF misst ein
+        # Vergleich DCRNN gegen TFT den Featuresatz statt der Architektur —
+        # in der Augustablation war ECMWF mit -3.9 % der einzige grosse Hebel,
+        # alles andere bewegte sich im Rauschen.
+        #
+        # Featurenamen identisch zum TFT; die Ableitungen kommen in beiden
+        # Pfaden aus utils.solar_ecmwf, damit 'ecmwf_dhi' hier und dort
+        # dasselbe bedeutet.
+        d['ecmwf_path'] = EnvTag('${DATA_ROOT}/ecmwf/parquet/solar')
+        g['ecmwf_features'] = ['ecmwf_ghi', 'ecmwf_dhi', 'ecmwf_bhi', 'ecmwf_toa',
+                               'ecmwf_bhi_clearsky', 'ecmwf_t_2m', 'ecmwf_tp', 'ecmwf_fal']
+        # 4 Gitterpunkte wie im Wind-DCRNN; der TFT nimmt einen. Die
+        # Augustablation hat das gemessen und keinen Unterschied gefunden
+        # (ab_ecmwf 75.16-75.49 gegen ab_ecmwf_g4 75.11-75.52 W/m²), die Zahl
+        # ist also folgenlos — und die GATv2-Attention ueber NWP-Knoten
+        # braucht mehr als einen Knoten, um ueberhaupt etwas zu tun.
+        g['next_n_ecmwf'] = 4
 
         # --- Zielgroessen und Raster ---------------------------------
         g['target_col'] = ['ghi', 'dhi']

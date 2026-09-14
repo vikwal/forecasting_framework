@@ -612,6 +612,35 @@ def load_icond2_ml_runs(
 # ECMWF loader (absolute time — latest-run merged per valid_time)
 # ---------------------------------------------------------------------------
 
+def _reindex_nwp_to_grid(series: "pd.Series", timestamps: "pd.DatetimeIndex") -> np.ndarray:
+    """NWP-Reihe auf die Zielzeitachse bringen, auch wenn die feiner ist.
+
+    ECMWF-HRES liegt stuendlich vor. Bei stuendlicher Zielachse (Wind) trifft
+    ``reindex`` jeden Zeitpunkt und das Ergebnis ist unveraendert. Bei
+    30-Minuten-Zielachse (Solar) traefe es nur jede zweite Zeile — die Haelfte
+    aller Werte waere NaN, und der Lauf braeche am NaN-Audit ab.
+
+    Der Stundenwert wird deshalb ueber seine Teilschritte konstant gehalten,
+    genau wie im CL-Pfad (utils/solar_ecmwf.py, Abschnitt „Zeitliche
+    Zuordnung"). Eine Interpolation wuerde eine Aufloesung vortaeuschen, die
+    HRES nicht hergibt; konstant halten erhaelt die Stundenbilanz.
+
+    Das ``limit`` wird aus den beiden Rastern bestimmt, nicht gesetzt: bei
+    gleichem Raster ist es 0 und die Funktion ist ein reines ``reindex``.
+    """
+    werte = series.reindex(timestamps)
+    if len(series.index) < 2 or len(timestamps) < 2:
+        return werte.values
+    src_step = pd.Series(series.index).diff().dropna().min()
+    dst_step = pd.Series(timestamps).diff().dropna().min()
+    if pd.isna(src_step) or pd.isna(dst_step) or dst_step >= src_step:
+        return werte.values
+    limit = int(src_step / dst_step) - 1
+    if limit > 0:
+        werte = werte.ffill(limit=limit)
+    return werte.values
+
+
 def _compute_derived_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     """
     Compute wind_speed_Xm = sqrt(u² + v²) on-the-fly if requested but not present.
@@ -631,6 +660,15 @@ def _compute_derived_features(df: pd.DataFrame, features: list[str]) -> pd.DataF
         v_col = next((c for c in candidates_v if c in df.columns), None)
         if u_col and v_col:
             df[feat] = np.sqrt(df[u_col] ** 2 + df[v_col] ** 2).astype(np.float32)
+
+    # Solar-ECMWF: ecmwf_ghi/-dhi/-bhi/-toa/… aus ssrd, fdir, cdir, tisr. Die
+    # Definitionen kommen aus utils.solar_ecmwf, damit GNN- und CL-Pfad nicht
+    # zwei Ableitungen desselben Namens fuehren — sonst hiesse 'ecmwf_dhi' in
+    # einem DCRNN-Lauf etwas anderes als im TFT-Lauf daneben, und der Vergleich
+    # zwischen den Architekturen waere keiner mehr.
+    if any(isinstance(f, str) and f.startswith("ecmwf_") for f in features):
+        from utils.solar_ecmwf import _add_ecmwf_derived
+        df = _add_ecmwf_derived(df, list(features))
     return df
 
 
@@ -956,11 +994,31 @@ def load_ecmwf_parquet_at_stations_and_grid(
             if gdf.empty:
                 continue
             gdf = _compute_derived_features(gdf, features)
+            # Lead 0 der ECMWF-Solarlaeufe vor der Duplikatwahl entfernen.
+            # Die akkumulierten Strahlungsfelder (ssrd, fdir, cdir, tisr, tp)
+            # haben dort definitionsgemaess keinen Wert — es gibt kein
+            # vorangehendes Intervall —, waehrend die Momentanfelder (t_2m,
+            # fal) belegt sind. Genau diese Zeile traegt aber den juengsten
+            # starttime, also greift keep="last" nach ihr und verwirft den
+            # aelteren Lauf, der fuer denselben Zeitpunkt einen echten
+            # Strahlungswert hat.
+            #
+            # Gemessen: ohne diesen Filter sind 950 von 11378 Zeitpunkten NaN,
+            # ausnahmslos zur vollen Stunde 0 und 12 UTC — den beiden
+            # HRES-Laufzeiten — und ausnahmslos in den Strahlungsfeldern.
+            # Der NaN-Waechter verwarf daraufhin 100 % der Laufpaare.
+            #
+            # Bewusst auf ``ecmwf_``-Features und vorhandene forecasttime
+            # eingegrenzt: fuer den Wind-Pfad ein No-op, dessen Felder bei
+            # Lead 0 belegt sind.
+            if "forecasttime" in gdf.columns and any(
+                    isinstance(f, str) and f.startswith("ecmwf_") for f in features):
+                gdf = gdf[gdf["forecasttime"] != 0]
             gdf = gdf.drop_duplicates("valid_time", keep="last")
             gdf = gdf.set_index("valid_time").sort_index()
             for fi, feat in enumerate(features):
                 if feat in gdf.columns:
-                    grid_nwp[:, gi, fi] = gdf[feat].reindex(timestamps).values
+                    grid_nwp[:, gi, fi] = _reindex_nwp_to_grid(gdf[feat], timestamps)
     else:
         df["grid_key"] = list(zip(df["grid_lat"].round(5), df["grid_lon"].round(5)))
         needed_keys_round = {(round(float(k[0]), 5), round(float(k[1]), 5)) for k in grid_keys}
@@ -977,7 +1035,7 @@ def load_ecmwf_parquet_at_stations_and_grid(
             gdf = gdf.set_index("valid_time").sort_index()
             for fi, feat in enumerate(features):
                 if feat in gdf.columns:
-                    grid_nwp[:, gi, fi] = gdf[feat].reindex(timestamps).values
+                    grid_nwp[:, gi, fi] = _reindex_nwp_to_grid(gdf[feat], timestamps)
 
     for si in tqdm(range(Ns), desc="Filling ECMWF Station Tensors"):
         nearest_key = station_nearest[si][0]

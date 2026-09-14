@@ -1,9 +1,4 @@
-# Solar-DCRNN, Arm 'nograph' auf Fold 1 — Ablation C: zusaetzlich leeres station<->station Kantenset
-#
-# 41 Trainings-, 21 Zielstationen aus configs/solar_folds.yaml.
-# Abweichung von Arm A: {'neighbour_meas_available': False, 'station_connectivity': 'none', 'direction_to_adj': False}
-#
-# Erzeugt von scripts/make_solar_dcrnn_configs.py — nicht von Hand pflegen.
+# Smoke-Test des Solar-DCRNN-Pfads (Imputation + Multi-Target + 30min). Wegwerfbar.
 
 data:
   use_case: solar
@@ -19,61 +14,11 @@ data:
   - '00662'
   - 00691
   - '00704'
-  - 00853
-  - 00867
-  - 01048
-  - '01303'
-  - 01468
-  - '01503'
-  - '01550'
-  - '01612'
-  - 01684
-  - 01691
-  - '02171'
-  - '02261'
-  - 02290
-  - 02483
-  - 02559
-  - '02601'
-  - 02638
-  - '03015'
-  - 03098
-  - '03231'
-  - 03287
-  - '03366'
-  - '03660'
-  - '04104'
-  - '04177'
-  - '04271'
-  - 04393
-  - '04466'
-  - '05100'
-  - '05426'
-  - 05856
-  - '07374'
-  - '15444'
   val_files:
   - 00282
   - '00701'
   - 00880
   - 00963
-  - '01346'
-  - 01639
-  - 01975
-  - '02014'
-  - '02115'
-  - '02667'
-  - '02712'
-  - 02932
-  - 03668
-  - '04336'
-  - 04911
-  - '05142'
-  - '05404'
-  - 05480
-  - '05705'
-  - 05792
-  - 05906
   test_files:
   - 00183
   - 00856
@@ -96,14 +41,13 @@ data:
   - 06197
   - '07370'
   - '15000'
-  test_start: '2025-08-01'
-  test_end: '2026-07-31'
+  test_start: '2024-03-01'
+  test_end: '2024-03-15'
   freq: 30min
   train_frac: 1
   val_frac: 0.25
-  val_start: '2024-08-01'
+  val_start: '2024-02-01'
   interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/solar'
-  ecmwf_path: !ENV '${DATA_ROOT}/ecmwf/parquet/solar'
 dcrnn:
   icond2_features:
   - ghi_nwp
@@ -114,15 +58,7 @@ dcrnn:
   - h_snow
   - rho_snow
   - prr_gsp
-  ecmwf_features:
-  - ecmwf_ghi
-  - ecmwf_dhi
-  - ecmwf_bhi
-  - ecmwf_toa
-  - ecmwf_bhi_clearsky
-  - ecmwf_t_2m
-  - ecmwf_tp
-  - ecmwf_fal
+  ecmwf_features: []
   measurement_features:
   - ghi
   - dhi
@@ -135,8 +71,8 @@ dcrnn:
   handle_nans: break
   interpolate_history: false
   next_n_icond2: 4
-  next_n_ecmwf: 4
-  station_connectivity: none
+  next_n_ecmwf: 0
+  station_connectivity: delaunay
   use_altitude_diff: true
   use_direction_features: true
   use_distance_features: true
@@ -160,14 +96,13 @@ dcrnn:
   horizon_decay: 0.85
   lr: 0.0003
   weight_decay: 0.001
-  batch_size: 64
+  batch_size: 8
   max_epochs: 200
   patience: 10
   gradient_clip: 1.0
   scheduler: plateau
   impute_night_zero: true
-  neighbour_meas_available: false
-  direction_to_adj: false
+  epochs: 1
 cache:
   use_cache: true
   cache_dir: data_cache/gnns
