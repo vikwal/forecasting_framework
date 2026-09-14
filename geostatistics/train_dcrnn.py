@@ -99,6 +99,7 @@ from geostatistics.train_stgnn2 import (
     load_ecmwf_parquet_at_stations_and_grid,
     load_nwp_elevations,
     impute_meas_raw_from_interpol,
+    impute_meas_raw_solar,
     load_knn_imputation,
     apply_knn_imputation,
 )
@@ -483,9 +484,17 @@ def main() -> None:
         features_to_load = list(icond2_features)
         uv_load_indices  = None
     measurement_cols = dcrnn_cfg.get("measurement_features")
-    target_col       = dcrnn_cfg.get("target_col")
-    if target_col not in measurement_cols:
-        raise ValueError(f"target_col '{target_col}' must be in measurement_features")
+    # dcrnn.target_col darf eine Liste sein (Multi-Target, z. B. Solar
+    # ghi+dhi). target_cols fuehrt immer alle, target_col bleibt der erste —
+    # alles, was bisher einen einzelnen Namen erwartet (Dateinamen,
+    # Auswertung), sieht damit unveraendert denselben Wert wie zuvor.
+    _tc_raw = dcrnn_cfg.get("target_col")
+    target_cols = list(_tc_raw) if isinstance(_tc_raw, (list, tuple)) else [_tc_raw]
+    fehlend = [c for c in target_cols if c not in measurement_cols]
+    if fehlend:
+        raise ValueError(
+            f"target_col {fehlend} must be in measurement_features {measurement_cols}")
+    target_col = target_cols[0]
 
     run_hours     = tuple(dcrnn_cfg.get("icond2_run_hours", [6, 9, 12, 15]))
     next_n_icond2 = dcrnn_cfg.get("next_n_icond2")
@@ -546,10 +555,23 @@ def main() -> None:
     imput_diag = None
     interpol_path = data_cfg.get("interpol_path")
     if interpol_path:
-        logger.info("Loading interpolation ('imputed', TFT) from %s …", interpol_path)
-        meas_raw, imput_diag = impute_meas_raw_from_interpol(
-            meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
-        )
+        if str(data_cfg.get("use_case", "wind")).lower() == "solar":
+            # Eigener Einstieg: der Solar-Baum fuehrt ghi_imputed/dhi_imputed
+            # statt der einen 'imputed'-Spalte, ist rechts-gelabelt und fuellt
+            # nachts nicht (utils/imputation.impute_meas_raw_solar). Erst damit
+            # ist der GNN-Pfad fuer Solar ueberhaupt lauffaehig — ohne
+            # Imputation ist der laengste lueckenfreie Block 31 Schritte lang,
+            # gebraucht werden lookback + horizon.
+            logger.info("Loading solar gap filling from %s …", interpol_path)
+            meas_raw, imput_diag = impute_meas_raw_solar(
+                meas_raw, all_ids, timestamps, measurement_cols, interpol_path,
+                fill_night=bool(dcrnn_cfg.get("impute_night_zero", True)),
+            )
+        else:
+            logger.info("Loading interpolation ('imputed', TFT) from %s …", interpol_path)
+            meas_raw, imput_diag = impute_meas_raw_from_interpol(
+                meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
+            )
 
     # Secondary-column KNN imputation (e.g. wind_direction, dhi, …)
     knnimputer_path = data_cfg.get("knnimputer_path")
@@ -558,7 +580,9 @@ def main() -> None:
         # Quellen in einer Spalte, und eine dort verbliebene Luecke soll den
         # NaN-Audit erreichen statt still vom KNN gefuellt zu werden.
         _handled = set(imput_diag.get("handled_cols", ())) if imput_diag else set()
-        secondary_cols = [c for c in measurement_cols if c != target_col and c not in _handled]
+        _handled |= set((imput_diag or {}).get("columns", {}))   # Solar-Zweig
+        secondary_cols = [c for c in measurement_cols
+                          if c not in target_cols and c not in _handled]
         for sec_col in secondary_cols:
             if int(np.isnan(meas_raw[:, :, measurement_cols.index(sec_col)]).sum()) == 0:
                 continue
@@ -1025,7 +1049,7 @@ def main() -> None:
         icond2_features=icond2_features,
         ecmwf_features=ecmwf_features,
         measurement_features=measurement_cols,
-        target_col=target_col,
+        target_col=target_cols,
         n_train=N_train,
         n_val=N_val,
         checkpoint_path=str(model_path),
@@ -1090,9 +1114,13 @@ def main() -> None:
     # .temporal_encoding — exactly what TrainingSampler needs.
     # ------------------------------------------------------------------
     target_feat_idx = model_cfg.target_feat_idx
+    target_feat_idxs = tuple(model_cfg.target_feat_idxs) or (target_feat_idx,)
+    # Einziel: int wie bisher, damit der Sampler bitgleich dieselben Formen
+    # liefert. Mehrziel: Tupel, dann kommt ground_truth als (N, T, n_targets).
+    _sampler_target = target_feat_idx if len(target_feat_idxs) == 1 else target_feat_idxs
     sampler = TrainingSampler(
         model_cfg, builder, base_graph,
-        target_feat_idx=target_feat_idx,
+        target_feat_idx=_sampler_target,
         station_coords=station_coords,
         hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
         neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
@@ -1109,8 +1137,12 @@ def main() -> None:
     if writer is not None:
         logger.info("TensorBoard log dir: %s", tb_dir)
 
-    target_scale = float(meas_scaler.std_[target_feat_idx] + meas_scaler.eps)
-    target_mean  = float(meas_scaler.mean_[target_feat_idx])
+    # Je Zielgroesse eine eigene Skala — ghi und dhi unterscheiden sich um rund
+    # Faktor zwei, ein gemeinsamer Faktor waere fuer beide falsch.
+    target_scale = [float(meas_scaler.std_[i] + meas_scaler.eps) for i in target_feat_idxs]
+    target_mean  = [float(meas_scaler.mean_[i]) for i in target_feat_idxs]
+    if len(target_feat_idxs) == 1:
+        target_scale, target_mean = target_scale[0], target_mean[0]
 
     trainer = DCRNNTrainer(
         model=model,
@@ -1162,6 +1194,24 @@ def main() -> None:
         sd = {k.replace("_orig_mod.", ""): v for k, v in ckpt.items()}
         model.load_state_dict(sd)
         ws_feat_idx_i2 = find_ws_feat_idx(icond2_features)
+        # Je Zielgroesse die passende NWP-Spalte im ICON-Gitter. Fuer Wind ist
+        # das die bisherige ws_feat_idx_i2; fuer Solar 'ghi' -> 'ghi_nwp' usw.
+        # Ohne Treffer bleibt der Eintrag None und skill_nwp dieser Zielgroesse
+        # NaN — sichtbar statt stillschweigend falsch.
+        _nwp_by_target = {"ghi": "ghi_nwp", "dhi": "dhi_nwp",
+                          "bhi": "bhi_nwp", "dni": "dni_nwp"}
+        nwp_ref_idxs = []
+        for _tc in target_cols:
+            _col = _nwp_by_target.get(_tc)
+            if _col is not None and _col in icond2_features:
+                nwp_ref_idxs.append(icond2_features.index(_col))
+            elif len(target_cols) == 1:
+                nwp_ref_idxs.append(ws_feat_idx_i2)
+            else:
+                logger.warning(
+                    "Keine NWP-Referenzspalte fuer Zielgroesse '%s' in icond2_features %s "
+                    "— skill_nwp bleibt dafuer NaN.", _tc, icond2_features)
+                nwp_ref_idxs.append(None)
         eval_df, _ = run_evaluation(
             model=model,
             sampler=sampler,
@@ -1178,7 +1228,10 @@ def main() -> None:
             ecmwf_static=ecmwf_static_scaled,
             meas_scaler=meas_scaler,
             target_feat_idx=target_feat_idx,
+            target_feat_idxs=target_feat_idxs,
+            target_names=target_cols,
             ws_feat_idx_i2=ws_feat_idx_i2,
+            nwp_ref_idxs=nwp_ref_idxs,
             H_hist=H,
             H_fore=F_h,
             train_station_indices=train_station_indices,

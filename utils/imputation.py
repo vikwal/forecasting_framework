@@ -747,3 +747,100 @@ def impute_solar_measurements(df: pd.DataFrame,
         for t, d in diag["targets"].items())
     logger.info("Solar-Imputation Station %s — %s", station_id, parts)
     return df, diag
+
+
+def impute_meas_raw_solar(
+    meas_raw: np.ndarray,
+    station_ids: list[str],
+    timestamps: pd.DatetimeIndex,
+    measurement_cols: list[str],
+    interpol_path: str,
+    fill_night: bool = True,
+) -> Tuple[np.ndarray, dict]:
+    """Array-Pendant zu :func:`impute_solar_measurements` fuer den GNN-Pfad.
+
+    Fuellt die Solar-Zielspalten in *meas_raw* ``(T, N, M)`` aus dem Solar-Baum.
+    Eigene Funktion statt eines Eintrags in ``IMPUTATION_COLUMN_BY_FEATURE``,
+    weil zwei Dinge dazukommen, die der Wind-Baum nicht braucht: die
+    Label-Korrektur (der Solar-Baum ist rechts-gelabelt, s.
+    :func:`_solar_imputation_frame`) und die Nachtfuellung.
+
+    **Warum das den GNN-Pfad ueberhaupt erst ermoeglicht:** DCRNN verlangt einen
+    lueckenfreien ``(T, N, M)``-Block ueber *alle* Stationen gleichzeitig, und
+    zwar ``lookback + horizon`` Schritte am Stueck. Ohne Imputation sind ueber
+    die 83 Pool- und Teststationen nur 11.4 % der Zeitschritte vollstaendig, der
+    laengste zusammenhaengende Block misst 31 Schritte — bei 96+96 gebrauchten
+    ist das null nutzbare Fenster. Mit Imputation sind es 100 % und ein
+    durchgehender Block ueber beide Jahre (gemessen 2026-09-14,
+    2023-08-01…2025-08-01, 30 min).
+
+    Returns
+    -------
+    meas_raw : in place veraendert
+    diag     : je Spalte die Zaehlwerte fuer den Bericht
+    """
+    diag: dict = {"columns": {}}
+    ziele = [c for c in measurement_cols if c in SOLAR_IMPUTATION_COLUMN_BY_TARGET]
+    if not ziele:
+        logger.warning(
+            "Solar-Imputation: keine der Messspalten %s ist eine bekannte Solar-Zielgroesse "
+            "%s — nichts gefuellt.", measurement_cols,
+            sorted(SOLAR_IMPUTATION_COLUMN_BY_TARGET))
+        return meas_raw, diag
+
+    # Tagmaske einmal je Station laden — sie gilt fuer alle Zielspalten.
+    tag = np.zeros((len(timestamps), len(station_ids)), dtype=bool)
+    for j, sid in enumerate(station_ids):
+        fpath = os.path.join(interpol_path, f"Station_{sid}.parquet")
+        if not os.path.exists(fpath) or SOLAR_DAY_COLUMN not in _parquet_columns(fpath):
+            continue
+        src = _solar_imputation_frame(fpath, [SOLAR_DAY_COLUMN])
+        tag[:, j] = (src[SOLAR_DAY_COLUMN].reindex(timestamps)
+                     .astype("boolean").fillna(False).to_numpy(dtype=bool))
+
+    for col in ziele:
+        k = measurement_cols.index(col)
+        quelle = SOLAR_IMPUTATION_COLUMN_BY_TARGET[col]
+        werte = np.full((len(timestamps), len(station_ids)), np.nan, dtype=np.float32)
+        ctx = np.zeros_like(werte, dtype=bool)
+        for j, sid in enumerate(station_ids):
+            fpath = os.path.join(interpol_path, f"Station_{sid}.parquet")
+            if not os.path.exists(fpath):
+                continue
+            vorhanden = _parquet_columns(fpath)
+            if quelle not in vorhanden:
+                continue
+            wanted = [quelle] + ([CONTEXTFREE_COLUMN] if CONTEXTFREE_COLUMN in vorhanden else [])
+            src = _solar_imputation_frame(fpath, wanted)
+            werte[:, j] = src[quelle].reindex(timestamps).to_numpy(dtype=np.float32)
+            if CONTEXTFREE_COLUMN in src.columns:
+                ctx[:, j] = (src[CONTEXTFREE_COLUMN].reindex(timestamps)
+                             .astype("boolean").fillna(False).to_numpy(dtype=bool))
+
+        fehlt = np.isnan(meas_raw[:, :, k])
+        n_vorher = int(fehlt.sum())
+        fuellbar = fehlt & np.isfinite(werte)
+        meas_raw[:, :, k][fuellbar] = werte[fuellbar]
+        n_modell = int(fuellbar.sum())
+
+        n_nacht = 0
+        if fill_night:
+            nachtluecke = np.isnan(meas_raw[:, :, k]) & ~tag
+            n_nacht = int(nachtluecke.sum())
+            meas_raw[:, :, k][nachtluecke] = 0.0
+
+        diag["columns"][col] = {
+            "value_col": quelle,
+            "n_missing_before": n_vorher,
+            "n_filled_model": n_modell,
+            "n_filled_night": n_nacht,
+            "n_kontextfrei": int((fuellbar & ctx).sum()),
+            "n_missing_after": int(np.isnan(meas_raw[:, :, k]).sum()),
+        }
+        logger.info(
+            "Solar-Imputation '%s' (aus '%s'): %d fehlend -> %d offen "
+            "(%d Modell, davon %d kontextfrei; %d Nacht=0)",
+            col, quelle, n_vorher, diag["columns"][col]["n_missing_after"],
+            n_modell, diag["columns"][col]["n_kontextfrei"], n_nacht,
+        )
+    return meas_raw, diag

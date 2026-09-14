@@ -298,8 +298,16 @@ class TrainingSampler:
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
 
         # Ground truth
-        gt = station_meas[t_run_abs:t_run_abs + H_fore, :, self.target_feat_idx][:, all_global]
-        gt_target    = gt[:, target_mask_np].T
+        # target_feat_idx darf ein Tupel sein (Multi-Target). Ein int liefert
+        # wie bisher (T, N) -> gt_target (N_target, T); ein Tupel liefert
+        # (T, N, n_targets) -> (N_target, T, n_targets).
+        _ti = self.target_feat_idx
+        if isinstance(_ti, (list, tuple)):
+            gt = station_meas[t_run_abs:t_run_abs + H_fore, :, list(_ti)][:, all_global, :]
+            gt_target = np.transpose(gt[:, target_mask_np, :], (1, 0, 2))
+        else:
+            gt = station_meas[t_run_abs:t_run_abs + H_fore, :, _ti][:, all_global]
+            gt_target = gt[:, target_mask_np].T
         ground_truth = torch.from_numpy(gt_target.copy().astype(np.float32))
 
         # Zero target measurements (original M features only)
@@ -409,8 +417,13 @@ class TrainingSampler:
             rk_slice = interpol_meas[t_hist_abs:t_run_abs, :][:, all_global, np.newaxis]
             meas_hist = np.concatenate([meas_hist, rk_slice], axis=2)
 
-        gt = station_meas[t_run_abs:t_run_abs + H_fore, :, self.target_feat_idx][:, all_global]
-        gt_val       = gt[:, N_train:].T
+        _ti = self.target_feat_idx
+        if isinstance(_ti, (list, tuple)):
+            gt = station_meas[t_run_abs:t_run_abs + H_fore, :, list(_ti)][:, all_global, :]
+            gt_val = np.transpose(gt[:, N_train:, :], (1, 0, 2))
+        else:
+            gt = station_meas[t_run_abs:t_run_abs + H_fore, :, _ti][:, all_global]
+            gt_val = gt[:, N_train:].T
         ground_truth = torch.from_numpy(gt_val.copy().astype(np.float32))
 
         stat_sub  = station_static[all_global, :]

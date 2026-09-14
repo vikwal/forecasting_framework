@@ -65,6 +65,10 @@ class DCRNN(nn.Module):
         self.T_fore            = config.forecast_horizon
         self.M                 = config.station_meas_features
         self.target_feat_idx   = config.target_feat_idx
+        # Leer bei Configs aus der Zeit vor dem Multi-Target-Umbau (und bei
+        # direkt konstruierten Testfixtures) — dann ist es der Einziel-Fall.
+        self.target_feat_idxs  = tuple(config.target_feat_idxs) or (config.target_feat_idx,)
+        self.n_targets         = len(self.target_feat_idxs)
         self.direction_to_adj  = config.direction_to_adj
         self.wind_dir_meas_idx = config.wind_dir_meas_idx
         self.wind_dir_cos_idx  = config.wind_dir_cos_idx
@@ -140,6 +144,7 @@ class DCRNN(nn.Module):
         self.decoder = DCGRUDecoder(
             forecast_horizon=config.forecast_horizon,
             station_nwp_dim=station_nwp_dim,
+            n_targets=self.n_targets,
             **shared_kwargs,
         )
 
@@ -162,7 +167,8 @@ class DCRNN(nn.Module):
 
         Returns
         -------
-        preds : (N_target, forecast_horizon)
+        preds : (N_target, forecast_horizon) bei einem Ziel,
+                (N_target, forecast_horizon, n_targets) bei mehreren
         """
         i2s_key = ("icond2", "informs", "station")
         e2s_key = ("ecmwf",  "informs", "station")
@@ -261,7 +267,10 @@ class DCRNN(nn.Module):
         )
 
         # Last observed value for all nodes (target stations: 0, zeroed by sampler)
-        y_last = meas[:, -1, self.target_feat_idx]         # (N_s,)
+        if self.n_targets == 1:
+            y_last = meas[:, -1, self.target_feat_idx]     # (N_s,)
+        else:
+            y_last = meas[:, -1, list(self.target_feat_idxs)]   # (N_s, n_targets)
 
         # ── Decoder ────────────────────────────────────────────────────
         preds = self.decoder(
@@ -283,7 +292,7 @@ class DCRNN(nn.Module):
             **dir_kwargs_dec,
         )
 
-        return preds   # (N_target, T_fore)
+        return preds   # (N_target, T_fore[, n_targets])
 
     # ------------------------------------------------------------------
 

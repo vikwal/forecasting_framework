@@ -34,6 +34,17 @@ def _horizon_weights(horizon: int, decay: float, device: torch.device) -> Tensor
     return w
 
 
+def _broadcast_horizon(w: Tensor, err: Tensor) -> Tensor:
+    """Horizontgewichte ``(H,)`` auf die Form von *err* bringen.
+
+    ``err`` ist ``(N, H)`` im Einziel-Fall und ``(N, H, n_targets)`` bei
+    mehreren Zielgroessen. Ein festes ``w.unsqueeze(0)`` traefe im zweiten Fall
+    die Zieldimension statt des Horizonts und broadcastete entweder falsch oder
+    gar nicht — beides waere still, solange n_targets zufaellig gleich H ist.
+    """
+    return w.view(1, -1, *([1] * (err.dim() - 2)))
+
+
 class WeightedMSELoss(nn.Module):
     """
     MSE loss with optional exponential horizon weighting.
@@ -76,7 +87,7 @@ class WeightedMSELoss(nn.Module):
         err = (preds - targets) ** 2   # (N, H)
         if self.weighted:
             w = self._get_weights(preds.device)  # (H,)
-            err = err * w.unsqueeze(0)
+            err = err * _broadcast_horizon(w, err)
         return err.mean()
 
 
@@ -104,7 +115,7 @@ class WeightedMAELoss(nn.Module):
         err = (preds - targets).abs()
         if self.weighted:
             w = self._get_weights(preds.device)
-            err = err * w.unsqueeze(0)
+            err = err * _broadcast_horizon(w, err)
         return err.mean()
 
 
@@ -134,7 +145,7 @@ class WeightedHuberLoss(nn.Module):
         err = F.huber_loss(preds, targets, reduction="none", delta=self.delta)
         if self.weighted:
             w = self._get_weights(preds.device)
-            err = err * w.unsqueeze(0)
+            err = err * _broadcast_horizon(w, err)
         return err.mean()
 
 

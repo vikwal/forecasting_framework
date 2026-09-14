@@ -192,6 +192,9 @@ def evaluate(
     timestamps: "pd.DatetimeIndex | None" = None,
     station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
     station_k_nearest_ecmwf: np.ndarray | None = None, # (N_all, k_e) — k nearest ECMWF, nwp_nodes=False
+    target_feat_idxs: tuple | None = None,   # alle Zielspalten; None = Einziel
+    target_names: list[str] | None = None,   # Namen dazu, fuer die target-Spalte
+    nwp_ref_idxs: list | None = None,        # NWP-Referenzspalte je Ziel (None = keine)
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
     Single-pass evaluation over all test run pairs.
@@ -199,6 +202,9 @@ def evaluate(
     All train stations serve as context; all val stations are predicted simultaneously.
     Returns (station_df, raw_df):
       station_df — per-station aggregate metrics: station_id, mae, rmse, r2, skill, skill_nwp, n_samples
+                   Bei mehreren Zielgroessen kommt eine Spalte 'target' dazu und
+                   es gibt eine Zeile je (Station, Zielgroesse). Der Einziel-Fall
+                   ist unveraendert, ohne die Spalte.
       raw_df     — per-prediction rows: station_id, run_time, valid_time, horizon, pred, gt, nwp_ref, pers_ref
                    (run_time / valid_time are NaT when timestamps=None)
     """
@@ -208,11 +214,22 @@ def evaluate(
     pers_acc:  dict[int, list[np.ndarray]] = defaultdict(list)
     raw_records: list[dict] = []
 
-    mean_ws = float(meas_scaler.mean_[target_feat_idx])
-    std_ws  = float(meas_scaler.std_[target_feat_idx] + meas_scaler.eps)
+    # Einziel bleibt der Normalfall: dann ist _idxs einelementig, die
+    # Schleifen laufen einmal und die Ausgabe traegt keine target-Spalte.
+    _idxs = tuple(target_feat_idxs) if target_feat_idxs else (target_feat_idx,)
+    _multi = len(_idxs) > 1
+    _names = list(target_names) if target_names else [None] * len(_idxs)
+    # NWP-Referenzspalte je Zielgroesse. Ohne Angabe traegt nur die erste eine
+    # (ws_feat_idx_i2, der Wind-Fall); die uebrigen bekommen NaN statt still die
+    # Referenz der ersten Zielgroesse zu erben.
+    _nwp_idx = (list(nwp_ref_idxs) if nwp_ref_idxs is not None
+                else [ws_feat_idx_i2] + [None] * (len(_idxs) - 1))
+    _mean = [float(meas_scaler.mean_[i]) for i in _idxs]
+    _std  = [float(meas_scaler.std_[i] + meas_scaler.eps) for i in _idxs]
+    mean_ws, std_ws = _mean[0], _std[0]
 
-    def _to_phys(arr: np.ndarray) -> np.ndarray:
-        return arr * std_ws + mean_ws
+    def _to_phys(arr: np.ndarray, k: int = 0) -> np.ndarray:
+        return arr * _std[k] + _mean[k]
 
     common = dict(
         sampler=sampler,
@@ -234,15 +251,16 @@ def evaluate(
         neighbour_meas_available=neighbour_meas_available,
     )
 
-    def _nwp_ref(gidx: int, r_curr: int) -> np.ndarray:
-        if ws_feat_idx_i2 is None:
+    def _nwp_ref(gidx: int, r_curr: int, k: int = 0) -> np.ndarray:
+        idx = _nwp_idx[k] if k < len(_nwp_idx) else None
+        if idx is None:
             return np.full(H_fore, np.nan, dtype=np.float32)
         return grid_icond2_runs_raw[
-            r_curr, :H_fore, station_nearest_grid[gidx], ws_feat_idx_i2
+            r_curr, :H_fore, station_nearest_grid[gidx], idx
         ]
 
-    def _pers_ref(gidx: int, t_run_abs: int) -> np.ndarray:
-        val = float(meas_raw[t_run_abs - 1, gidx, target_feat_idx])
+    def _pers_ref(gidx: int, t_run_abs: int, k: int = 0) -> np.ndarray:
+        val = float(meas_raw[t_run_abs - 1, gidx, _idxs[k]])
         return np.full(H_fore, val, dtype=np.float32)
 
     # Observer (context) selection must MATCH training: the model was trained
@@ -274,42 +292,53 @@ def evaluate(
                 observer_global=observer_global,
                 fold_train_indices=train_station_indices,
             )
-            preds_a = _to_phys(
-                model(data_a.to(device), mask_a.to(device)).cpu().numpy()
-            )  # (N_val, H_fore)
-            gt_a = meas_raw[
-                t_run_abs:t_run_abs + H_fore, :, target_feat_idx
-            ][:, val_station_indices].T  # (N_val, H_fore)
+            raw_out = model(data_a.to(device), mask_a.to(device)).cpu().numpy()
+            if raw_out.ndim == 2:
+                raw_out = raw_out[:, :, None]       # (N_val, H_fore, 1)
 
             run_ts = timestamps[t_run_abs - 1] if timestamps is not None else None
-            for i, gidx in enumerate(val_station_indices):
-                nwp_h  = _nwp_ref(gidx, r_curr)
-                pers_h = _pers_ref(gidx, t_run_abs)
-                preds_acc[gidx].append(preds_a[i])
-                gt_acc[gidx].append(gt_a[i])
-                nwp_acc[gidx].append(nwp_h)
-                pers_acc[gidx].append(pers_h)
-                sid = all_ids[gidx]
-                for h in range(H_fore):
-                    raw_records.append({
-                        "station_id": sid,
-                        "run_time":   run_ts,
-                        "valid_time": (run_ts + pd.Timedelta(hours=h + 1)) if run_ts is not None else None,
-                        "horizon":    h + 1,
-                        "pred":       float(preds_a[i, h]),
-                        "gt":         float(gt_a[i, h]),
-                        "nwp_ref":    float(nwp_h[h]),
-                        "pers_ref":   float(pers_h[h]),
-                    })
+            for k, fidx in enumerate(_idxs):
+                preds_a = _to_phys(raw_out[:, :, k], k)          # (N_val, H_fore)
+                gt_a = meas_raw[
+                    t_run_abs:t_run_abs + H_fore, :, fidx
+                ][:, val_station_indices].T                      # (N_val, H_fore)
+                # Die NWP-Referenz zeigt auf EINE Spalte des Gitters
+                # (ws_feat_idx_i2). Fuer weitere Zielgroessen gibt es sie nicht,
+                # ohne dass der Aufrufer sie benennt — dann bleibt skill_nwp NaN,
+                # statt still die Referenz der ersten Zielgroesse zu verwenden.
+                for i, gidx in enumerate(val_station_indices):
+                    nwp_h  = _nwp_ref(gidx, r_curr, k)
+                    pers_h = _pers_ref(gidx, t_run_abs, k)
+                    key = (gidx, k)
+                    preds_acc[key].append(preds_a[i])
+                    gt_acc[key].append(gt_a[i])
+                    nwp_acc[key].append(nwp_h)
+                    pers_acc[key].append(pers_h)
+                    sid = all_ids[gidx]
+                    for h in range(H_fore):
+                        rec = {
+                            "station_id": sid,
+                            "run_time":   run_ts,
+                            "valid_time": (run_ts + pd.Timedelta(hours=h + 1)) if run_ts is not None else None,
+                            "horizon":    h + 1,
+                            "pred":       float(preds_a[i, h]),
+                            "gt":         float(gt_a[i, h]),
+                            "nwp_ref":    float(nwp_h[h]),
+                            "pers_ref":   float(pers_h[h]),
+                        }
+                        if _multi:
+                            rec["target"] = _names[k] or f"target_{k}"
+                        raw_records.append(rec)
 
     logger.info("Computing per-station metrics …")
     records = []
 
-    for gidx in val_station_indices:
-        p_all  = np.concatenate(preds_acc[gidx])
-        g_all  = np.concatenate(gt_acc[gidx])
-        n_all  = np.concatenate(nwp_acc[gidx])
-        ps_all = np.concatenate(pers_acc[gidx])
+    for gidx, k in [(g, kk) for kk in range(len(_idxs)) for g in val_station_indices]:
+        key = (gidx, k)
+        p_all  = np.concatenate(preds_acc[key])
+        g_all  = np.concatenate(gt_acc[key])
+        n_all  = np.concatenate(nwp_acc[key])
+        ps_all = np.concatenate(pers_acc[key])
 
         valid = ~(np.isnan(p_all) | np.isnan(g_all))
         if valid.sum() < 2:
@@ -338,7 +367,7 @@ def evaluate(
         else:
             skill_nwp = float("nan")
 
-        records.append({
+        rec = {
             "station_id": all_ids[gidx],
             "mae":        mae,
             "rmse":       rmse,
@@ -346,6 +375,9 @@ def evaluate(
             "skill":      skill,
             "skill_nwp":  skill_nwp,
             "n_samples":  int(valid.sum()),
-        })
+        }
+        if _multi:
+            rec["target"] = _names[k] or f"target_{k}"
+        records.append(rec)
 
     return pd.DataFrame(records), pd.DataFrame(raw_records)

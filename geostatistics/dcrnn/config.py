@@ -72,6 +72,13 @@ class DCRNNConfig:
     icond2_static_features: int = 3
     ecmwf_static_features: int = 3
 
+    #: Alle Zielspalten-Indizes in measurement_features. Beim Einziel-Fall
+    #: ``(target_feat_idx,)``; leer bei Configs, die vor dem Multi-Target-Umbau
+    #: gebaut wurden — Leser behandeln das wie den Einziel-Fall. Steht hier und
+    #: nicht neben target_feat_idx, weil Dataclass-Felder mit Default nicht vor
+    #: solchen ohne stehen duerfen.
+    target_feat_idxs: tuple = ()
+
     # Absolute topographic node features appended to station.static (after
     # lat/lon/alt, before the type indicator the sampler adds last). Empty by
     # default, so station_static_features stays 4 and old checkpoints load.
@@ -278,7 +285,7 @@ class DCRNNConfig:
         icond2_features: list[str],
         ecmwf_features: list[str],
         measurement_features: list[str],
-        target_col: str,
+        target_col: str | list[str],
         n_train: int,
         n_val: int,
         checkpoint_path: str,
@@ -398,7 +405,15 @@ class DCRNNConfig:
             history_length=d.get("history_length", 48),
             forecast_horizon=d.get("forecast_horizon", 48),
             temporal_encoding=d.get("temporal_encoding", "gru"),
-            target_feat_idx=measurement_features.index(target_col),
+            # target_col darf eine Liste sein (Multi-Target, z. B. Solar
+            # ghi+dhi). target_feat_idx bleibt der Index des ERSTEN Ziels —
+            # alles, was ihn bisher liest (evaluation.py, get_test_results_*),
+            # verhaelt sich damit unveraendert. target_feat_idxs fuehrt alle.
+            target_feat_idx=measurement_features.index(
+                target_col[0] if isinstance(target_col, (list, tuple)) else target_col),
+            target_feat_idxs=tuple(
+                measurement_features.index(c)
+                for c in (target_col if isinstance(target_col, (list, tuple)) else [target_col])),
             station_meas_features=len(measurement_features) + (1 if interpolate_history else 0),
             interpolate_history=interpolate_history,
             neighbour_meas_available=neighbour_meas_available,

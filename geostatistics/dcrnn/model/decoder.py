@@ -81,12 +81,18 @@ class DCGRUDecoder(nn.Module):
         alt_col: int | None = None,
         icond2_max_dist_km: float = 0.0,
         ecmwf_max_dist_km: float = 0.0,
+        n_targets: int = 1,
     ) -> None:
         super().__init__()
         self.forecast_horizon = forecast_horizon
         self.num_layers       = num_layers
         self.nwp_nodes        = nwp_nodes
         self.nwp_out_dim      = nwp_out_dim
+        # n_targets > 1: der autoregressive Kanal fuehrt alle Zielgroessen, und
+        # die Ausgabeprojektion gibt sie gemeinsam aus. Bei n_targets == 1
+        # bleiben Modulaufbau und Tensorformen exakt wie zuvor — der Wind-Pfad
+        # ist davon unberuehrt.
+        self.n_targets        = int(n_targets)
 
         if nwp_nodes and nwp_out_dim > 0:
             self.nwp_attn = NWPAttentionLayer(
@@ -106,10 +112,10 @@ class DCGRUDecoder(nn.Module):
             )
 
         if nwp_nodes:
-            gru_input_dim = 1 + nwp_out_dim + static_dim
+            gru_input_dim = self.n_targets + nwp_out_dim + static_dim
         else:
             # station_nwp_dim = I2 + E2 from station.x (nearest grid point)
-            gru_input_dim = 1 + station_nwp_dim + static_dim
+            gru_input_dim = self.n_targets + station_nwp_dim + static_dim
 
         self.cells = nn.ModuleList([
             DCGRUCell(
@@ -118,7 +124,7 @@ class DCGRUDecoder(nn.Module):
             )
             for i in range(num_layers)
         ])
-        self.out_proj = nn.Linear(hidden_dim, 1)
+        self.out_proj = nn.Linear(hidden_dim, self.n_targets)
 
     def forward(
         self,
@@ -132,9 +138,9 @@ class DCGRUDecoder(nn.Module):
         i2s_edge_attr: Tensor,
         e2s_edge_index: Tensor,
         e2s_edge_attr: Tensor,
-        y_last_hist: Tensor,                # (N_s,) — last history value
+        y_last_hist: Tensor,                # (N_s,) or (N_s, n_targets) — last history value
         target_mask: Tensor,                # (N_s,) bool
-        teacher_forcing_targets: Tensor | None = None,  # (N_target, T_fore)
+        teacher_forcing_targets: Tensor | None = None,  # (N_target, T_fore[, n_targets])
         teacher_forcing_ratio: float = 0.5,
         wind_dir_fore: Tensor | None = None,    # (T_fore, N_s) degrees, met. convention
         s2s_dist_norm: Tensor | None = None,    # (E_s2s,) — normalised distance
@@ -144,7 +150,8 @@ class DCGRUDecoder(nn.Module):
         """
         Returns
         -------
-        preds : (N_target, T_fore)
+        preds : (N_target, T_fore) bei n_targets == 1,
+                (N_target, T_fore, n_targets) sonst.
         """
         T_fore = self.forecast_horizon
         device = icond2_fore.device
@@ -153,7 +160,13 @@ class DCGRUDecoder(nn.Module):
 
         N_s = static.size(0)
         H = [h.clone() for h in H_init]
-        y_prev = y_last_hist.clone()          # (N_s,)
+        # Intern immer (N_s, n_targets) — der Einziel-Fall kommt als (N_s,) an.
+        y_prev = y_last_hist.clone()
+        if y_prev.dim() == 1:
+            y_prev = y_prev.unsqueeze(-1)     # (N_s, 1)
+        tf_targets = teacher_forcing_targets
+        if tf_targets is not None and tf_targets.dim() == 2:
+            tf_targets = tf_targets.unsqueeze(-1)   # (N_target, T_fore, 1)
         preds_list: list[Tensor] = []
 
         for t in range(T_fore):
@@ -180,8 +193,8 @@ class DCGRUDecoder(nn.Module):
 
             # --- Build decoder input ---
             input_t = torch.cat(
-                [y_prev.unsqueeze(-1), nwp_msg, static], dim=-1
-            )                                # (N_s, 1 + nwp_dim + S)
+                [y_prev, nwp_msg, static], dim=-1
+            )                                # (N_s, n_targets + nwp_dim + S)
 
             # --- DCGRU step ---
             x_t = input_t
@@ -190,13 +203,16 @@ class DCGRUDecoder(nn.Module):
                 x_t  = H[l]
 
             # --- Output projection ---
-            y_hat = self.out_proj(H[-1]).squeeze(-1)   # (N_s,)
-            preds_list.append(y_hat[target_mask])       # (N_target,)
+            y_hat = self.out_proj(H[-1])                # (N_s, n_targets)
+            preds_list.append(y_hat[target_mask])       # (N_target, n_targets)
 
             # --- Update y_prev for next step ---
             y_next = y_hat.detach().clone()
             if use_tf and random.random() < teacher_forcing_ratio:
-                y_next[target_mask] = teacher_forcing_targets[:, t]
+                y_next[target_mask] = tf_targets[:, t, :]
             y_prev = y_next
 
-        return torch.stack(preds_list, dim=1)   # (N_target, T_fore)
+        preds = torch.stack(preds_list, dim=1)      # (N_target, T_fore, n_targets)
+        # Einziel-Fall auf die alte Form zurueck, damit Trainer, Auswertung und
+        # alle gespeicherten Wind-Ergebnisse unveraendert weiterlaufen.
+        return preds.squeeze(-1) if self.n_targets == 1 else preds

@@ -44,7 +44,9 @@ from pathlib import Path
 from queue import Queue as _Queue
 from threading import Thread
 import itertools
+from typing import Sequence
 
+import numpy as np
 import torch
 from torch import Tensor
 from torch.optim import AdamW
@@ -221,8 +223,8 @@ class DCRNNTrainer:
         teacher_forcing_start: float = 1.0,
         teacher_forcing_end: float = 0.0,
         writer=None,  # optional SummaryWriter for TensorBoard logging
-        target_scale: float = 1.0,
-        target_mean: float = 0.0,
+        target_scale: float | Sequence[float] = 1.0,
+        target_mean: float | Sequence[float] = 0.0,
     ) -> None:
         self.model   = model.to(device)
         self.sampler = sampler
@@ -232,8 +234,15 @@ class DCRNNTrainer:
         self.tf_start = teacher_forcing_start
         self.tf_end   = teacher_forcing_end
         self.writer   = writer
-        self.target_scale = target_scale
-        self.target_mean  = target_mean
+        # Bei mehreren Zielgroessen hat jede ihre eigene Skala (ghi und dhi
+        # unterscheiden sich um rund Faktor zwei). Der in die Historie
+        # geloggte *_rmse_phys ist dann das Mittel ueber die Zielskalen und
+        # damit eine Mischgroesse — brauchbar zum Mitlesen, nicht als
+        # Ergebniszahl. Die belastbaren physikalischen Werte je Zielgroesse
+        # liefert die Auswertung, nicht der Trainer.
+        self._target_scale_vec = np.atleast_1d(np.asarray(target_scale, dtype=float))
+        self.target_scale = float(self._target_scale_vec.mean())
+        self.target_mean  = float(np.atleast_1d(np.asarray(target_mean, dtype=float)).mean())
 
         self.loss_fn = build_loss(
             self.tc.loss_fn,
