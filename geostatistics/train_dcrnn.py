@@ -926,6 +926,43 @@ def main() -> None:
     stat_scaler.fit(raw_static if (val_start and not args.test_mode) else raw_static[:N_train])
     station_static_scaled = stat_scaler.transform(raw_static)
 
+    # ── Sonnengeometrie und Clear-Sky je Station und Zeitschritt ──────
+    # Die zwoelf Groessen, die der TFT als known_features fuehrt und die dem
+    # GNN-Pfad bisher fehlten: Sonnenstand, Clear-Sky-Referenz, Airmass,
+    # Tages- und Jahresgang. Fuer Strahlungsprognose ist das keine Zugabe —
+    # ohne sie muss das Modell Tages- und Jahresgang aus den NWP-Feldern
+    # rekonstruieren, waehrend der TFT sie geschenkt bekommt.
+    #
+    # Bewusst dieselbe Funktion wie im CL-Pfad (utils.solar.solar_geometry),
+    # damit 'ghi_clearsky' hier und dort dasselbe bedeutet und der
+    # Architekturvergleich nicht ueber zwei Definitionen laeuft.
+    #
+    # Anders als die Messungen sind sie ueber das GANZE Fenster bekannt,
+    # Historie wie Prognose — sie gehen deshalb in Encoder und Decoder, und
+    # die Ablationen B/C nullen sie nicht: sie sind kein Beobachtungskanal.
+    station_geo = None
+    geo_feature_names: list[str] = []
+    if str(data_cfg.get("use_case", "wind")).lower() == "solar" and \
+            dcrnn_cfg.get("solar_geometry_features", True):
+        from utils.solar import solar_geometry
+        geo_feature_names = list(dcrnn_cfg.get("geo_features") or [
+            "solar_zenith_cos", "solar_azimuth_sin", "solar_azimuth_cos",
+            "airmass", "dni_extra", "ghi_clearsky", "dni_clearsky", "dhi_clearsky",
+            "hour_sin", "hour_cos", "doy_sin", "doy_cos",
+        ])
+        G = len(geo_feature_names)
+        station_geo = np.zeros((len(timestamps), len(all_ids), G), dtype=np.float32)
+        for _j in range(len(all_ids)):
+            _g = solar_geometry(timestamps, float(lats[_j]), float(lons[_j]),
+                                float(alts[_j]), freq=freq)
+            station_geo[:, _j, :] = _g.reindex(timestamps)[geo_feature_names].to_numpy(np.float32)
+        _geo_scaler = StandardScaler()
+        _geo_scaler.fit(station_geo[:split_t].reshape(-1, G))
+        station_geo = _geo_scaler.transform(
+            station_geo.reshape(-1, G)).reshape(station_geo.shape).astype(np.float32)
+        logger.info("Sonnengeometrie: %d Kanaele je Station und Zeitschritt — %s",
+                    G, geo_feature_names)
+
     # Absolute topographic node features, appended after lat/lon/alt. The sampler
     # adds the type indicator last, so columns 0-2 keep their meaning.
     _node_feat_names = parse_station_node_features(dcrnn_cfg, args.station_node_features)
@@ -1062,6 +1099,7 @@ def main() -> None:
         ecmwf_features=ecmwf_features,
         measurement_features=measurement_cols,
         target_col=target_cols,
+        station_geo_features=(0 if station_geo is None else station_geo.shape[2]),
         n_train=N_train,
         n_val=N_val,
         checkpoint_path=str(model_path),
@@ -1187,6 +1225,7 @@ def main() -> None:
         neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
         residual_spec=residual_spec,
     )
+    sampler.station_geo = station_geo   # vom Trainer an sample_* weitergereicht
 
     # ------------------------------------------------------------------
     # Model + Trainer
@@ -1272,6 +1311,7 @@ def main() -> None:
             ecmwf_static=ecmwf_static_scaled,
             meas_scaler=meas_scaler,
             target_feat_idx=target_feat_idx,
+            station_geo=station_geo,
             target_feat_idxs=target_feat_idxs,
             target_names=target_cols,
             ws_feat_idx_i2=ws_feat_idx_i2,

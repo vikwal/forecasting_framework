@@ -72,6 +72,10 @@ class DCRNNConfig:
     icond2_static_features: int = 3
     ecmwf_static_features: int = 3
 
+    #: Zahl der Sonnengeometrie-Kanaele je Station und Zeitschritt (Solar).
+    #: 0 = aus, dann verhaelt sich alles wie zuvor.
+    station_geo_features: int = 0
+
     #: Alle Zielspalten-Indizes in measurement_features. Beim Einziel-Fall
     #: ``(target_feat_idx,)``; leer bei Configs, die vor dem Multi-Target-Umbau
     #: gebaut wurden — Leser behandeln das wie den Einziel-Fall. Steht hier und
@@ -291,6 +295,7 @@ class DCRNNConfig:
         checkpoint_path: str,
         station_node_features=None,
         fixed_epochs=None,
+        station_geo_features: int = 0,
     ) -> "DCRNNConfig":
         use_distance, use_direction, use_altitude_diff, topo_names = parse_edge_features(d)
         node_feat_names = parse_station_node_features(d, station_node_features)
@@ -415,6 +420,7 @@ class DCRNNConfig:
                 measurement_features.index(c)
                 for c in (target_col if isinstance(target_col, (list, tuple)) else [target_col])),
             station_meas_features=len(measurement_features) + (1 if interpolate_history else 0),
+            station_geo_features=int(station_geo_features),
             interpolate_history=interpolate_history,
             neighbour_meas_available=neighbour_meas_available,
             icond2_features_per_step=len(icond2_features),

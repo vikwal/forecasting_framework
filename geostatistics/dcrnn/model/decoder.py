@@ -82,6 +82,7 @@ class DCGRUDecoder(nn.Module):
         icond2_max_dist_km: float = 0.0,
         ecmwf_max_dist_km: float = 0.0,
         n_targets: int = 1,
+        n_geo: int = 0,
     ) -> None:
         super().__init__()
         self.forecast_horizon = forecast_horizon
@@ -93,6 +94,8 @@ class DCGRUDecoder(nn.Module):
         # bleiben Modulaufbau und Tensorformen exakt wie zuvor — der Wind-Pfad
         # ist davon unberuehrt.
         self.n_targets        = int(n_targets)
+        #: Sonnengeometrie-Kanaele, die je Dekodierschritt dazukommen.
+        self.n_geo            = int(n_geo)
 
         if nwp_nodes and nwp_out_dim > 0:
             self.nwp_attn = NWPAttentionLayer(
@@ -112,10 +115,10 @@ class DCGRUDecoder(nn.Module):
             )
 
         if nwp_nodes:
-            gru_input_dim = self.n_targets + nwp_out_dim + static_dim
+            gru_input_dim = self.n_targets + self.n_geo + nwp_out_dim + static_dim
         else:
             # station_nwp_dim = I2 + E2 from station.x (nearest grid point)
-            gru_input_dim = self.n_targets + station_nwp_dim + static_dim
+            gru_input_dim = self.n_targets + self.n_geo + station_nwp_dim + static_dim
 
         self.cells = nn.ModuleList([
             DCGRUCell(
@@ -146,6 +149,7 @@ class DCGRUDecoder(nn.Module):
         s2s_dist_norm: Tensor | None = None,    # (E_s2s,) — normalised distance
         s2s_bearing: Tensor | None = None,      # (E_s2s,) — azimuth src→dst in radians
         station_nwp_fore: Tensor | None = None, # (T_fore, N_s, I2+E2) when nwp_nodes=False
+        geo_fore: Tensor | None = None,         # (N_s, T_fore, G) Sonnengeometrie
     ) -> Tensor:
         """
         Returns
@@ -192,9 +196,11 @@ class DCGRUDecoder(nn.Module):
             )
 
             # --- Build decoder input ---
-            input_t = torch.cat(
-                [y_prev, nwp_msg, static], dim=-1
-            )                                # (N_s, n_targets + nwp_dim + S)
+            teile_t = [y_prev]
+            if self.n_geo and geo_fore is not None:
+                teile_t.append(geo_fore[:, t, :])          # (N_s, G)
+            teile_t += [nwp_msg, static]
+            input_t = torch.cat(teile_t, dim=-1)   # (N_s, n_targets + G + nwp_dim + S)
 
             # --- DCGRU step ---
             x_t = input_t

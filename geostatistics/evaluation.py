@@ -78,6 +78,7 @@ def build_eval_batch(
     neighbour_meas_available: bool = True,   # ablation B/C: False → no station has measurements
     station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
     station_k_nearest_ecmwf: np.ndarray | None = None, # (N_all, k_e) — k nearest ECMWF, nwp_nodes=False
+    station_geo: np.ndarray | None = None,             # (T, N_all, G) Sonnengeometrie
 ) -> tuple:
     """
     Build a HeteroData evaluation batch for the given station split.
@@ -128,6 +129,11 @@ def build_eval_batch(
 
     meas_hist = station_meas_scaled[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
 
+    geo_full = None
+    if station_geo is not None:
+        geo_full = station_geo[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
+        geo_full = geo_full.transpose(1, 0, 2)            # (N_all, T_total, G)
+
     # Residuum wie im Sampler: Historie gegen r_hist. VOR dem Nullen, sonst
     # liesse die Ablation B/C einen Offset stehen.
     _rs = getattr(sampler, "residual_spec", None)
@@ -172,6 +178,7 @@ def build_eval_batch(
 
     data = sampler._make_data(
         all_global=all_global,
+        geo_full=geo_full,
         meas_hist=meas_hist,
         i2_full=i2_full,
         e2_full=e2_full,
@@ -219,6 +226,7 @@ def evaluate(
     timestamps: "pd.DatetimeIndex | None" = None,
     station_k_nearest_grid: np.ndarray | None = None,  # (N_all, k) — k nearest for nwp_nodes=False
     station_k_nearest_ecmwf: np.ndarray | None = None, # (N_all, k_e) — k nearest ECMWF, nwp_nodes=False
+    station_geo: np.ndarray | None = None,   # (T, N_all, G) Sonnengeometrie
     target_feat_idxs: tuple | None = None,   # alle Zielspalten; None = Einziel
     target_names: list[str] | None = None,   # Namen dazu, fuer die target-Spalte
     nwp_ref_idxs: list | None = None,        # NWP-Referenzspalte je Ziel (None = keine)
@@ -271,6 +279,7 @@ def evaluate(
         icond2_static=icond2_static,
         ecmwf_static=ecmwf_static,
         target_feat_idx=target_feat_idx,
+        station_geo=station_geo,
         H_hist=H_hist,
         H_fore=H_fore,
         interpol_meas=interpol_meas,

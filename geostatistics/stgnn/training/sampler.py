@@ -249,6 +249,7 @@ class TrainingSampler:
         grid_icond2_uv_runs: np.ndarray | None = None,   # (R, 48, N_grid, 2) raw u/v
         station_k_nearest_grid: np.ndarray | None = None,  # (N_stations, k) — k nearest grid indices
         station_k_nearest_ecmwf: np.ndarray | None = None, # (N_stations, k_e) — k nearest ECMWF indices
+        station_geo: np.ndarray | None = None,             # (T, N_stations, G) Sonnengeometrie
     ) -> SampleBatch:
         H_hist  = self.cfg.history_length
         H_fore  = self.cfg.forecast_horizon
@@ -328,6 +329,16 @@ class TrainingSampler:
         # Measurements: history only, (H, N_sub, M)
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
 
+        # Sonnengeometrie ueber das GANZE Fenster — sie ist auch fuer den
+        # Prognosezeitraum bekannt, anders als die Messungen. Wird NICHT
+        # genullt: das ist kein Beobachtungskanal, sondern eine astronomische
+        # Groesse, die auch der TFT als known_feature fuehrt. Die Ablationen
+        # B/C nehmen dem Modell die Nachbarmessungen, nicht den Sonnenstand.
+        geo_full = None
+        if station_geo is not None:
+            geo_full = station_geo[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
+            geo_full = geo_full.transpose(1, 0, 2)          # (N_sub, T_total, G)
+
         _ti = self.target_feat_idx
         _tidx = list(_ti) if isinstance(_ti, (list, tuple)) else [_ti]
 
@@ -395,6 +406,7 @@ class TrainingSampler:
         data = self._make_data(
             all_global=all_global,
             meas_hist=meas_hist,
+            geo_full=geo_full,
             i2_full=i2_full,
             e2_full=e2_full,
             stat_full=stat_full,
@@ -427,6 +439,7 @@ class TrainingSampler:
         grid_icond2_uv_runs: np.ndarray | None = None,   # (R, 48, N_grid, 2) raw u/v
         station_k_nearest_grid: np.ndarray | None = None,  # (N_stations, k) — k nearest grid indices
         station_k_nearest_ecmwf: np.ndarray | None = None, # (N_stations, k_e) — k nearest ECMWF indices
+        station_geo: np.ndarray | None = None,             # (T, N_stations, G) Sonnengeometrie
     ) -> SampleBatch:
         H_hist = self.cfg.history_length
         H_fore = self.cfg.forecast_horizon
@@ -471,6 +484,16 @@ class TrainingSampler:
         )                                                            # (N_all, 96, [k_e*]E2)
 
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
+
+        # Sonnengeometrie ueber das GANZE Fenster — sie ist auch fuer den
+        # Prognosezeitraum bekannt, anders als die Messungen. Wird NICHT
+        # genullt: das ist kein Beobachtungskanal, sondern eine astronomische
+        # Groesse, die auch der TFT als known_feature fuehrt. Die Ablationen
+        # B/C nehmen dem Modell die Nachbarmessungen, nicht den Sonnenstand.
+        geo_full = None
+        if station_geo is not None:
+            geo_full = station_geo[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
+            geo_full = geo_full.transpose(1, 0, 2)          # (N_sub, T_total, G)
 
         _ti = self.target_feat_idx
         _tidx = list(_ti) if isinstance(_ti, (list, tuple)) else [_ti]
@@ -521,6 +544,7 @@ class TrainingSampler:
         data = self._make_data(
             all_global=all_global,
             meas_hist=meas_hist,
+            geo_full=geo_full,
             i2_full=i2_full,
             e2_full=e2_full,
             stat_full=stat_full,
@@ -540,6 +564,7 @@ class TrainingSampler:
         self,
         all_global: list[int],
         meas_hist: np.ndarray,                  # (H,     N_sub,  M)
+        geo_full: np.ndarray | None,            # (N_sub, T_total, G) oder None
         i2_full: np.ndarray,                    # (N_sub, 96,    I2)
         e2_full: np.ndarray,                    # (N_sub, 96,    E2)
         stat_full: np.ndarray,                  # (N_sub, S)
@@ -596,16 +621,28 @@ class TrainingSampler:
             mh  = meas_nt.reshape(N_sub, -1)
             i2f = i2_full.reshape(N_sub, -1)
             e2f = e2_full.reshape(N_sub, -1)
-            x_station = np.concatenate([mh, i2f, e2f], axis=1)
+            teile = [mh] + ([geo_full.reshape(N_sub, -1).astype(np.float32)]
+                            if geo_full is not None else []) + [i2f, e2f]
+            x_station = np.concatenate(teile, axis=1)
         elif te in ("gru", "cnn"):
-            # (N_sub, 96, M+I2+E2) — meas zeroed for forecast steps
+            # (N_sub, 96, M+G+I2+E2) — meas zeroed for forecast steps, die
+            # Geometrie NICHT: sie ist ueber das ganze Fenster bekannt.
             meas_padded = np.zeros((N_sub, T_total, M), dtype=np.float32)
             meas_padded[:, :H_hist, :] = meas_nt
-            x_station = np.concatenate([meas_padded, i2_full, e2_full], axis=2)
+            teile = [meas_padded]
+            if geo_full is not None:
+                teile.append(geo_full.astype(np.float32))
+            teile += [i2_full, e2_full]
+            x_station = np.concatenate(teile, axis=2)
         else:
             raise ValueError(f"Unknown temporal_encoding: {te!r}")
 
         data["station"].x      = torch.from_numpy(x_station.astype(np.float32))
+        if geo_full is not None:
+            # Prognoseteil der Geometrie separat: der Decoder braucht den
+            # Sonnenstand Schritt fuer Schritt, station.x sieht nur der Encoder.
+            data["station"].geo_fore = torch.from_numpy(
+                np.ascontiguousarray(geo_full[:, H_hist:, :]).astype(np.float32))
         data["station"].static = torch.from_numpy(stat_full.astype(np.float32))
 
         # ICON-D2 node features: (96, N_grid, I2) → transpose to (N_grid, 96, I2)

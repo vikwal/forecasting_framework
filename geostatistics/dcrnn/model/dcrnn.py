@@ -99,9 +99,14 @@ class DCRNN(nn.Module):
                     "HeterogeneousGraphBuilder.build() and before constructing DCRNN(config)."
                 )
 
+        # Sonnengeometrie: eigener zeitabhaengiger Stationskanal. Er liegt in
+        # station.x direkt hinter den Messkanaelen (Encoder) und kommt als
+        # geo_fore Schritt fuer Schritt in den Decoder — der Sonnenstand des
+        # Prognosezeitraums ist fuer Strahlung die halbe Information.
+        self.n_geo = int(getattr(config, "station_geo_features", 0) or 0)
         if config.nwp_nodes:
             # Standard path: GATv2 over explicit NWP nodes
-            enc_meas_dim     = config.station_meas_features          # M
+            enc_meas_dim     = config.station_meas_features + self.n_geo   # M + G
             nwp_out_dim      = config.nwp_out_dim
             station_nwp_dim  = 0
         else:
@@ -113,7 +118,7 @@ class DCRNN(nn.Module):
             _k_e2 = config.graph.next_n_ecmwf_grid_points
             _nwp_ch = (_k_i2 * config.icond2_features_per_step
                        + _k_e2 * config.ecmwf_features_per_step)     # k_i*I2 + k_e*E2
-            enc_meas_dim    = config.station_meas_features + _nwp_ch # M + k_i*I2 + k_e*E2
+            enc_meas_dim    = config.station_meas_features + self.n_geo + _nwp_ch
             nwp_out_dim     = 0
             station_nwp_dim = _nwp_ch
 
@@ -145,6 +150,7 @@ class DCRNN(nn.Module):
             forecast_horizon=config.forecast_horizon,
             station_nwp_dim=station_nwp_dim,
             n_targets=self.n_targets,
+            n_geo=self.n_geo,
             **shared_kwargs,
         )
 
@@ -194,19 +200,22 @@ class DCRNN(nn.Module):
         e2s_ea = data[e2s_key].edge_attr
 
         # ── Build meas_seq and station_nwp_fore ────────────────────────
+        # Kanalordnung in station.x: [meas(M) | geo(G) | i2 | e2]. Die Geometrie
+        # steht direkt hinter den Messkanaelen, damit target_feat_idx weiterhin
+        # in die ersten M Spalten zeigt und y_last unveraendert bleibt.
+        M_enc = self.M + self.n_geo
         if self.nwp_nodes:
-            # Standard path: only M measurement channels feed the encoder
-            meas      = x_station[:, :self.T_hist, :self.M]          # (N_s, T_hist, M)
-            meas_seq  = meas.permute(1, 0, 2)                         # (T_hist, N_s, M)
+            # Standard path: Mess- und Geometriekanaele speisen den Encoder
+            meas_seq  = x_station[:, :self.T_hist, :M_enc].permute(1, 0, 2)
             station_nwp_fore = None
         else:
-            # nwp_nodes=False: all M+I2+E2 channels from station.x feed the encoder
-            meas_full        = x_station[:, :self.T_hist, :]          # (N_s, T_hist, M+I2+E2)
-            meas_seq         = meas_full.permute(1, 0, 2)             # (T_hist, N_s, M+I2+E2)
-            # NWP columns of the forecast window for the decoder
-            station_nwp_fore = x_station[:, self.T_hist:, self.M:].permute(1, 0, 2)
-            #                                                          # (T_fore, N_s, I2+E2)
-            meas = x_station[:, :self.T_hist, :self.M]  # needed for y_last below
+            # nwp_nodes=False: alle Kanaele aus station.x speisen den Encoder
+            meas_full        = x_station[:, :self.T_hist, :]
+            meas_seq         = meas_full.permute(1, 0, 2)
+            # NWP-Spalten des Prognosefensters fuer den Decoder — OHNE die
+            # Geometrie, die kommt dort separat ueber geo_fore.
+            station_nwp_fore = x_station[:, self.T_hist:, M_enc:].permute(1, 0, 2)
+        meas = x_station[:, :self.T_hist, :self.M]  # fuer y_last weiter unten
 
         # ── Transpose NWP sequences for loop: (N, T, F) → (T, N, F) ──
         i2_hist = icond2_seq[:, :self.T_hist, :].permute(1, 0, 2)    # (T_hist, N_i, I2)
@@ -286,6 +295,7 @@ class DCRNN(nn.Module):
             e2s_edge_attr=e2s_ea,
             y_last_hist=y_last,
             target_mask=target_mask,
+            geo_fore=getattr(data["station"], "geo_fore", None),
             teacher_forcing_targets=teacher_forcing_targets,
             teacher_forcing_ratio=teacher_forcing_ratio,
             station_nwp_fore=station_nwp_fore,

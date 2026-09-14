@@ -329,6 +329,8 @@ class DCRNNTrainer:
         # Bound sample functions — closures over the data arrays.
         # Created once here so the prefetcher worker can call them by name.
         def _train_sample(r_curr, r_hist, t_run_abs) -> SampleBatch:
+            # station_geo haengt am Sampler (train_dcrnn setzt es), damit die
+            # Aufrufsignatur der Worker unveraendert bleibt.
             return self.sampler.sample_train(
                 r_curr, r_hist, t_run_abs,
                 station_meas, station_nearest_grid,
@@ -340,6 +342,7 @@ class DCRNNTrainer:
                 grid_icond2_uv_runs=grid_icond2_uv_runs,
                 station_k_nearest_grid=station_k_nearest_grid,
                 station_k_nearest_ecmwf=station_k_nearest_ecmwf,
+                station_geo=getattr(self.sampler, "station_geo", None),
             )
 
         def _val_sample(r_curr, r_hist, t_run_abs) -> SampleBatch:
@@ -355,6 +358,7 @@ class DCRNNTrainer:
                 grid_icond2_uv_runs=grid_icond2_uv_runs,
                 station_k_nearest_grid=station_k_nearest_grid,
                 station_k_nearest_ecmwf=station_k_nearest_ecmwf,
+                station_geo=getattr(self.sampler, "station_geo", None),
             )
 
         for epoch in range(1, tc.max_epochs + 1):
