@@ -714,6 +714,11 @@ def impute_solar_measurements(df: pd.DataFrame,
         src = pd.concat([num, flags], axis=1)
 
     day = src[SOLAR_DAY_COLUMN].reindex(df.index) if SOLAR_DAY_COLUMN in src.columns else None
+    if day is None:
+        logger.warning(
+            "Solar-Imputation Station %s: %s fuehrt keine Spalte '%s' — es wird "
+            "keine Nachtfuellung gemacht, die Luecken bleiben offen.",
+            station_id, fpath, SOLAR_DAY_COLUMN)
     ctx = src[CONTEXTFREE_COLUMN].reindex(df.index) if CONTEXTFREE_COLUMN in src.columns else None
 
     for tgt in present:
@@ -728,22 +733,32 @@ def impute_solar_measurements(df: pd.DataFrame,
         n_model = int(fill.sum())
 
         n_night = 0
+        n_tag_unbekannt = 0
         if fill_night and day is not None:
-            night_gap = df[tgt].isna() & (day.astype("boolean").fillna(False) == False)  # noqa: E712
+            # Dreiwertig auswerten: nur ein belegtes ``ist_tag == False`` ist
+            # Nacht. Ein fehlendes Flag (Zeitstempel ausserhalb der Datei, z. B.
+            # im Tail hinter dem Ende des Imputationsbaums) darf nicht als Nacht
+            # durchgehen — sonst entsteht dort eine 0.0, die wie eine gemessene
+            # Null aussieht und die NaN-Waechter nicht mehr ausloest.
+            offen = df[tgt].isna()
+            day_b = day.astype("boolean")
+            night_gap = offen.to_numpy(dtype=bool) & day_b.eq(False).fillna(False).to_numpy(dtype=bool)
             n_night = int(night_gap.sum())
             df.loc[night_gap, tgt] = 0.0
+            n_tag_unbekannt = int((offen.to_numpy(dtype=bool) & day_b.isna().to_numpy(dtype=bool)).sum())
 
         n_ctx = int((fill & ctx.astype("boolean").fillna(False)).sum()) if ctx is not None else 0
         diag["targets"][tgt] = {
             "nan_before": n_before, "filled_model": n_model,
             "filled_night": n_night, "kontextfrei": n_ctx,
+            "tag_unbekannt": n_tag_unbekannt,
             "open_after": int(df[tgt].isna().sum()),
         }
 
     parts = ", ".join(
         f"{t}: {d['nan_before']} NaN -> {d['open_after']} offen "
         f"({d['filled_model']} Modell, davon {d['kontextfrei']} kontextfrei; "
-        f"{d['filled_night']} Nacht=0)"
+        f"{d['filled_night']} Nacht=0; {d['tag_unbekannt']} ohne ist_tag offen gelassen)"
         for t, d in diag["targets"].items())
     logger.info("Solar-Imputation Station %s — %s", station_id, parts)
     return df, diag
@@ -788,15 +803,43 @@ def impute_meas_raw_solar(
             sorted(SOLAR_IMPUTATION_COLUMN_BY_TARGET))
         return meas_raw, diag
 
-    # Tagmaske einmal je Station laden — sie gilt fuer alle Zielspalten.
+    # Tagmaske einmal je Station laden — sie gilt fuer alle Zielspalten. Sie ist
+    # bewusst DREIWERTIG: ``tag_bekannt`` trennt ein gelesenes ``ist_tag`` von
+    # "keine Datei / keine Spalte / Zeitstempel ausserhalb des Baums". Als reine
+    # bool-Maske mit Default False galt jeder unbekannte Schritt als Nacht, und
+    # die Nachtfuellung schrieb dort 0.0 — auch mittags. Das trifft genau den
+    # Tail: ``timestamps`` reicht bis test_end + 2 Tage, der Imputationsbaum
+    # endet frueher. Die erfundenen Nullen sind keine NaN mehr, also verwirft
+    # ``_meas_nan_any`` den Lauf nicht, und das Modell lernt/wird bewertet auf
+    # Mittagswerten von 0 W/m².
     tag = np.zeros((len(timestamps), len(station_ids)), dtype=bool)
+    tag_bekannt = np.zeros_like(tag)
+    ohne_tagflag: list[str] = []
     for j, sid in enumerate(station_ids):
         fpath = os.path.join(interpol_path, f"Station_{sid}.parquet")
         if not os.path.exists(fpath) or SOLAR_DAY_COLUMN not in _parquet_columns(fpath):
+            ohne_tagflag.append(sid)
             continue
         src = _solar_imputation_frame(fpath, [SOLAR_DAY_COLUMN])
-        tag[:, j] = (src[SOLAR_DAY_COLUMN].reindex(timestamps)
-                     .astype("boolean").fillna(False).to_numpy(dtype=bool))
+        roh = src[SOLAR_DAY_COLUMN].reindex(timestamps).astype("boolean")
+        tag_bekannt[:, j] = roh.notna().to_numpy(dtype=bool)
+        tag[:, j] = roh.fillna(False).to_numpy(dtype=bool)
+    if ohne_tagflag:
+        logger.warning(
+            "Solar-Imputation: %d von %d Stationen ohne '%s' in %s (%s%s) — dort "
+            "wird keine Nachtfuellung gemacht, die Luecken bleiben NaN.",
+            len(ohne_tagflag), len(station_ids), SOLAR_DAY_COLUMN, interpol_path,
+            ", ".join(ohne_tagflag[:10]), " …" if len(ohne_tagflag) > 10 else "")
+    _tag_luecken = int((~tag_bekannt).sum())
+    if _tag_luecken:
+        _zeilen = np.where(~tag_bekannt.all(axis=1))[0]
+        logger.warning(
+            "Solar-Imputation: %d von %d Tagflag-Zellen unbekannt (%.2f %%), "
+            "erster betroffener Zeitschritt %s, letzter %s — dort wird nicht "
+            "mit 0 gefuellt.",
+            _tag_luecken, tag_bekannt.size,
+            100.0 * _tag_luecken / max(tag_bekannt.size, 1),
+            timestamps[_zeilen[0]], timestamps[_zeilen[-1]])
 
     for col in ziele:
         k = measurement_cols.index(col)
@@ -824,23 +867,32 @@ def impute_meas_raw_solar(
         n_modell = int(fuellbar.sum())
 
         n_nacht = 0
+        n_tag_unbekannt = 0
         if fill_night:
-            nachtluecke = np.isnan(meas_raw[:, :, k]) & ~tag
+            offen = np.isnan(meas_raw[:, :, k])
+            nachtluecke = offen & tag_bekannt & ~tag
             n_nacht = int(nachtluecke.sum())
             meas_raw[:, :, k][nachtluecke] = 0.0
+            # Ohne belegtes Tagflag bleibt der Wert NaN. Genau dafuer gibt es die
+            # NaN-Waechter im Run-Pair-Aufbau — sie sollen den Lauf verwerfen,
+            # statt hier eine erfundene Null zu bekommen.
+            n_tag_unbekannt = int((offen & ~tag_bekannt).sum())
 
         diag["columns"][col] = {
             "value_col": quelle,
             "n_missing_before": n_vorher,
             "n_filled_model": n_modell,
             "n_filled_night": n_nacht,
+            "n_tag_unbekannt": n_tag_unbekannt,
             "n_kontextfrei": int((fuellbar & ctx).sum()),
             "n_missing_after": int(np.isnan(meas_raw[:, :, k]).sum()),
         }
         logger.info(
             "Solar-Imputation '%s' (aus '%s'): %d fehlend -> %d offen "
-            "(%d Modell, davon %d kontextfrei; %d Nacht=0)",
+            "(%d Modell, davon %d kontextfrei; %d Nacht=0; "
+            "%d ohne ist_tag offen gelassen)",
             col, quelle, n_vorher, diag["columns"][col]["n_missing_after"],
             n_modell, diag["columns"][col]["n_kontextfrei"], n_nacht,
+            n_tag_unbekannt,
         )
     return meas_raw, diag

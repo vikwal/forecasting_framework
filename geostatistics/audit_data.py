@@ -28,6 +28,7 @@ from geostatistics.train_stgnn2 import (
     load_station_metadata,
     load_icond2_ml_runs,
 )
+from geostatistics.shared.resolution import freq_to_hours
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +255,11 @@ def main() -> None:
     nwp_path         = data_cfg.get("nwp_path")
     H                = stgnn_cfg.get("history_length", 48)
     F_h              = stgnn_cfg.get("forecast_horizon", 48)
+    # H zaehlt Schritte, die Laufsuche in audit_run_pairs rechnet in Stunden.
+    # Ohne freq_h meldet der Audit fuer ein feineres Raster andere Paarzahlen
+    # als das Training tatsaechlich baut.
+    freq_h           = freq_to_hours(data_cfg.get("freq", "1h"),
+                                     data_cfg.get("use_case", "wind"))
 
     test_start = data_cfg.get("test_start")
     test_end   = data_cfg.get("test_end")
@@ -299,7 +305,7 @@ def main() -> None:
 
     # ----- Run pairs -----
     print("[3/3] Analysing run pairs …")
-    audit_run_pairs(out, meas, timestamps, run_times, split_time, H, F_h)
+    audit_run_pairs(out, meas, timestamps, run_times, split_time, H, F_h, freq_h=freq_h)
 
     # ----- Write report -----
     report_dir = Path("reports")

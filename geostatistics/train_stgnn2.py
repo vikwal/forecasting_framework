@@ -1447,8 +1447,9 @@ def main() -> None:
     H   = stgnn_cfg.get("history_length", 48)
     # Schrittweite in Stunden: H zaehlt Schritte, die Laufsuche unten rechnet in
     # Stunden. Bei 1h identisch, bei 30min Faktor 2.
-    from geostatistics.shared.resolution import freq_to_hours as _f2h
+    from geostatistics.shared.resolution import freq_to_hours as _f2h, lead0_offset
     freq_h = _f2h(data_cfg.get("freq", "1h"), data_cfg.get("use_case", "wind"))
+    lead0_off = lead0_offset(data_cfg.get("use_case", "wind"))
     F_h = stgnn_cfg.get("forecast_horizon", 48)
 
     # ------------------------------------------------------------------
@@ -1642,11 +1643,13 @@ def main() -> None:
         if t_run not in ts_lookup.index:
             skipped += 1
             continue
-        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
-        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
-        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
-        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
-        t_run_abs = int(ts_lookup[t_run]) + 1
+        # t_run_abs ist der Zeitindex, an dem Lead 0 haengt. Alle Mess-, Ziel-
+        # und ECMWF-Slices sind darueber zeitgleich mit der NWP-Vorhersage
+        # (Bias-Correction-Setup), deshalb muss der Versatz zum Label der
+        # jeweiligen ICON-D2-Ebene passen: ML (wind) laesst forecasttime=0 weg
+        # und beginnt bei t_run+1h, SL (solar) labelt das Akkumulationsintervall
+        # linksbuendig auf t_run. Begruendung an lead0_offset().
+        t_run_abs = int(ts_lookup[t_run]) + lead0_off
         # Need H steps of history and F_h steps of GT in measurement array
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1

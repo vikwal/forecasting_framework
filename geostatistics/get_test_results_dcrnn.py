@@ -61,6 +61,7 @@ from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.stgnn.utils.topo_features import load_topo_station_features
 from geostatistics.evaluation import evaluate, find_ws_feat_idx
 from geostatistics.ablations.guard import check_ablation_flags
+from geostatistics.shared.resolution import freq_to_hours, lead0_offset
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +229,11 @@ def main() -> None:
     
     H_hist = dcrnn_cfg.get("history_length", 48)
     H_fore = dcrnn_cfg.get("forecast_horizon", 48)
+    # Schrittweite und Lead-0-Versatz wie im Trainingspfad, sonst wertet die
+    # Evaluation ein anderes Zeitfenster aus als das trainierte Modell sah.
+    use_case  = str(data_cfg.get("use_case", "wind")).lower()
+    freq_h    = freq_to_hours(data_cfg.get("freq", "1h"), use_case)
+    lead0_off = lead0_offset(use_case)
     # Extra lag channel — mirrors train_dcrnn.py. With interpolate_history the
     # model is built with station_meas_features = M + 1, so the eval batch has
     # to carry the same extra channel; without this the eval path silently fed M
@@ -565,14 +571,20 @@ def main() -> None:
         if t_run < split_time: continue
         if eval_cutoff is not None and t_run >= eval_cutoff: continue
         if t_run not in ts_lookup.index: continue
-        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
-        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
-        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
-        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
-        t_run_abs = int(ts_lookup[t_run]) + 1
+        # t_run_abs ist der Zeitindex, an dem Lead 0 haengt. Alle Mess-, Ziel-
+        # und ECMWF-Slices sind darueber zeitgleich mit der NWP-Vorhersage
+        # (Bias-Correction-Setup), deshalb muss der Versatz zum Label der
+        # jeweiligen ICON-D2-Ebene passen: ML (wind) laesst forecasttime=0 weg
+        # und beginnt bei t_run+1h, SL (solar) labelt das Akkumulationsintervall
+        # linksbuendig auf t_run. Begruendung an lead0_offset().
+        t_run_abs = int(ts_lookup[t_run]) + lead0_off
         if t_run_abs < H_hist or t_run_abs + H_fore > T: continue
         
-        t_hist_target = t_run - pd.Timedelta(hours=H_hist)
+        # H_hist zaehlt SCHRITTE, die Laufsuche rechnet in Stunden. Ohne freq_h
+        # suchte der Solar-Pfad den Historienlauf 96 h statt 48 h zurueck und
+        # traf dort exakt eine Laufzeit — die 3-h-Toleranz schlug also nie an,
+        # der Fehler blieb still (identisch zu train_dcrnn.py).
+        t_hist_target = t_run - pd.Timedelta(hours=H_hist * freq_h)
         diffs_s = np.abs((run_times - t_hist_target).total_seconds().values)
         r_hist  = int(np.argmin(diffs_s))
         if diffs_s[r_hist] > 3 * 3600: continue

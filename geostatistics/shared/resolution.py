@@ -82,3 +82,28 @@ def freq_to_hours(freq: str, use_case: str = "wind") -> float:
 def n_leads(freq: str, use_case: str = "wind") -> int:
     """Anzahl Lead-Indizes je Lauf (48 bei ``'1h'``, 192 bei ``'15min'``)."""
     return int(round(FORECAST_HORIZON_H / freq_to_hours(freq, use_case)))
+
+
+def lead0_offset(use_case: str = "wind") -> int:
+    """Versatz zwischen Laufzeit und erstem Lead-Index, in Schritten.
+
+    Die beiden ICON-D2-Ebenen labeln ihren ersten Lead unterschiedlich, und die
+    Preprocessing-Pfade uebernehmen das:
+
+    ML (wind)
+        ``train_stgnn2._load_icond2_ml_parquet`` verwirft ``forecasttime == 0``
+        und setzt ``lead_idx = forecasttime - 1``. Lead 0 ist damit der
+        Momentanwert zur Stunde ``t_run + 1 h`` — Offset 1.
+
+    SL (solar)
+        ``solar_preprocessing._load_solar_sl_parquet`` bildet akkumulierte
+        Felder ueber ``ceil(ft / freq_h) - 1``. Lead 0 traegt die Akkumulation
+        ueber ``[t_run, t_run + freq)`` und ist damit linksbuendig auf ``t_run``
+        gelabelt — Offset 0. Derselbe Zeitbezug wie im CL-Pfad
+        (``utils.solar``), wo ``timestamp = starttime + lead * freq``.
+
+    Ein falscher Offset verschiebt Mess-, Ziel- und ECMWF-Slices um einen
+    Schritt gegen die NWP-Vorhersage, was das Bias-Correction-Setup
+    systematisch verstimmt.
+    """
+    return 0 if str(use_case).lower() == "solar" else 1

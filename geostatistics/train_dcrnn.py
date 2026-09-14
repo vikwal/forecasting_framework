@@ -103,7 +103,7 @@ from geostatistics.train_stgnn2 import (
     load_knn_imputation,
     apply_knn_imputation,
 )
-from geostatistics.shared.resolution import freq_to_hours
+from geostatistics.shared.resolution import freq_to_hours, lead0_offset
 
 # ── DCRNN-specific imports ───────────────────────────────────────────────────
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
@@ -1010,6 +1010,7 @@ def main() -> None:
     # Run pairs
     # ------------------------------------------------------------------
     ts_lookup = pd.Series(np.arange(T), index=timestamps)
+    lead0_off = lead0_offset(use_case)
 
     train_run_pairs: list[tuple[int, int, int]] = []
     val_run_pairs:   list[tuple[int, int, int]] = []
@@ -1026,11 +1027,13 @@ def main() -> None:
         t_run = run_times[r_curr]
         if t_run not in ts_lookup.index:
             skipped += 1; continue
-        # t_run_abs zeigt auf den ERSTEN PROGNOSESCHRITT (t_run + 1h), nicht auf
-        # die Laufzeit: ICON-D2 liefert Leads 1..48, gueltig t_run+1 .. t_run+48.
-        # Alle Mess-, Ziel- und ECMWF-Slices haengen an diesem Index und sind damit
-        # zeitgleich mit der NWP-Vorhersage (Bias-Correction-Setup).
-        t_run_abs = int(ts_lookup[t_run]) + 1
+        # t_run_abs ist der Zeitindex, an dem Lead 0 haengt. Alle Mess-, Ziel-
+        # und ECMWF-Slices sind darueber zeitgleich mit der NWP-Vorhersage
+        # (Bias-Correction-Setup), deshalb muss der Versatz zum Label der
+        # jeweiligen ICON-D2-Ebene passen: ML (wind) laesst forecasttime=0 weg
+        # und beginnt bei t_run+1h, SL (solar) labelt das Akkumulationsintervall
+        # linksbuendig auf t_run. Begruendung an lead0_offset().
+        t_run_abs = int(ts_lookup[t_run]) + lead0_off
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1; continue
 

@@ -88,6 +88,7 @@ from geostatistics.stgnn.training.sampler import TrainingSampler
 from geostatistics.stgnn.utils.normalization import StandardScaler
 from geostatistics.dcrnn import DCRNNConfig, DCRNN
 from geostatistics.evaluation import build_eval_batch, evaluate, find_ws_feat_idx
+from geostatistics.shared.resolution import freq_to_hours
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +249,11 @@ def main() -> None:
 
     H_hist = arch_cfg.get("history_length", 48)
     H_fore = arch_cfg.get("forecast_horizon", 48)
+    # H_hist zaehlt Schritte, die Laufsuche unten rechnet in Stunden — bei 1h
+    # identisch. Gleiche Form wie im Trainingspfad, damit beide Seiten
+    # denselben Historienlauf waehlen.
+    freq_h = freq_to_hours(data_cfg.get("freq", "1h"),
+                           data_cfg.get("use_case", "wind"))
 
     run_hours     = tuple(arch_cfg.get("icond2_run_hours", [6, 9, 12, 15]))
     next_n_icond2 = arch_cfg.get("next_n_icond2", 4)
@@ -416,7 +422,7 @@ def main() -> None:
         if t_run_abs < H_hist or t_run_abs + H_fore > T:
             skipped += 1; continue
 
-        t_hist_target = t_run - pd.Timedelta(hours=H_hist)
+        t_hist_target = t_run - pd.Timedelta(hours=H_hist * freq_h)
         diffs_s = np.abs((run_times - t_hist_target).total_seconds().values)
         r_hist  = int(np.argmin(diffs_s))
         if diffs_s[r_hist] > 3 * 3600:
