@@ -48,6 +48,7 @@ from geostatistics.train_stgnn2 import (
     load_ecmwf_parquet_at_stations_and_grid,
     load_nwp_elevations,
     impute_meas_raw_from_interpol,
+    impute_meas_raw_solar,
     load_knn_imputation,
     apply_knn_imputation,
 )
@@ -217,8 +218,13 @@ def main() -> None:
                 i2_mode, len(icond2_features), e2_mode, len(ecmwf_features))
 
     measurement_cols = dcrnn_cfg.get("measurement_features")
-    target_col       = dcrnn_cfg.get("target_col")
-    target_feat_idx  = measurement_cols.index(target_col)
+    # dcrnn.target_col darf eine Liste sein (Multi-Target, Solar ghi+dhi) —
+    # gleiche Behandlung wie in train_dcrnn.py, sonst laesst sich ein dort
+    # trainiertes Modell hier nicht auswerten.
+    _tc_raw = dcrnn_cfg.get("target_col")
+    target_cols = list(_tc_raw) if isinstance(_tc_raw, (list, tuple)) else [_tc_raw]
+    target_col = target_cols[0]
+    target_feat_idx = measurement_cols.index(target_col)
     
     H_hist = dcrnn_cfg.get("history_length", 48)
     H_fore = dcrnn_cfg.get("forecast_horizon", 48)
@@ -285,6 +291,9 @@ def main() -> None:
     if interpol_path:
         meas_raw, imput_diag = impute_meas_raw_from_interpol(
             meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
+        ) if str(data_cfg.get("use_case", "wind")).lower() != "solar" else impute_meas_raw_solar(
+            meas_raw, all_ids, timestamps, measurement_cols, interpol_path,
+            fill_night=bool(dcrnn_cfg.get("impute_night_zero", True)),
         )
     
     # Spalten, die schon aus interpol/ kamen, bleiben aussen vor: keine zwei
@@ -302,7 +311,7 @@ def main() -> None:
     meas_raw, measurement_cols = encode_circular_measurements(meas_raw, measurement_cols)
     if "sin_wind_direction" in measurement_cols:
         logger.info("Circular encoding: measurement_features → %s  (M=%d)", measurement_cols, len(measurement_cols))
-        target_feat_idx = measurement_cols.index(dcrnn_cfg.get("target_col", "wind_speed"))
+        target_feat_idx = measurement_cols.index(target_col)
 
     # Temporal split — mirrors train_dcrnn.py's val_start/test_start boundary
     # (review brief H2): without this, a dev-mode eval on a spatial-CV fold
@@ -336,15 +345,31 @@ def main() -> None:
     lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=data_cfg.get("stations_master"))
     station_coords = np.stack([lats, lons], axis=1)
 
-    # ICON-D2 ML runs
+    # NWP-Laeufe. Solar liegt als Surface-Level (SL) vor, Wind als Multilevel
+    # (ML) — wortgleiche Fallunterscheidung wie train_dcrnn.py:716. Ohne sie
+    # versucht dieses Skript, 'ghi_nwp' als ML-Hoehenfeld zu parsen.
     run_hours = tuple(dcrnn_cfg.get("icond2_run_hours", [6, 9, 12, 15]))
-    logger.info("Loading ICON-D2 runs …")
-    run_times, icond2_coords, grid_icond2_runs_raw, station_nearest_grid = \
-        load_icond2_ml_runs(
-            nwp_path=nwp_path, station_ids=all_ids, station_coords=station_coords,
-            features=icond2_features, run_hours=run_hours, 
-            next_n_grid=dcrnn_cfg.get("next_n_icond2", 4), cutoff=run_cutoff
-        )
+    if str(data_cfg.get("use_case", "wind")).lower() == "solar":
+        from geostatistics.solar_preprocessing import load_solar_sl_runs
+        from geostatistics.shared.resolution import freq_to_hours as _f2h_eval
+        logger.info("Loading ICON-D2 SL runs (solar, hours %s) …", list(run_hours))
+        run_times, icond2_coords, grid_icond2_runs_raw, station_nearest_grid = \
+            load_solar_sl_runs(
+                nwp_path=nwp_path, station_ids=all_ids, station_coords=station_coords,
+                features=icond2_features, run_hours=run_hours,
+                next_n_grid=dcrnn_cfg.get("next_n_icond2", 4),
+                cutoff=run_cutoff,
+                freq_h=_f2h_eval(data_cfg.get("freq", "1h"), "solar"),
+                sub_hourly_fill=cfg.get("params", {}).get("sub_hourly_fill", "ffill"),
+            )
+    else:
+        logger.info("Loading ICON-D2 ML runs …")
+        run_times, icond2_coords, grid_icond2_runs_raw, station_nearest_grid = \
+            load_icond2_ml_runs(
+                nwp_path=nwp_path, station_ids=all_ids, station_coords=station_coords,
+                features=icond2_features, run_hours=run_hours,
+                next_n_grid=dcrnn_cfg.get("next_n_icond2", 4), cutoff=run_cutoff
+            )
     R = len(run_times)
     N_igrid = len(icond2_coords)
 
@@ -440,6 +465,56 @@ def main() -> None:
     stat_scaler.fit(raw_static if (val_start and not args.test_mode) else raw_static[:N_train])
     station_static_scaled = stat_scaler.transform(raw_static)
 
+    # ── Sonnengeometrie, NWP-Referenzspalten, Residuum ────────────────
+    # Wortgleiches Gegenstueck zu train_dcrnn.py. Alle drei muessen hier
+    # dieselben Werte liefern wie beim Training, sonst passt der Checkpoint
+    # nicht auf die Eingaenge (Geometrie) oder die Zahlen stehen im falschen
+    # Raum (Residuum).
+    station_geo = None
+    if str(data_cfg.get("use_case", "wind")).lower() == "solar" and \
+            dcrnn_cfg.get("solar_geometry_features", True):
+        from utils.solar import solar_geometry
+        _geo_names = list(dcrnn_cfg.get("geo_features") or [
+            "solar_zenith_cos", "solar_azimuth_sin", "solar_azimuth_cos",
+            "airmass", "dni_extra", "ghi_clearsky", "dni_clearsky", "dhi_clearsky",
+            "hour_sin", "hour_cos", "doy_sin", "doy_cos",
+        ])
+        _G = len(_geo_names)
+        station_geo = np.zeros((len(timestamps), len(all_ids), _G), dtype=np.float32)
+        for _j in range(len(all_ids)):
+            _g = solar_geometry(timestamps, float(lats[_j]), float(lons[_j]),
+                                float(alts[_j]), freq=data_cfg.get("freq", "1h"))
+            station_geo[:, _j, :] = _g.reindex(timestamps)[_geo_names].to_numpy(np.float32)
+        _geo_scaler = StandardScaler()
+        _geo_scaler.fit(station_geo[:split_t].reshape(-1, _G))
+        station_geo = _geo_scaler.transform(
+            station_geo.reshape(-1, _G)).reshape(station_geo.shape).astype(np.float32)
+        logger.info("Sonnengeometrie: %d Kanaele je Station und Zeitschritt", _G)
+
+    _nwp_by_target = {"ghi": "ghi_nwp", "dhi": "dhi_nwp",
+                      "bhi": "bhi_nwp", "dni": "dni_nwp"}
+    nwp_ref_idxs = []
+    for _tc in target_cols:
+        _col = _nwp_by_target.get(_tc)
+        if _col is not None and _col in icond2_features:
+            nwp_ref_idxs.append(icond2_features.index(_col))
+        elif len(target_cols) == 1:
+            nwp_ref_idxs.append(ws_feat_idx_i2)
+        else:
+            nwp_ref_idxs.append(None)
+
+    residual_spec = None
+    if str(dcrnn_cfg.get("target_transform", "none")).lower() == "nwp_residual":
+        _tfi = [measurement_cols.index(c) for c in target_cols]
+        residual_spec = {
+            "nwp_idx":   list(nwp_ref_idxs),
+            "meas_mean": [float(meas_scaler.mean_[i]) for i in _tfi],
+            "meas_std":  [float(meas_scaler.std_[i] + meas_scaler.eps) for i in _tfi],
+            "nwp_mean":  [float(i2_scaler.mean_[i]) for i in nwp_ref_idxs],
+            "nwp_std":   [float(i2_scaler.std_[i] + i2_scaler.eps) for i in nwp_ref_idxs],
+        }
+        logger.info("target_transform=nwp_residual — Auswertung rechnet zurueck, Metriken in W/m².")
+
     # Absolute topographic node features, appended after lat/lon/alt — literal
     # mirror of train_dcrnn.py:868-899. Without this block station.static stayed
     # 3 columns wide while DCRNNConfig.from_yaml resolved station_node_features
@@ -507,7 +582,8 @@ def main() -> None:
     # ── Model & Graph ────────────────────────────────────────────────────
     model_cfg = DCRNNConfig.from_yaml(
         dcrnn_cfg, icond2_features=icond2_features, ecmwf_features=ecmwf_features,
-        measurement_features=measurement_cols, target_col=target_col,
+        measurement_features=measurement_cols, target_col=target_cols,
+        station_geo_features=(0 if station_geo is None else station_geo.shape[2]),
         n_train=N_train, n_val=N_val, checkpoint_path=str(model_path),
         station_node_features=args.station_node_features,
     )
@@ -522,7 +598,13 @@ def main() -> None:
     # otherwise); a harmless no-op for every other aggregation. Mirrors
     # train_dcrnn.py exactly — see DCRNNConfig.attach_nwp_geometry().
     model_cfg.attach_nwp_geometry(base_graph)
-    sampler = TrainingSampler(model_cfg, builder, base_graph, target_feat_idx=target_feat_idx, station_coords=station_coords)
+    target_feat_idxs = tuple(model_cfg.target_feat_idxs) or (target_feat_idx,)
+    _sampler_target = target_feat_idx if len(target_feat_idxs) == 1 else target_feat_idxs
+    sampler = TrainingSampler(model_cfg, builder, base_graph,
+                              target_feat_idx=_sampler_target,
+                              station_coords=station_coords,
+                              residual_spec=residual_spec)
+    sampler.station_geo = station_geo
 
     # k nearest ICON-D2 grid points for nwp_nodes=False (same logic as train_dcrnn.py)
     station_k_nearest_grid  = None
@@ -562,6 +644,8 @@ def main() -> None:
         station_ecmwf_nwp_scaled=station_ecmwf_scaled, station_static=station_static_scaled,
         ecmwf_nwp_scaled=ecmwf_nwp_scaled, icond2_static=icond2_static_scaled, ecmwf_static=ecmwf_static_scaled,
         meas_scaler=meas_scaler, target_feat_idx=target_feat_idx, ws_feat_idx_i2=ws_feat_idx_i2,
+        target_feat_idxs=target_feat_idxs, target_names=target_cols,
+        nwp_ref_idxs=nwp_ref_idxs, station_geo=station_geo,
         H_hist=H_hist, H_fore=H_fore,
         train_station_indices=train_station_indices, val_station_indices=val_station_indices,
         all_ids=all_ids, test_run_pairs=test_run_pairs,
