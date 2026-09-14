@@ -1012,6 +1012,31 @@ def preprocess_solar_icond2(path: str,
         )
 
     # ------------------------------------------------------------------
+    # 1b. Lückenfüllung (data.interpol_path)
+    # ------------------------------------------------------------------
+    # HIER und nicht in preprocessing.get_data(): das dropna() in Schritt 8
+    # verwirft NaN-Zeilen, und die Lauflängen-Heuristik dahinter entfernt
+    # anschließend den ganzen 48-h-Lauf. Eine Imputation *nach* dem
+    # Preprocessing — wie sie der Wind-Pfad fährt — käme für Solar also zu spät;
+    # sie fände die Lücken gar nicht mehr vor.
+    #
+    # Die Funktion trägt je Zielgröße '<target>_observed' ein (True = echter
+    # Messwert). _select_columns behält die Spalten, evaluation_pipeline filtert
+    # darauf, wenn eval.exclude_imputed gesetzt ist.
+    target_cols = get_target_cols(config)
+    interpol_path = data_cfg.get('interpol_path')
+    if interpol_path:
+        from .imputation import impute_solar_measurements
+        df_meas, _ = impute_solar_measurements(
+            df_meas, interpol_path, station_id, target_cols, freq=freq,
+            fill_night=params_cfg.get('impute_night_zero', True),
+        )
+    else:
+        for _tgt in target_cols:
+            if _tgt in df_meas.columns:
+                df_meas[f'{_tgt}_observed'] = df_meas[_tgt].notna()
+
+    # ------------------------------------------------------------------
     # 2. ICON-D2 Surface-Level
     # ------------------------------------------------------------------
     icond2_features = _resolve_nwp_features(features, params_cfg)
@@ -1101,7 +1126,6 @@ def preprocess_solar_icond2(path: str,
     # ------------------------------------------------------------------
     # 6. Zielgrößen-Transformation
     # ------------------------------------------------------------------
-    target_cols = get_target_cols(config)
     transform = params_cfg.get('target_transform', 'none')
     if transform == 'clearsky_index':
         cs_map = {'ghi': 'ghi_clearsky', 'dhi': 'dhi_clearsky',
@@ -1166,6 +1190,15 @@ def preprocess_solar_icond2(path: str,
 
     if df.empty:
         raise ValueError(f"Station {station_id}: nach dem Preprocessing keine Daten übrig.")
+
+    # Der Left-Merge auf die NWP-Läufe kann die Flags zu float mit NaN gemacht
+    # haben (Läufe ohne passende Messzeile). Nach dem dropna() sind diese Zeilen
+    # weg, der dtype bleibt aber float — zurück auf bool, damit die Auswertung
+    # nicht auf Schwellwertvergleiche angewiesen ist.
+    for tgt in target_cols:
+        cand = f'{tgt}_observed'
+        if cand in df.columns and df[cand].dtype != bool:
+            df[cand] = df[cand].astype(bool)
 
     if nearest_label is not None:
         df.attrs['nwp_nearest_label'] = nearest_label
@@ -1511,6 +1544,15 @@ def _select_columns(df: pd.DataFrame,
             cand = cs_map.get(tgt)
             if cand and cand in df.columns and cand not in keep:
                 keep.append(cand)
+
+    # Beobachtungsflags erhalten: '<target>_observed' sagt, ob der Zielwert eine
+    # echte Messung war oder aus der Imputation stammt. Wie die Clear-Sky-Spalten
+    # bewusst hier statt in known_features — die Spalte bleibt damit erhalten,
+    # ohne Modell-Eingang zu werden. eval filtert darauf.
+    for tgt in target_cols:
+        cand = f'{tgt}_observed'
+        if cand in df.columns and cand not in keep:
+            keep.append(cand)
 
     missing = [c for c in keep if c not in df.columns]
     if missing:

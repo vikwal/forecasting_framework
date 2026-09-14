@@ -13,17 +13,18 @@ docs/imputation_knn_regen_20260902.md).
 
 Read-only und wiederholbar. Vor jedem Start der Queue laufen lassen.
 """
-import sys, glob, yaml
+import sys, glob
 import numpy as np, pandas as pd
 sys.path.insert(0, ".")
 from geostatistics.train_stgnn2 import load_station_measurements
+from utils.tools import load_config
 from utils.imputation import (impute_meas_raw_from_interpol,
                               load_knn_imputation, apply_knn_imputation)
 
 cfgs = sorted(glob.glob("configs/testmode/*/*.yaml"))
 cache = {}
 for f in cfgs:
-    c = yaml.safe_load(open(f)); d = c["data"]
+    c = load_config(f); d = c["data"]
     key = "dcrnn" if "dcrnn" in f else "mtgnn"
     mcfg = c.get(key, {})
     cols = list(mcfg.get("measurement_features", ["wind_speed", "wind_direction"]))

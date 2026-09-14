@@ -635,6 +635,7 @@ def main() -> None:
                     nwp_residual=period_config.get('params', {}).get('target_transform') == 'nwp_residual',
                     target_transform=period_config.get('params', {}).get('target_transform', 'none'),
                     evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
+                    exclude_imputed=period_config.get('eval', {}).get('exclude_imputed', False),
                     device=device,
                     collect=_predictions if args.save_predictions else None,
                 )

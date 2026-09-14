@@ -53,12 +53,14 @@ def _passt(d: dict) -> bool:
 
 def _zeitraum(satz: str) -> str:
     """Zeitraum aus der Config lesen statt ihn in den Kopf zu schreiben."""
-    import os, yaml
+    import os, sys
+    sys.path.insert(0, '.')
+    from utils.tools import load_config
     p = ('configs/solar_baseline/config_solar_base_lag.yaml' if satz == 'baseline'
          else 'configs/solar_final/config_solar_final_lag.yaml')
     if not os.path.exists(p):
         return ''
-    d = yaml.safe_load(open(p))['data']
+    d = load_config(p)['data']
     return (f"Training {d['train_start']}..{d['train_end']}, "
             f"Test {d['test_start']}..{d['test_end']}")
 

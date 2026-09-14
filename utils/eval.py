@@ -250,7 +250,8 @@ def evaluate_models(pred: pd.DataFrame,
                     true: pd.DataFrame,
                     persistence: dict,
                     main_model_name='Main',
-                    drop_except_main=False) -> pd.DataFrame:
+                    drop_except_main=False,
+                    observed: pd.DataFrame | None = None) -> pd.DataFrame:
     """Evaluate models against benchmarks - framework agnostic
 
     Alle Modelle werden auf **derselben** Stichprobe gemessen: Zeilen, in denen
@@ -259,6 +260,13 @@ def evaluate_models(pred: pd.DataFrame,
     ausgerechnet dort fehlen, wo die Vorhersage leicht oder schwer faellt.
     Luecken entstehen real: die Persistenz braucht ein volles Fenster in der
     Messreihe, das am Ende des Testzeitraums nicht mehr passt.
+
+    observed : (Lauf x Lead) bool, optional
+        True = an dieser Position stand eine echte Messung. Gesetzt, wenn
+        ``eval.exclude_imputed`` greift; dann werden imputierte Positionen
+        elementweise aus allen Metriken genommen — Modell wie Baselines, also
+        weiterhin dieselbe Stichprobe fuer alle. Das Verwerfen ganzer Laeufe
+        oben bleibt davon unberuehrt und laeuft zuerst.
     """
     valid = np.isfinite(pred.to_numpy()).all(axis=1) & np.isfinite(true.to_numpy()).all(axis=1)
     for _m, _y in persistence.items():
@@ -276,17 +284,31 @@ def evaluate_models(pred: pd.DataFrame,
     pred, true = pred[valid], true[valid]
     persistence = {m: y[valid] for m, y in persistence.items()}
 
+    mask = None
+    if observed is not None:
+        mask = observed.reindex(index=true.index, columns=true.columns)
+        mask = mask.to_numpy(dtype=float)
+        mask = np.isfinite(mask) & (mask > 0.5)
+        logging.info(
+            "Imputationsfilter: %d von %d Zielpositionen bleiben (%.1f %%).",
+            int(mask.sum()), mask.size, 100 * mask.mean() if mask.size else 0.0)
+        if not mask.any():
+            raise ValueError(
+                "Imputationsfilter laesst keine einzige Zielposition uebrig — "
+                "die Auswertung waere leer. Stationsauswahl oder Testfenster pruefen.")
+
     evaluation = get_metrics(y_pred=pred.values,
-                             y_true=true.values)
+                             y_true=true.values, mask=mask)
     evaluation['Models'] = [main_model_name]
     for model, y_pred in persistence.items():
         evaluation['Models'].append(model)
         metrics = get_metrics(y_pred=y_pred.values,
-                              y_true=true.values)
+                              y_true=true.values, mask=mask)
         for metric, value in metrics.items():
             evaluation[metric].append(value[0])
     results = pd.DataFrame(data=evaluation)
     results['n_runs'] = int(valid.sum())
+    results['n_points'] = int(mask.sum()) if mask is not None else int(valid.sum()) * true.shape[1]
     results.set_index('Models', inplace=True)
     # skill factor
     results['Skill'] = 0.0
@@ -308,8 +330,32 @@ def evaluate_models(pred: pd.DataFrame,
 
 def get_metrics(y_pred: np.ndarray, # shape (n_samples, n_horizon)
                 y_true: np.ndarray,
-                detailed=False) -> dict:
-    """Calculate metrics - framework agnostic"""
+                detailed=False,
+                mask: np.ndarray | None = None) -> dict:
+    """Calculate metrics - framework agnostic
+
+    mask : (n_samples, n_horizon) bool, optional
+        True = diese Position zaehlt. Gedacht fuer die Filterung imputierter
+        Zielwerte (``eval.exclude_imputed``): dort faellt nicht der ganze
+        Vorhersagelauf weg, sondern nur die einzelnen Schritte ohne echte
+        Messung. Ein laufweises Verwerfen waere bei 96 Leads unbrauchbar — ein
+        einziger imputierter Schritt kostete sonst 48 Stunden Auswertung.
+        Ohne Maske ist das Verhalten unveraendert.
+    """
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != y_true.shape:
+            raise ValueError(f"mask {mask.shape} passt nicht zu y_true {y_true.shape}")
+        if not mask.any():
+            return {'R^2': [np.nan], 'RMSE': [np.nan], 'MAE': [np.nan]}
+        yp, yt = y_pred[mask], y_true[mask]
+        error = yp - yt
+        # detailed mittelt sonst je Lead; mit einer loechrigen Maske haetten die
+        # Leads ungleiche Stichprobengroessen und das Mittel waere nicht mehr das,
+        # was der Name sagt. Deshalb hier einheitlich ueber alle gueltigen Werte.
+        return {'R^2': [r2_score(yt, yp)],
+                'RMSE': [float(np.sqrt(np.square(error).mean()))],
+                'MAE': [float(np.abs(error).mean())]}
     error = y_pred - y_true
     r2 = r2_score(y_true.flatten(), y_pred.flatten())
     rmse = np.sqrt(np.square(error).mean())
@@ -368,6 +414,7 @@ def evaluation_pipeline(data: pd.DataFrame,
                         nwp_baseline_col=None,
                         nwp_residual: bool = False,
                         target_transform: str = 'none',
+                        exclude_imputed: bool = False,
                         collect: dict | None = None) -> pd.DataFrame:
     """
     PyTorch evaluation pipeline.
@@ -409,6 +456,7 @@ def evaluation_pipeline(data: pd.DataFrame,
                 _n_targets_for_baseline=len(cols),
                 nwp_residual=nwp_residual,
                 target_transform=target_transform,
+                exclude_imputed=exclude_imputed,
                 collect=collect,
             )
             frames.append(pd.concat({tgt: part}, names=['target']))
@@ -425,6 +473,7 @@ def evaluation_pipeline(data: pd.DataFrame,
         nwp_baseline_col=nwp_baseline_col,
         nwp_residual=nwp_residual,
         target_transform=target_transform,
+        exclude_imputed=exclude_imputed,
         collect=collect,
     )
 
@@ -448,6 +497,7 @@ def _evaluate_single_target(data: pd.DataFrame,
                             _n_targets_for_baseline: int = 1,
                             nwp_residual: bool = False,
                             target_transform: str = 'none',
+                            exclude_imputed: bool = False,
                             collect: dict | None = None) -> pd.DataFrame:
     """Auswertung einer einzelnen Zielgröße aus bereits berechneten Vorhersagen."""
     df_pred = tools.y_to_df(y=y_pred,
@@ -625,11 +675,30 @@ def _evaluate_single_target(data: pd.DataFrame,
             **{f'baseline::{k}': v.copy() for k, v in pers.items()},
         }
 
+    # Imputierte Zielpositionen aus der Bewertung nehmen. Die Spalte
+    # '<target>_observed' legt utils/solar.preprocess_solar_icond2 an (True =
+    # echter Messwert); sie ueberlebt die Spaltenauswahl, ohne Modell-Eingang zu
+    # werden. Elementweise, nicht laufweise — siehe get_metrics(mask=...).
+    observed = None
+    if exclude_imputed:
+        obs_col = f'{target_col}_observed'
+        if obs_col not in data.columns:
+            raise KeyError(
+                f"eval.exclude_imputed ist gesetzt, aber '{obs_col}' fehlt im Datensatz. "
+                "Die Spalte entsteht nur im Solar-Preprocessing; fuer Wind gibt es sie "
+                "nicht (dort filtert scripts/eval_testmode.py nachtraeglich).")
+        observed = _column_by_run(data, obs_col, df_true)
+        if observed is None:
+            raise ValueError(
+                f"'{obs_col}' laesst sich nicht laufweise auf die Vorhersagen ausrichten. "
+                "Ungefiltert weiterzurechnen waere stillschweigend die falsche Zahl.")
+
     evaluation = evaluate_models(pred=df_pred,
                                  true=df_true,
                                  persistence=pers,
                                  main_model_name=model_name,
-                                 drop_except_main=True)
+                                 drop_except_main=True,
+                                 observed=observed)
     return evaluation
 
 

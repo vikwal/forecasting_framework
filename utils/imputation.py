@@ -35,9 +35,11 @@ through the diagnostics of every function below.
 `wind_direction` is NOT covered — it stays on the spatial-KNN path
 (load_knn_imputation / apply_knn_imputation), unchanged.
 
-SOLAR is not affected: `interpol/solar` still carries `rk_pred`, and the
-loaders below resolve the value column from the file's own schema
-(`imputed` preferred, `rk_pred` accepted) instead of hard-coding one.
+SOLAR has its own entry point since 2026-09-14: `interpol/solar` was rewritten
+by the solar closing model on 2026-09-03 and carries `ghi_imputed`/`dhi_imputed`
+(one column per target) plus `ist_tag`, not the single `imputed`/`rk_pred`
+column the wind loaders expect. Use `impute_solar_measurements` for it; the
+wind loaders below are unchanged and would raise on those files.
 
 Provides two layers:
 
@@ -568,3 +570,180 @@ def impute_dfs_with_knn(
             "KNN imputation: filled %d NaN values in '%s'", filled_total, feature,
         )
     return dfs
+
+
+# ---------------------------------------------------------------------------
+# Solar: zwei Ziele, eigenes Schema, eigene Zeitkonvention
+# ---------------------------------------------------------------------------
+
+# Der Solar-Baum (…/synthetic/interpol/solar, geschrieben 2026-09-03 von
+# ~/Work/NWP/ERA5/scripts/impute_solar.py) hat ein anderes Schema als der
+# Wind-Baum: je Zielgroesse eine eigene Fuellspalte statt einer gemeinsamen
+# 'imputed'. Deshalb eine eigene Funktion statt eines weiteren Eintrags in
+# IMPUTATION_COLUMN_BY_FEATURE — der Wind-Pfad bleibt davon unberuehrt.
+SOLAR_IMPUTATION_COLUMN_BY_TARGET = {
+    "ghi": "ghi_imputed",
+    "dhi": "dhi_imputed",
+}
+
+#: True = Sonnenstand ueber der Schwelle des Abschlussmodells. Definiert als
+#: ``ghi_clearsky > day_mask_ghi_clear_min`` (ERA5-Projekt, solar_bc/data.py:257),
+#: NICHT als geometrischer Horizont: in den 'Nacht'-Schritten stehen gemessen
+#: noch p99 = 10 W/m², maximal rund 33 W/m².
+SOLAR_DAY_COLUMN = "ist_tag"
+
+#: Native Aufloesung des Solar-Baums. Aus ``_herkunft.json`` ("aufloesung":
+#: "30min") und am Dateiindex nachgemessen.
+SOLAR_IMPUTATION_FREQ = pd.Timedelta(minutes=30)
+
+
+def _solar_imputation_frame(fpath: str, columns: list[str]) -> pd.DataFrame:
+    """Eine Solar-Imputationsdatei laden und auf die Framework-Zeitkonvention bringen.
+
+    **Der Zeitstempel bedeutet dort das Intervall-ENDE**, im Framework den
+    Intervall-ANFANG (``load_station_measurements`` resampled mit
+    ``label='left'``). Ohne die Korrektur laege jede gefuellte Luecke 30 min zu
+    spaet — unsichtbar, weil die Reihe weiterhin plausibel aussieht.
+
+    Nachgemessen am Verschiebungstest ``ghi_observed`` gegen die resamplete
+    Rohmessung (30 min, drei Stationen): das RMSE-Minimum liegt bei Verschiebung
+    **-1 Schritt**, an Station 00183 mit exakt 0.000 (bitgleiche Werte), waehrend
+    Verschiebung 0 auf 76.8 W/m² kommt.
+    """
+    src = pd.read_parquet(fpath, columns=["timestamp", *columns])
+    src["timestamp"] = pd.to_datetime(src["timestamp"], utc=True)
+    src = src.set_index("timestamp").sort_index()
+    if len(src.index) > 1:
+        step = pd.Timedelta(np.diff(src.index.values[:64]).min())
+    else:
+        step = SOLAR_IMPUTATION_FREQ
+    src.index = src.index - step
+    return src
+
+
+def impute_solar_measurements(df: pd.DataFrame,
+                              interpol_path: str,
+                              station_id: str,
+                              targets: list[str],
+                              freq: str = "30min",
+                              fill_night: bool = True) -> Tuple[pd.DataFrame, dict]:
+    """Luecken in den Solar-Zielspalten von *df* aus *interpol_path* fuellen.
+
+    Arbeitet auf der bereits auf *freq* aggregierten Messreihe einer Station
+    (Rueckgabe von :func:`utils.solar.load_station_measurements`) und traegt je
+    Zielgroesse eine Spalte ``<target>_observed`` ein: True, wo ein echter
+    Messwert stand, bevor hier gefuellt wurde. Die Auswertung filtert darauf
+    (``eval.exclude_imputed``), das Training nutzt die gefuellten Werte.
+
+    Zwei Quellen, bewusst getrennt gezaehlt:
+
+    ``<target>_imputed``
+        Die Vorhersage des Solar-Abschlussmodells. Nur fuer Tagschritte
+        vorhanden — das Modell fuellt ``ist_tag`` nicht. Diese Werte tragen
+        **keine gemessene Guete**: die Kennzahlen des Modells stammen aus
+        kuenstlich verdeckten, tatsaechlich beobachteten Schritten, nicht aus
+        den echten Luecken (~/Work/NWP/ERA5/RESULTS.md §5.2).
+
+    Nachtfuellung mit 0
+        ``ist_tag == False`` und weiterhin NaN. Ohne sie bliebe die Haelfte
+        aller Luecken offen (gemessen: an Station 04887 20 162 Nacht- gegen
+        19 748 Tagschritte), das ``dropna()`` in
+        :func:`utils.solar.preprocess_solar_icond2` wuerde sie verwerfen und die
+        anschliessende Lauflaengen-Heuristik den ganzen 48-h-Lauf. Der dabei
+        angenommene Fehler ist klein, aber nicht null (s. SOLAR_DAY_COLUMN);
+        die Schritte zaehlen deshalb wie jede andere Fuellung als *nicht*
+        beobachtet und fallen aus der Auswertung.
+
+    Parameters
+    ----------
+    df           : Messreihe einer Station, DatetimeIndex auf *freq*
+    interpol_path: Verzeichnis mit Station_XXXXX.parquet
+    station_id   : Stations-ID ohne Praefix
+    targets      : zu fuellende Zielspalten, z. B. ``['ghi', 'dhi']``
+    freq         : Raster von *df*; gleich oder groeber als 30 min
+    fill_night   : Nachtluecken mit 0 belegen
+
+    Returns
+    -------
+    (df, diagnostics) — *df* ist dasselbe Objekt, in place ergaenzt.
+    """
+    diag = {"station": station_id, "targets": {}}
+    present = [t for t in targets if t in df.columns]
+    for tgt in present:
+        df[f"{tgt}_observed"] = df[tgt].notna()
+    if not present:
+        return df, diag
+
+    fpath = os.path.join(interpol_path, f"Station_{station_id}.parquet")
+    if not os.path.exists(fpath):
+        logger.warning(
+            "Solar-Imputation: keine Datei fuer Station %s in %s — Luecken bleiben offen.",
+            station_id, interpol_path)
+        diag["missing_file"] = True
+        return df, diag
+
+    file_cols = _parquet_columns(fpath)
+    wanted = [SOLAR_IMPUTATION_COLUMN_BY_TARGET[t] for t in present
+              if SOLAR_IMPUTATION_COLUMN_BY_TARGET.get(t) in file_cols]
+    if SOLAR_DAY_COLUMN in file_cols:
+        wanted.append(SOLAR_DAY_COLUMN)
+    if CONTEXTFREE_COLUMN in file_cols:
+        wanted.append(CONTEXTFREE_COLUMN)
+    if not wanted:
+        raise KeyError(
+            f"{fpath} fuehrt keine der Solar-Fuellspalten "
+            f"{sorted(SOLAR_IMPUTATION_COLUMN_BY_TARGET.values())} — gefunden {file_cols}. "
+            "Zeigt data.interpol_path auf den Wind-Baum?")
+
+    src = _solar_imputation_frame(fpath, wanted)
+
+    # Raster angleichen. Der Baum ist nativ 30 min; ein groeberes Ziel wird
+    # gemittelt, ein feineres ist nicht rekonstruierbar und bricht laut ab,
+    # statt per ffill eine Aufloesung vorzutaeuschen, die die Datei nicht hat.
+    target_step = pd.Timedelta(pd.tseries.frequencies.to_offset(freq).nanos, unit="ns")
+    src_step = pd.Timedelta(np.diff(src.index.values[:64]).min()) if len(src.index) > 1 \
+        else SOLAR_IMPUTATION_FREQ
+    if target_step < src_step:
+        raise ValueError(
+            f"data.freq='{freq}' ist feiner als das {src_step} -Raster von {interpol_path}. "
+            "Die Imputation laesst sich nicht auf ein feineres Raster bringen — "
+            "entweder freq auf 30min (oder groeber) setzen oder interpol_path entfernen.")
+    if target_step > src_step:
+        num = src.select_dtypes(include="number").resample(freq, closed="left", label="left").mean()
+        flags = src.select_dtypes(include="bool").resample(freq, closed="left", label="left").max()
+        src = pd.concat([num, flags], axis=1)
+
+    day = src[SOLAR_DAY_COLUMN].reindex(df.index) if SOLAR_DAY_COLUMN in src.columns else None
+    ctx = src[CONTEXTFREE_COLUMN].reindex(df.index) if CONTEXTFREE_COLUMN in src.columns else None
+
+    for tgt in present:
+        col = SOLAR_IMPUTATION_COLUMN_BY_TARGET.get(tgt)
+        if col is None or col not in src.columns:
+            continue
+        nan_before = df[tgt].isna()
+        n_before = int(nan_before.sum())
+        values = src[col].reindex(df.index)
+        fill = nan_before & values.notna()
+        df.loc[fill, tgt] = values[fill].values
+        n_model = int(fill.sum())
+
+        n_night = 0
+        if fill_night and day is not None:
+            night_gap = df[tgt].isna() & (day.astype("boolean").fillna(False) == False)  # noqa: E712
+            n_night = int(night_gap.sum())
+            df.loc[night_gap, tgt] = 0.0
+
+        n_ctx = int((fill & ctx.astype("boolean").fillna(False)).sum()) if ctx is not None else 0
+        diag["targets"][tgt] = {
+            "nan_before": n_before, "filled_model": n_model,
+            "filled_night": n_night, "kontextfrei": n_ctx,
+            "open_after": int(df[tgt].isna().sum()),
+        }
+
+    parts = ", ".join(
+        f"{t}: {d['nan_before']} NaN -> {d['open_after']} offen "
+        f"({d['filled_model']} Modell, davon {d['kontextfrei']} kontextfrei; "
+        f"{d['filled_night']} Nacht=0)"
+        for t, d in diag["targets"].items())
+    logger.info("Solar-Imputation Station %s — %s", station_id, parts)
+    return df, diag

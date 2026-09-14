@@ -3,7 +3,7 @@ was imputed_dir gegenueber dem KNN-Cache an wind_direction fuellt."""
 import sys, glob
 import numpy as np, pandas as pd
 sys.path.insert(0, ".")
-import yaml
+from utils.tools import load_config
 from geostatistics.train_stgnn2 import load_station_measurements
 from utils.imputation import load_knn_imputation
 
@@ -33,7 +33,7 @@ print(f"[1] Spalte 'imputed' (wind_speed): {n_same} Stationen identisch, {n_diff
       f"max. Abweichung {maxdiff:.6g} m/s")
 
 # 2. Richtungsluecken: was fuellt imputed_dir, was der KNN-Cache?
-c = yaml.safe_load(open("configs/testmode/full/config_wind_dcrnn_fold1.yaml"))["data"]
+c = load_config("configs/testmode/full/config_wind_dcrnn_fold1.yaml")["data"]
 ids = [str(s) for s in c["files"]] + [str(s) for s in c["val_files"]] + [str(s) for s in c["test_files"]]
 meas, ts = load_station_measurements(c["path"], ids, cols=["wind_speed", "wind_direction"],
                                      freq="1h", use_case="wind",

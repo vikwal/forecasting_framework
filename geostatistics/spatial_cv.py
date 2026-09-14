@@ -93,15 +93,31 @@ def load_spatial_folds(path: str | Path) -> list[tuple[str, list[str], list[str]
     return folds
 
 
-def station_pool(folds: list[tuple[str, list[str], list[str]]]) -> list[str]:
-    """Sortierte Vereinigung aller Fold-Stationen — der zu ladende Pool."""
-    return sorted(set(folds[0][1]) | set(folds[0][2]))
+def station_pool(folds: list[tuple[str, list[str], list[str]]],
+                 extra_train: list[str] | None = None) -> list[str]:
+    """Sortierte Vereinigung aller Fold-Stationen — der zu ladende Pool.
+
+    ``extra_train`` haengt Stationen an, die in KEINEM Fold eine Rolle haben und
+    trotzdem geladen werden sollen, weil sie in jedem Fold Trainingsrolle
+    bekommen (``hpo.extra_train_files``). Siehe :func:`build_folds`.
+    """
+    pool = set(folds[0][1]) | set(folds[0][2])
+    if extra_train:
+        doppelt = pool & {_norm(s) for s in extra_train}
+        if doppelt:
+            raise ValueError(
+                f"extra_train_files enthaelt Stationen, die schon in den Folds stehen: "
+                f"{sorted(doppelt)}. Sie waeren dann in ihrem eigenen Fold zugleich "
+                "Ziel- und Trainingsstation.")
+        pool |= {_norm(s) for s in extra_train}
+    return sorted(pool)
 
 
 def build_folds(
     folds: list[tuple[str, list[str], list[str]]],
     all_ids: list[str],
     max_val_stations: int | None = None,
+    extra_train: list[str] | None = None,
 ) -> list[SpatialFold]:
     """Uebersetzt die ID-Listen in Indizes in ``all_ids``.
 
@@ -109,8 +125,21 @@ def build_folds(
     Zielstationen pro Fold; die uebrigen Val-Stationen bleiben dann in diesem
     Fold ungenutzt — sie werden **nicht** zu Trainingsnachbarn, sonst waere die
     Nachbarschaft je nach Einstellung eine andere.
+
+    ``extra_train`` (aus ``hpo.extra_train_files``) ergaenzt JEDEN Fold um
+    dieselben zusaetzlichen Trainingsstationen, ohne dass sie je Zielstation
+    werden. Gedacht fuer Stationen, die nur einen Teil des Zeitraums messen: sie
+    tragen Trainingsmasse bei, taugen aber nicht als Bewertungsziel. Weil die
+    Zielmengen der Folds dabei unveraendert bleiben, ist ein Lauf mit und ohne
+    extra_train gepaart vergleichbar.
     """
     pos = {sid: i for i, sid in enumerate(all_ids)}
+    extra_idx: list[int] = []
+    if extra_train:
+        fehlend = [s for s in (_norm(x) for x in extra_train) if s not in pos]
+        if fehlend:
+            raise KeyError(f"extra_train_files: {fehlend} nicht im geladenen Pool")
+        extra_idx = [pos[_norm(s)] for s in extra_train]
     out = []
     for name, train_ids, val_ids in folds:
         missing = [s for s in train_ids + val_ids if s not in pos]
@@ -129,7 +158,7 @@ def build_folds(
                 "remove n_val_stations or set it to null."
             )
         out.append(SpatialFold(name=name,
-                               train_idx=[pos[s] for s in train_ids],
+                               train_idx=[pos[s] for s in train_ids] + extra_idx,
                                val_idx=v))
     return out
 

@@ -312,9 +312,18 @@ def main() -> None:
     all_station_ids = None
     if cv_mode == 'spatial':
         spatial_fold_defs = load_spatial_folds(spatial_folds_path)
-        all_station_ids = station_pool(spatial_fold_defs)
+        # hpo.extra_train_files: Stationen, die in JEDEM Fold Trainingsrolle haben
+        # und nie Zielstation werden. Ohne das waeren sie hier unsichtbar — im
+        # raeumlichen Modus ersetzen die Folds data.files/val_files vollstaendig.
+        extra_train = [str(s) for s in base_config['hpo'].get('extra_train_files', []) or []]
+        all_station_ids = station_pool(spatial_fold_defs, extra_train=extra_train)
         spatial_folds = build_folds(spatial_fold_defs, all_station_ids,
-                                     max_val_stations=base_config['hpo'].get('n_val_stations'))
+                                     max_val_stations=base_config['hpo'].get('n_val_stations'),
+                                     extra_train=extra_train)
+        if extra_train:
+            logging.info(
+                "hpo.extra_train_files: %d Zusatzstationen in jedem Fold als Training, "
+                "nie als Ziel — %s", len(extra_train), extra_train)
         logging.info(
             "CV-Modus: raeumlich — %d Folds aus %s, %d Stationen im Pool. "
             "config['data']['files']/['val_files'] (%d/%d Stationen) werden IGNORIERT "
