@@ -1445,6 +1445,10 @@ def main() -> None:
     data_path = data_cfg["path"]
 
     H   = stgnn_cfg.get("history_length", 48)
+    # Schrittweite in Stunden: H zaehlt Schritte, die Laufsuche unten rechnet in
+    # Stunden. Bei 1h identisch, bei 30min Faktor 2.
+    from geostatistics.shared.resolution import freq_to_hours as _f2h
+    freq_h = _f2h(data_cfg.get("freq", "1h"), data_cfg.get("use_case", "wind"))
     F_h = stgnn_cfg.get("forecast_horizon", 48)
 
     # ------------------------------------------------------------------
@@ -1649,7 +1653,11 @@ def main() -> None:
             continue
 
         # Find history run: the run from exactly H hours ago
-        t_hist_target = t_run - pd.Timedelta(hours=H)
+        # H ist die Historienlaenge in SCHRITTEN. Bei stuendlichem Raster faellt
+        # das mit Stunden zusammen, bei 30 min nicht: 96 Schritte sind 48 h.
+        # freq_h zieht das gerade — ohne es suchte der Solar-Pfad den
+        # Historienlauf doppelt so weit zurueck wie das Messfenster reicht.
+        t_hist_target = t_run - pd.Timedelta(hours=H * freq_h)
         diffs_s = np.abs((run_times_np - t_hist_target).total_seconds().values)
         r_hist  = int(np.argmin(diffs_s))
         if diffs_s[r_hist] > 3 * 3600:   # tolerance: 3 h (one run step)

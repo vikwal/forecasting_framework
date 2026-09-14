@@ -218,6 +218,7 @@ def _build_run_pairs(
     split_time: pd.Timestamp,
     H: int,
     F_h: int,
+    freq_h: float = 1.0,
 ):
     T = len(timestamps)
     ts_lookup = pd.Series(np.arange(T), index=timestamps)
@@ -237,7 +238,11 @@ def _build_run_pairs(
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1
             continue
-        t_hist_target = t_run - pd.Timedelta(hours=H)
+        # H ist die Historienlaenge in SCHRITTEN. Bei stuendlichem Raster faellt
+        # das mit Stunden zusammen, bei 30 min nicht: 96 Schritte sind 48 h.
+        # freq_h zieht das gerade — ohne es suchte der Solar-Pfad den
+        # Historienlauf doppelt so weit zurueck wie das Messfenster reicht.
+        t_hist_target = t_run - pd.Timedelta(hours=H * freq_h)
         diffs_s = np.abs((run_times - t_hist_target).total_seconds().values)
         r_hist = int(np.argmin(diffs_s))
         if diffs_s[r_hist] > 3 * 3600:

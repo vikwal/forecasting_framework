@@ -997,7 +997,13 @@ def main() -> None:
         if t_run_abs < H or t_run_abs + F_h > T:
             skipped += 1; continue
 
-        t_hist_target = t_run - pd.Timedelta(hours=H)
+        # H ist die Historienlaenge in SCHRITTEN, nicht in Stunden. Bei
+        # stuendlichem Raster faellt beides zusammen (Wind: 48 Schritte = 48 h),
+        # bei 30 min nicht: 96 Schritte sind 48 h, nicht 96. Ohne freq_h suchte
+        # der Solar-Pfad den Historienlauf vier Tage statt zwei Tage zurueck —
+        # die NWP-Historie deckte damit ein Zeitfenster ab, das sich mit der
+        # Messhistorie gar nicht ueberschneidet.
+        t_hist_target = t_run - pd.Timedelta(hours=H * freq_h)
         diffs_s = np.abs((run_times - t_hist_target).total_seconds().values)
         r_hist  = int(np.argmin(diffs_s))
         if diffs_s[r_hist] > 3 * 3600:
