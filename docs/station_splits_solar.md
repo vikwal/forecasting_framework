@@ -57,8 +57,16 @@ oder gegeneinander halten will.
 
 Balanciert wird auf dem, was das Modell wirklich als statische Eingänge sieht —
 `altitude`/`latitude`/`longitude` — plus dem mittleren gemessenen GHI **im
-Trainingszeitraum** als Regimevariable (Terrain-Features gibt es nur für die
-Wind-Stationen). Es fließt nichts aus dem Testfenster ein.
+Trainingszeitraum** als Regimevariable. Es fließt nichts aus dem Testfenster ein.
+
+> **Korrektur 14.09.2026.** Hier stand, Terrain-Features gebe es nur für die
+> Wind-Stationen. Das stimmt nicht: `topo_features.csv` deckt **93 der 94**
+> Solar-Stationen vollständig ab, ohne einen einzigen NaN — nur Emden (`05839`)
+> fehlt, und die steht in keinem Fold. Die Balancierung selbst bleibt richtig,
+> weil sie auf den *tatsächlich genutzten* statischen Eingängen balanciert und
+> das bis heute `altitude`/`latitude`/`longitude` sind. Wird das statische Set
+> erweitert (siehe [solar_tft_kampagne.md](solar_tft_kampagne.md)), ist die
+> Balancierung daran zu prüfen.
 
 ## 4. Der Aufbau: Testsatz zurückhalten, HPO auf 3 rotierenden Folds
 

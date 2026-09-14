@@ -1163,6 +1163,10 @@ def preprocess_solar_icond2(path: str,
     static_data = {'latitude': station_lat, 'longitude': station_lon,
                    'altitude': altitude, 'station_height': altitude}
     static_data.update(_prep._get_topo_features(station_id, params_cfg.get('topo_features_path')))
+    # Horizont/Sky-View aus SRTM (scripts/make_horizon_features.py). Getrennt vom
+    # Topo-Pfad, weil die Tabelle im Repo liegt und nicht unter DATA_ROOT.
+    static_data.update(_prep._get_horizon_features(
+        station_id, params_cfg.get('horizon_features_path')))
     for feat in static_features:
         if feat in static_data:
             df[feat] = static_data[feat]

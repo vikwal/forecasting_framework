@@ -2058,6 +2058,49 @@ def _get_topo_features(station_id: str, topo_features_path: str) -> dict:
         return {}
 
 
+@lru_cache(maxsize=4)
+def _load_horizon_features_table(horizon_features_path: str) -> pd.DataFrame:
+    """Load the SRTM horizon table written by scripts/make_horizon_features.py.
+
+    Separate from _load_topo_features_table because it has a different origin:
+    topo_features.csv is a delivered file, this one is computed in-repo and
+    versioned with it. Columns: svf, horizon_mean, horizon_solar, horizon_max,
+    srtm_elevation — keyed by station_id.
+    """
+    return pd.read_csv(horizon_features_path, dtype={'station_id': str}).set_index('station_id')
+
+
+def _get_horizon_features(station_id: str, horizon_features_path: str) -> dict:
+    """Horizon/sky-view features for one station, or {} if unavailable.
+
+    Fails soft like _get_topo_features — callers tolerate missing static_data
+    keys, and a station outside the SRTM coverage should not abort a run.
+
+    These are the only terrain quantities with a direct mechanism for
+    irradiance on a HORIZONTAL surface: the horizon hides part of the sky
+    (diffuse) and delays sunrise/sunset (direct). Measured screening against
+    the per-station RMSE of the August base_lag runs, partialling out altitude:
+    svf -0.156, horizon_mean +0.160, horizon_solar +0.112 (n=83) — weak, and
+    just under the significance threshold. German radiation stations are sited
+    deliberately open: the median SVF is 0.9996 and only 14 of 83 stations
+    carry more than 2 degrees of horizon in the solar sector.
+    """
+    if not horizon_features_path:
+        return {}
+    try:
+        table = _load_horizon_features_table(horizon_features_path)
+        if station_id not in table.index:
+            logging.warning(
+                "Station %s not in the horizon table — horizon features skipped.", station_id)
+            return {}
+        row = table.loc[station_id]
+        keys = ['svf', 'horizon_mean', 'horizon_solar', 'horizon_max']
+        return {k: float(row[k]) for k in keys if k in row.index and pd.notna(row[k])}
+    except Exception as e:
+        logging.warning("Could not load horizon features for station %s: %s", station_id, e)
+        return {}
+
+
 def preprocess_synth_wind_icond2(path: str,
                           config: dict,
                           freq: str = '1H',
