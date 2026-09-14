@@ -200,3 +200,4 @@ cython_debug/
 .hpo_stop*
 .retrain_skip*
 .testmode_stop
+configs/solar_dcrnn/smoke/
