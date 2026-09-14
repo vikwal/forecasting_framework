@@ -166,6 +166,7 @@ dcrnn:
   gradient_clip: 1.0
   scheduler: plateau
   impute_night_zero: true
+  target_transform: nwp_residual
   hist_wind_available: true
 cache:
   use_cache: true

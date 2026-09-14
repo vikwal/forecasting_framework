@@ -30,6 +30,9 @@ Unterschiede zur Wind-Leiter, alle aus den Solar-Entscheidungen vom 14.09.2026:
   Block ueber beide Jahre.
 * **ECMWF als zweite NWP-Quelle**, wie beim TFT. Ohne sie misst der Vergleich
   zwischen den Architekturen nur den Featuresatz.
+* **``target_transform: nwp_residual``**, ebenfalls wie beim TFT: Ziel und
+  Messhistorie stehen als Abweichung von der ICON-D2-Prognose. Die Auswertung
+  rechnet zurueck, die Metriken bleiben in W/m².
 * **Fold 1 only.** Die Ablationen laufen auf Fold 1, die drei Folds sind erst
   fuer die HPO vorgesehen (Entscheidung Viktor, 14.09.2026).
 
@@ -153,6 +156,10 @@ def main() -> int:
         g['history_length'] = 96
         g['forecast_horizon'] = 96
         g['impute_night_zero'] = True
+        # Residuum gegen ICON-D2 wie im TFT-Pfad. Die Metriken bleiben
+        # vergleichbar, weil die Auswertung zurueckrechnet — der Unterschied
+        # ist der Induktivbias: das Modell muss nur die Korrektur lernen.
+        g['target_transform'] = 'nwp_residual'
         # handle_nans bleibt 'break': nach der Imputation darf keine Luecke mehr
         # kommen, und wenn doch, soll der Lauf abbrechen statt Stationen
         # stillschweigend zu verwerfen.

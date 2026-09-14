@@ -46,6 +46,7 @@ class TrainingSampler:
         station_coords: np.ndarray | None = None,  # (N_all, 2) [lat, lon] raw degrees
         hist_wind_available: bool = False,
         neighbour_meas_available: bool = True,
+        residual_spec: dict | None = None,
     ) -> None:
         self.cfg = model_config
         self.tc  = model_config.training
@@ -55,6 +56,18 @@ class TrainingSampler:
         self.target_feat_idx = target_feat_idx
         self.station_coords  = station_coords  # needed for radius filtering
         self.hist_wind_available = hist_wind_available
+        # target_transform='nwp_residual': Messungen und Ziel werden gegen die
+        # ICON-D2-Prognose des jeweiligen Laufs gerechnet, wie im CL-Pfad
+        # (utils/solar._to_nwp_residual). Die Referenz ist laufabhaengig, die
+        # Umstellung kann also nicht global auf meas_raw passieren, sondern nur
+        # hier, wo r_hist und r_curr bekannt sind.
+        #
+        # residual_spec traegt je Zielgroesse den NWP-Spaltenindex sowie die vier
+        # Skalenparameter, mit denen sich beide Groessen exakt auf dieselbe Skala
+        # bringen lassen. Die Differenz ist dann in Einheiten der Messwertstreuung
+        # und bleibt eine gueltige Skalierung des Residuums:
+        #     resid_scaled = meas_scaled - (nwp_scaled*n_std + n_mean - m_mean)/m_std
+        self.residual_spec = residual_spec or None
         # Ablation B / C: when False, NO station carries measurements — not even
         # the neighbours. target_mask is deliberately left untouched, so the loss
         # is still scored at exactly the same nodes as in the full model.
@@ -205,6 +218,19 @@ class TrainingSampler:
 
     # ------------------------------------------------------------------
 
+    def _nwp_in_meas_scale(self, grid_runs, run_idx, nearest_for_sub, nwp_idx, k):
+        """NWP-Feld eines Laufs auf die Skala der k-ten Zielgroesse bringen.
+
+        ``grid_runs`` ist skaliert, die Messungen auch — aber mit
+        unterschiedlichen Parametern. Zurueckrechnen und mit den Messparametern
+        neu skalieren macht die Differenz wohldefiniert. Rein linear, also exakt.
+        """
+        spec = self.residual_spec
+        raw = grid_runs[run_idx, :, nearest_for_sub, nwp_idx]     # (N_sub, L)
+        n_mean, n_std = spec["nwp_mean"][k], spec["nwp_std"][k]
+        m_mean, m_std = spec["meas_mean"][k], spec["meas_std"][k]
+        return (raw * n_std + n_mean - m_mean) / m_std
+
     def sample_train(
         self,
         r_curr: int,
@@ -302,17 +328,49 @@ class TrainingSampler:
         # Measurements: history only, (H, N_sub, M)
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
 
+        _ti = self.target_feat_idx
+        _tidx = list(_ti) if isinstance(_ti, (list, tuple)) else [_ti]
+
+        # Historie ebenfalls ins Residuum — gegen den Historienlauf r_hist. Der
+        # TFT sieht seine observed_features im selben Raum wie das Ziel (dort
+        # dieselbe Spalte, die _to_nwp_residual transformiert); mischte man hier
+        # absolute Nachbarwerte mit Residuen, faende der autoregressive Decoder
+        # zwei verschiedene Groessen in derselben Rueckkopplung.
+        if self.residual_spec is not None:
+            _nfs = station_nearest_grid[all_global]
+            _H = t_run_abs - t_hist_abs
+            for k, (nwp_idx, mcol) in enumerate(zip(self.residual_spec["nwp_idx"], _tidx)):
+                if nwp_idx is None:
+                    continue
+                ref_h = self._nwp_in_meas_scale(grid_icond2_runs, r_hist, _nfs, nwp_idx, k)
+                meas_hist[:, :, mcol] -= ref_h[:, :_H].T
+
         # Ground truth
         # target_feat_idx darf ein Tupel sein (Multi-Target). Ein int liefert
         # wie bisher (T, N) -> gt_target (N_target, T); ein Tupel liefert
         # (T, N, n_targets) -> (N_target, T, n_targets).
-        _ti = self.target_feat_idx
         if isinstance(_ti, (list, tuple)):
             gt = station_meas[t_run_abs:t_run_abs + H_fore, :, list(_ti)][:, all_global, :]
-            gt_target = np.transpose(gt[:, target_mask_np, :], (1, 0, 2))
         else:
             gt = station_meas[t_run_abs:t_run_abs + H_fore, :, _ti][:, all_global]
-            gt_target = gt[:, target_mask_np].T
+
+        # Residuum gegen die NWP-Prognose DIESES Laufs (r_curr) fuer das Ziel und
+        # gegen r_hist fuer die Historie — beide Fenster gehoeren zu verschiedenen
+        # Laeufen, und das Residuum ist nur gegen den jeweils eigenen definiert.
+        if self.residual_spec is not None:
+            nearest_for_sub = station_nearest_grid[all_global]
+            for k, nwp_idx in enumerate(self.residual_spec["nwp_idx"]):
+                if nwp_idx is None:
+                    continue
+                ref = self._nwp_in_meas_scale(
+                    grid_icond2_runs, r_curr, nearest_for_sub, nwp_idx, k)   # (N_sub, L)
+                ref_t = ref[:, :H_fore].T                                    # (H_fore, N_sub)
+                if gt.ndim == 3:
+                    gt[:, :, k] -= ref_t
+                else:
+                    gt -= ref_t
+        gt_target = (np.transpose(gt[:, target_mask_np, :], (1, 0, 2))
+                     if gt.ndim == 3 else gt[:, target_mask_np].T)
         ground_truth = torch.from_numpy(gt_target.copy().astype(np.float32))
 
         # Zero target measurements (original M features only)
@@ -413,6 +471,20 @@ class TrainingSampler:
         )                                                            # (N_all, 96, [k_e*]E2)
 
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
+
+        _ti = self.target_feat_idx
+        _tidx = list(_ti) if isinstance(_ti, (list, tuple)) else [_ti]
+        # Residuum wie in sample_train: Historie gegen r_hist. Muss VOR dem
+        # Nullen stehen, sonst wuerde die Ablation B/C einen Offset stehen lassen.
+        if self.residual_spec is not None:
+            _nfs = station_nearest_grid[all_global]
+            _H = t_run_abs - t_hist_abs
+            for k, (nwp_idx, mcol) in enumerate(zip(self.residual_spec["nwp_idx"], _tidx)):
+                if nwp_idx is None:
+                    continue
+                ref_h = self._nwp_in_meas_scale(grid_icond2_runs, r_hist, _nfs, nwp_idx, k)
+                meas_hist[:, :, mcol] -= ref_h[:, :_H].T
+
         # Same ordering rule as in sample_train: B first, IGNNK second.
         if not self.neighbour_meas_available:
             meas_hist[:, :, :] = 0.0                    # ablation B/C: nobody has measurements
@@ -423,13 +495,23 @@ class TrainingSampler:
             rk_slice = interpol_meas[t_hist_abs:t_run_abs, :][:, all_global, np.newaxis]
             meas_hist = np.concatenate([meas_hist, rk_slice], axis=2)
 
-        _ti = self.target_feat_idx
         if isinstance(_ti, (list, tuple)):
             gt = station_meas[t_run_abs:t_run_abs + H_fore, :, list(_ti)][:, all_global, :]
-            gt_val = np.transpose(gt[:, N_train:, :], (1, 0, 2))
         else:
             gt = station_meas[t_run_abs:t_run_abs + H_fore, :, _ti][:, all_global]
-            gt_val = gt[:, N_train:].T
+        if self.residual_spec is not None:
+            _nfs2 = station_nearest_grid[all_global]
+            for k, nwp_idx in enumerate(self.residual_spec["nwp_idx"]):
+                if nwp_idx is None:
+                    continue
+                ref_t = self._nwp_in_meas_scale(
+                    grid_icond2_runs, r_curr, _nfs2, nwp_idx, k)[:, :H_fore].T
+                if gt.ndim == 3:
+                    gt[:, :, k] -= ref_t
+                else:
+                    gt -= ref_t
+        gt_val = (np.transpose(gt[:, N_train:, :], (1, 0, 2))
+                  if gt.ndim == 3 else gt[:, N_train:].T)
         ground_truth = torch.from_numpy(gt_val.copy().astype(np.float32))
 
         stat_sub  = station_static[all_global, :]

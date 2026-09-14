@@ -166,6 +166,7 @@ dcrnn:
   gradient_clip: 1.0
   scheduler: plateau
   impute_night_zero: true
+  target_transform: nwp_residual
 cache:
   use_cache: true
   cache_dir: data_cache/gnns

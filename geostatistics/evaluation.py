@@ -127,6 +127,22 @@ def build_eval_batch(
         e2_full = e2_full.transpose(1, 0, 2)                     # (N_all, 96, E2)
 
     meas_hist = station_meas_scaled[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
+
+    # Residuum wie im Sampler: Historie gegen r_hist. VOR dem Nullen, sonst
+    # liesse die Ablation B/C einen Offset stehen.
+    _rs = getattr(sampler, "residual_spec", None)
+    if _rs is not None:
+        _ti_e = sampler.target_feat_idx
+        _tidx_e = list(_ti_e) if isinstance(_ti_e, (list, tuple)) else [_ti_e]
+        _nfs = station_nearest_grid[all_global]
+        _H = t_run_abs - t_hist_abs
+        for k, (nwp_idx, mcol) in enumerate(zip(_rs["nwp_idx"], _tidx_e)):
+            if nwp_idx is None:
+                continue
+            ref_h = sampler._nwp_in_meas_scale(
+                grid_icond2_runs_scaled, r_hist, _nfs, nwp_idx, k)
+            meas_hist[:, :, mcol] -= ref_h[:, :_H].T
+
     # Order matters: ablation B subsumes the IGNNK zeroing and must come first,
     # otherwise only the target stations would lose their measurements. Same rule
     # as in TrainingSampler.sample_train / sample_val.
@@ -141,6 +157,14 @@ def build_eval_batch(
 
     gt_raw = station_meas_scaled[t_run_abs:t_run_abs + H_fore, :, target_feat_idx]
     gt_scaled = gt_raw[:, all_global][:, N_obs:].T.copy()      # (N_target, H_fore)
+    # gt_scaled dient nur als Rueckgabe fuer Aufrufer, die es brauchen; die
+    # Metriken zieht evaluate() aus meas_raw. Im Residuumsraum entsprechend
+    # gegen r_curr, damit beide dasselbe meinen.
+    if _rs is not None and _rs["nwp_idx"] and _rs["nwp_idx"][0] is not None:
+        _ref_c = sampler._nwp_in_meas_scale(
+            grid_icond2_runs_scaled, r_curr, station_nearest_grid[all_global],
+            _rs["nwp_idx"][0], 0)[:, :H_fore]
+        gt_scaled = gt_scaled - _ref_c[N_obs:, :]
 
     stat_sub  = station_static[all_global, :]
     type_ind  = (~target_mask).float().unsqueeze(1).numpy()
@@ -300,8 +324,16 @@ def evaluate(
                 raw_out = raw_out[:, :, None]       # (N_val, H_fore, 1)
 
             run_ts = timestamps[t_run_abs - 1] if timestamps is not None else None
+            _resid = getattr(sampler, "residual_spec", None) is not None
             for k, fidx in enumerate(_idxs):
-                preds_a = _to_phys(raw_out[:, :, k], k)          # (N_val, H_fore)
+                # Im Residuumsraum sagt das Modell (Messung - NWP) in Einheiten
+                # der Messwertstreuung vorher. Zurueck also nur mit *std und
+                # anschliessend + NWP-Prognose — nicht mit + mean, das steckt
+                # schon in der NWP-Referenz. Danach stehen alle Metriken wieder
+                # im physikalischen Absolutraum und sind direkt mit den
+                # TFT-Zahlen und den Absolutlaeufen vergleichbar.
+                preds_a = (raw_out[:, :, k] * _std[k] if _resid
+                           else _to_phys(raw_out[:, :, k], k))    # (N_val, H_fore)
                 gt_a = meas_raw[
                     t_run_abs:t_run_abs + H_fore, :, fidx
                 ][:, val_station_indices].T                      # (N_val, H_fore)
@@ -312,8 +344,9 @@ def evaluate(
                 for i, gidx in enumerate(val_station_indices):
                     nwp_h  = _nwp_ref(gidx, r_curr, k)
                     pers_h = _pers_ref(gidx, t_run_abs, k)
+                    pred_i = preds_a[i] + nwp_h if _resid else preds_a[i]
                     key = (gidx, k)
-                    preds_acc[key].append(preds_a[i])
+                    preds_acc[key].append(pred_i)
                     gt_acc[key].append(gt_a[i])
                     nwp_acc[key].append(nwp_h)
                     pers_acc[key].append(pers_h)
@@ -324,7 +357,7 @@ def evaluate(
                             "run_time":   run_ts,
                             "valid_time": (run_ts + pd.Timedelta(hours=h + 1)) if run_ts is not None else None,
                             "horizon":    h + 1,
-                            "pred":       float(preds_a[i, h]),
+                            "pred":       float(pred_i[h]),
                             "gt":         float(gt_a[i, h]),
                             "nwp_ref":    float(nwp_h[h]),
                             "pers_ref":   float(pers_h[h]),

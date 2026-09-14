@@ -1121,6 +1121,55 @@ def main() -> None:
     # ------------------------------------------------------------------
     target_feat_idx = model_cfg.target_feat_idx
     target_feat_idxs = tuple(model_cfg.target_feat_idxs) or (target_feat_idx,)
+
+    # Je Zielgroesse die passende NWP-Spalte im ICON-Gitter. Fuer Wind ist das
+    # ws_feat_idx_i2; fuer Solar 'ghi' -> 'ghi_nwp' usw. Ohne Treffer bleibt der
+    # Eintrag None: skill_nwp dieser Zielgroesse wird dann NaN, sichtbar statt
+    # stillschweigend falsch.
+    _ws_idx_i2 = find_ws_feat_idx(icond2_features)
+    _nwp_by_target = {"ghi": "ghi_nwp", "dhi": "dhi_nwp",
+                      "bhi": "bhi_nwp", "dni": "dni_nwp"}
+    nwp_ref_idxs = []
+    for _tc in target_cols:
+        _col = _nwp_by_target.get(_tc)
+        if _col is not None and _col in icond2_features:
+            nwp_ref_idxs.append(icond2_features.index(_col))
+        elif len(target_cols) == 1:
+            nwp_ref_idxs.append(_ws_idx_i2)
+        else:
+            logger.warning(
+                "Keine NWP-Referenzspalte fuer Zielgroesse '%s' in icond2_features %s "
+                "— skill_nwp bleibt dafuer NaN.", _tc, icond2_features)
+            nwp_ref_idxs.append(None)
+
+    # ── target_transform: nwp_residual ────────────────────────────────
+    # Zielgroesse und Messhistorie gegen die ICON-D2-Prognose rechnen, wie im
+    # CL-Pfad (utils/solar._to_nwp_residual). Die Referenz haengt am Lauf, die
+    # Umstellung passiert deshalb im Sampler und nicht global auf meas_raw.
+    # residual_spec traegt je Zielgroesse den NWP-Spaltenindex und die vier
+    # Skalenparameter, mit denen sich Messung und Prognose exakt auf dieselbe
+    # Skala bringen lassen.
+    residual_spec = None
+    if str(dcrnn_cfg.get("target_transform", "none")).lower() == "nwp_residual":
+        _fehlt = [c for c, i in zip(target_cols, nwp_ref_idxs) if i is None]
+        if _fehlt:
+            raise ValueError(
+                f"dcrnn.target_transform='nwp_residual', aber fuer {_fehlt} gibt es "
+                f"keine NWP-Referenzspalte in icond2_features {icond2_features}. "
+                "Ohne sie liesse sich das Residuum nicht bilden.")
+        residual_spec = {
+            "nwp_idx":   list(nwp_ref_idxs),
+            "meas_mean": [float(meas_scaler.mean_[i]) for i in target_feat_idxs],
+            "meas_std":  [float(meas_scaler.std_[i] + meas_scaler.eps) for i in target_feat_idxs],
+            "nwp_mean":  [float(i2_scaler.mean_[i]) for i in nwp_ref_idxs],
+            "nwp_std":   [float(i2_scaler.std_[i] + i2_scaler.eps) for i in nwp_ref_idxs],
+        }
+        logger.info(
+            "target_transform=nwp_residual: Ziel und Messhistorie gegen %s "
+            "(Spaltenindizes %s). Die Auswertung rechnet zurueck, die Metriken "
+            "stehen also weiterhin in W/m².",
+            [f"{c}->{icond2_features[i]}" for c, i in zip(target_cols, nwp_ref_idxs)],
+            list(nwp_ref_idxs))
     # Einziel: int wie bisher, damit der Sampler bitgleich dieselben Formen
     # liefert. Mehrziel: Tupel, dann kommt ground_truth als (N, T, n_targets).
     _sampler_target = target_feat_idx if len(target_feat_idxs) == 1 else target_feat_idxs
@@ -1130,6 +1179,7 @@ def main() -> None:
         station_coords=station_coords,
         hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
         neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
+        residual_spec=residual_spec,
     )
 
     # ------------------------------------------------------------------
@@ -1200,24 +1250,6 @@ def main() -> None:
         sd = {k.replace("_orig_mod.", ""): v for k, v in ckpt.items()}
         model.load_state_dict(sd)
         ws_feat_idx_i2 = find_ws_feat_idx(icond2_features)
-        # Je Zielgroesse die passende NWP-Spalte im ICON-Gitter. Fuer Wind ist
-        # das die bisherige ws_feat_idx_i2; fuer Solar 'ghi' -> 'ghi_nwp' usw.
-        # Ohne Treffer bleibt der Eintrag None und skill_nwp dieser Zielgroesse
-        # NaN — sichtbar statt stillschweigend falsch.
-        _nwp_by_target = {"ghi": "ghi_nwp", "dhi": "dhi_nwp",
-                          "bhi": "bhi_nwp", "dni": "dni_nwp"}
-        nwp_ref_idxs = []
-        for _tc in target_cols:
-            _col = _nwp_by_target.get(_tc)
-            if _col is not None and _col in icond2_features:
-                nwp_ref_idxs.append(icond2_features.index(_col))
-            elif len(target_cols) == 1:
-                nwp_ref_idxs.append(ws_feat_idx_i2)
-            else:
-                logger.warning(
-                    "Keine NWP-Referenzspalte fuer Zielgroesse '%s' in icond2_features %s "
-                    "— skill_nwp bleibt dafuer NaN.", _tc, icond2_features)
-                nwp_ref_idxs.append(None)
         eval_df, _ = run_evaluation(
             model=model,
             sampler=sampler,
