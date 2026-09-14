@@ -65,6 +65,7 @@ from geostatistics.train_dcrnn import (
     resolve_feature_mode, feature_indices,
     encode_circular_measurements, apply_dir_encoding,
 )
+from geostatistics.evaluation import find_ws_feat_idx
 from geostatistics.train_stgnn2 import (
     load_yaml,
     load_station_measurements,
@@ -73,6 +74,7 @@ from geostatistics.train_stgnn2 import (
     load_ecmwf_parquet_at_stations_and_grid,
     load_nwp_elevations,
     impute_meas_raw_from_interpol,
+    impute_meas_raw_solar,
     load_knn_imputation,
     apply_knn_imputation,
     require_nwp_elevation_env,
@@ -207,6 +209,11 @@ def sample_hyperparameters(trial: optuna.Trial, hpo_params: dict) -> dict:
     return sampled
 
 
+def _skalar_wenn_einziel(werte: list[float]):
+    """Einelementige Liste als Skalar — der Einziel-Pfad erwartet float."""
+    return werte[0] if len(werte) == 1 else werte
+
+
 # ---------------------------------------------------------------------------
 # Build run pairs (identical logic to train_dcrnn.py)
 # ---------------------------------------------------------------------------
@@ -309,8 +316,9 @@ def main() -> None:
     dcrnn_cfg = cfg.get("dcrnn", {})
 
     freq   = data_cfg.get("freq", "1h")
-    freq_h = freq_to_hours(freq, data_cfg.get("use_case", "wind"))
-    lead0_off = lead0_offset(data_cfg.get("use_case", "wind"))
+    use_case = str(data_cfg.get("use_case", "wind")).lower()
+    freq_h = freq_to_hours(freq, use_case)
+    lead0_off = lead0_offset(use_case)
     H_fore_tmp = dcrnn_cfg.get("forecast_horizon", 48)
     # Mirror hpo_cl.py naming: cl_m-{model}_out-{output_dim}_freq-{freq}_{config}{suffix}
     study_name = f"cl_m-dcrnn_out-{H_fore_tmp}_freq-{freq}_{hpo_stem}"
@@ -383,7 +391,13 @@ def main() -> None:
     icond2_features = icond2_features_all                # used for data loading
     ecmwf_features  = ecmwf_features_all
     measurement_cols = dcrnn_cfg["measurement_features"]
-    target_col       = dcrnn_cfg["target_col"]
+    # dcrnn.target_col darf eine Liste sein (Multi-Target, z. B. Solar
+    # ghi+dhi) — wortgleich zu train_dcrnn.py. Ohne das brach die HPO hier mit
+    # 'target_col [...] not in measurement_features' ab, waehrend das Retrain
+    # zwei Ziele lernte.
+    _tc_raw = dcrnn_cfg["target_col"]
+    target_cols = list(_tc_raw) if isinstance(_tc_raw, (list, tuple)) else [_tc_raw]
+    target_col  = target_cols[0]
     H   = dcrnn_cfg.get("history_length", 48)
     F_h = dcrnn_cfg.get("forecast_horizon", 48)
     run_hours          = tuple(dcrnn_cfg.get("icond2_run_hours", [6, 9, 12, 15]))
@@ -418,8 +432,10 @@ def main() -> None:
     nwp_path      = data_cfg.get("nwp_path")
     data_path     = data_cfg["path"]
 
-    if target_col not in measurement_cols:
-        raise ValueError(f"target_col '{target_col}' not in measurement_features")
+    _fehlt = [c for c in target_cols if c not in measurement_cols]
+    if _fehlt:
+        raise ValueError(
+            f"target_col {_fehlt} not in measurement_features {measurement_cols}")
 
     # ── Station IDs ──────────────────────────────────────────────────────────
     cv_mode, spatial_folds_path = resolve_cv_mode(hpo_cfg)
@@ -537,7 +553,16 @@ def main() -> None:
         logger.info("GNNCache MISS — loading raw data …")
 
         logger.info("Loading station measurements …")
-        meas_raw, timestamps = load_station_measurements(data_path, all_ids, cols=measurement_cols, freq=freq)
+        # use_case/stations_master/time_label wortgleich zu train_dcrnn.py: bei
+        # Solar rechnet der Lader J/cm² auf W/m² um, leitet bhi/dni ab und
+        # korrigiert das rechts-gelabelte DWD-Raster. Fuer Wind sind alle drei
+        # Argumente wirkungslos (der Lader wertet sie nur im Solar-Zweig aus).
+        meas_raw, timestamps = load_station_measurements(
+            data_path, all_ids, cols=measurement_cols, freq=freq,
+            use_case=use_case,
+            stations_master=data_cfg.get("stations_master"),
+            time_label=cfg.get("params", {}).get("measurement_time_label", "right"),
+        )
         T = len(timestamps)
 
         # wind_speed gaps come from the TFT closing model's 'imputed' column
@@ -548,10 +573,20 @@ def main() -> None:
         imput_diag = None
         interpol_path = data_cfg.get("interpol_path")
         if interpol_path:
-            logger.info("Loading interpolation ('imputed', TFT) from %s …", interpol_path)
-            meas_raw, imput_diag = impute_meas_raw_from_interpol(
-                meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
-            )
+            if use_case == "solar":
+                # Eigener Einstieg wie in train_dcrnn.py: der Solar-Baum fuehrt
+                # ghi_imputed/dhi_imputed statt der einen 'imputed'-Spalte, ist
+                # rechts-gelabelt und fuellt nachts mit 0.
+                logger.info("Loading solar gap filling from %s …", interpol_path)
+                meas_raw, imput_diag = impute_meas_raw_solar(
+                    meas_raw, all_ids, timestamps, measurement_cols, interpol_path,
+                    fill_night=bool(dcrnn_cfg.get("impute_night_zero", True)),
+                )
+            else:
+                logger.info("Loading interpolation ('imputed', TFT) from %s …", interpol_path)
+                meas_raw, imput_diag = impute_meas_raw_from_interpol(
+                    meas_raw, all_ids, timestamps, measurement_cols, interpol_path, target_col,
+                )
 
         # Secondary-column KNN imputation (e.g. wind_direction, dhi, …)
         knnimputer_path = data_cfg.get("knnimputer_path")
@@ -560,8 +595,9 @@ def main() -> None:
             # zwei Quellen in einer Spalte, und eine dort verbliebene Luecke soll
             # den NaN-Audit erreichen statt still vom KNN gefuellt zu werden.
             _handled = set(imput_diag.get("handled_cols", ())) if imput_diag else set()
+            _handled |= set((imput_diag or {}).get("columns", {}))   # Solar-Zweig
             secondary_cols = [c for c in measurement_cols
-                              if c != target_col and c not in _handled]
+                              if c not in target_cols and c not in _handled]
             for sec_col in secondary_cols:
                 if int(np.isnan(meas_raw[:, :, measurement_cols.index(sec_col)]).sum()) == 0:
                     continue
@@ -592,21 +628,43 @@ def main() -> None:
             split_time = timestamps[-1] + pd.Timedelta(hours=1)
             logger.info("Kein test_start — voller Zeitraum (%d Schritte) in der HPO", T)
 
-        meta_path = data_cfg.get("wind_parameter_path")
+        # Solar-Configs fuehren nur stations_master; fuer Wind bleibt
+        # wind_parameter_path die erste Wahl und damit alles unveraendert.
+        meta_path = data_cfg.get("wind_parameter_path") or data_cfg.get("stations_master")
         lats, lons, alts = load_station_metadata(data_path, all_ids, meta_path=meta_path)
         station_coords = np.stack([lats, lons], axis=1)
 
-        logger.info("Loading ICON-D2 ML runs (next_n_grid=%d) …", max_next_n_icond2)
-        run_times, icond2_coords, grid_icond2_runs, station_nearest_grid = load_icond2_ml_runs(
-            nwp_path=nwp_path,
-            station_ids=all_ids,
-            station_coords=station_coords,
-            features=icond2_features,
-            run_hours=run_hours,
-            next_n_grid=max_next_n_icond2,
-            n_workers=n_workers,
-            cutoff=run_cutoff,
-        )
+        if use_case == "solar":
+            # ICON-D2 SL statt ML — flache Verzeichnisstruktur, natives
+            # 15-min-Raster, akkumulierte Strahlungsfelder. Wortgleich zu
+            # train_dcrnn.py; ohne diesen Zweig laed die HPO Wind-Multilevel-
+            # Daten aus einem Solar-nwp_path und scheitert erst beim Einlesen.
+            from geostatistics.solar_preprocessing import load_solar_sl_runs
+            logger.info("Loading ICON-D2 SL runs (solar, next_n_grid=%d) …", max_next_n_icond2)
+            run_times, icond2_coords, grid_icond2_runs, station_nearest_grid = load_solar_sl_runs(
+                nwp_path=nwp_path,
+                station_ids=all_ids,
+                station_coords=station_coords,
+                features=icond2_features,
+                run_hours=run_hours,
+                next_n_grid=max_next_n_icond2,
+                n_workers=n_workers,
+                cutoff=run_cutoff,
+                freq_h=freq_h,
+                sub_hourly_fill=cfg.get("params", {}).get("sub_hourly_fill", "ffill"),
+            )
+        else:
+            logger.info("Loading ICON-D2 ML runs (next_n_grid=%d) …", max_next_n_icond2)
+            run_times, icond2_coords, grid_icond2_runs, station_nearest_grid = load_icond2_ml_runs(
+                nwp_path=nwp_path,
+                station_ids=all_ids,
+                station_coords=station_coords,
+                features=icond2_features,
+                run_hours=run_hours,
+                next_n_grid=max_next_n_icond2,
+                n_workers=n_workers,
+                cutoff=run_cutoff,
+            )
         R  = len(run_times)
         I2 = len(icond2_features)
         N_igrid = len(icond2_coords)
@@ -909,8 +967,41 @@ def main() -> None:
         logger.info("--preprocess-only done. Exiting.")
         return
 
+    # ── Sonnengeometrie als Stationskanal ────────────────────────────────────
+    # Wortgleich zu train_dcrnn.py. Ohne diesen Block tunte die HPO eine
+    # Architektur mit 12 Eingangskanaelen weniger als das Retrain — die
+    # gefundenen Hyperparameter passten zu einem anderen Modell.
+    # Die Geometrie ist ueber das ganze Fenster bekannt (Historie wie Prognose)
+    # und wird von den Ablationen B/C nicht genullt: sie ist kein
+    # Beobachtungskanal.
+    station_geo = None
+    if use_case == "solar" and dcrnn_cfg.get("solar_geometry_features", True):
+        from utils.solar import solar_geometry
+        geo_feature_names = list(dcrnn_cfg.get("geo_features") or [
+            "solar_zenith_cos", "solar_azimuth_sin", "solar_azimuth_cos",
+            "airmass", "dni_extra", "ghi_clearsky", "dni_clearsky", "dhi_clearsky",
+            "hour_sin", "hour_cos", "doy_sin", "doy_cos",
+        ])
+        G = len(geo_feature_names)
+        station_geo = np.zeros((len(timestamps), len(all_ids), G), dtype=np.float32)
+        for _j in range(len(all_ids)):
+            _g = solar_geometry(timestamps, float(lats[_j]), float(lons[_j]),
+                                float(alts[_j]), freq=freq)
+            station_geo[:, _j, :] = _g.reindex(timestamps)[geo_feature_names].to_numpy(np.float32)
+        _geo_scaler = StandardScaler()
+        _geo_scaler.fit(station_geo[:split_t].reshape(-1, G))
+        station_geo = _geo_scaler.transform(
+            station_geo.reshape(-1, G)).reshape(station_geo.shape).astype(np.float32)
+        logger.info("Sonnengeometrie: %d Kanaele je Station und Zeitschritt — %s",
+                    G, geo_feature_names)
+    _n_geo = 0 if station_geo is None else station_geo.shape[2]
+
     # ── Graph (fixed topology, built once) ───────────────────────────────────
     target_feat_idx   = measurement_cols.index(target_col)
+    # Alle Zielspalten, in der Reihenfolge von target_col. Einziel bleibt ein
+    # einelementiges Tupel, damit Sampler und Trainer bitgleich dieselben Formen
+    # bekommen wie bisher.
+    target_feat_idxs  = tuple(measurement_cols.index(c) for c in target_cols)
     train_station_indices = list(range(N_train))
 
     # HPO val stations: first n_val_stations from val_files.
@@ -947,7 +1038,8 @@ def main() -> None:
             icond2_features=icond2_features,
             ecmwf_features=ecmwf_features,
             measurement_features=measurement_cols,
-            target_col=target_col,
+            target_col=target_cols,
+            station_geo_features=_n_geo,
             n_train=N_train,
             n_val=N_val,
             checkpoint_path="models/_hpo_dcrnn_tmp.pt",
@@ -1183,12 +1275,31 @@ def main() -> None:
             trial_E2 = len(trial_e2_features)
         trial_sta_ecmwf   = station_ecmwf_nwp[:, :, e2_idx] if e2_idx else np.empty((station_ecmwf_nwp.shape[0], station_ecmwf_nwp.shape[1], 0), dtype=np.float32)
 
+        # ── NWP-Referenzspalte je Zielgroesse ────────────────────────────
+        # Wortgleich zu train_dcrnn.py, aber gegen die Feature-Auswahl DIESES
+        # Trials: 'ghi' -> 'ghi_nwp' usw., beim Wind ws_feat_idx_i2. Die
+        # Indizes zeigen in trial_i2_features und muessen deshalb nach der
+        # dir_in_deg-Kodierung bestimmt werden, die die Spalten umsortiert.
+        _ws_idx_i2 = find_ws_feat_idx(trial_i2_features)
+        _nwp_by_target = {"ghi": "ghi_nwp", "dhi": "dhi_nwp",
+                          "bhi": "bhi_nwp", "dni": "dni_nwp"}
+        nwp_ref_idxs = []
+        for _tc in target_cols:
+            _col = _nwp_by_target.get(_tc)
+            if _col is not None and _col in trial_i2_features:
+                nwp_ref_idxs.append(trial_i2_features.index(_col))
+            elif len(target_cols) == 1:
+                nwp_ref_idxs.append(_ws_idx_i2)
+            else:
+                nwp_ref_idxs.append(None)
+
         model_cfg = DCRNNConfig.from_yaml(
             trial_cfg,
             icond2_features=trial_i2_features,
             ecmwf_features=trial_e2_features,
             measurement_features=measurement_cols,
-            target_col=target_col,
+            target_col=target_cols,
+            station_geo_features=_n_geo,
             n_train=N_train,
             n_val=len(hpo_val_station_indices),
             checkpoint_path="models/_hpo_dcrnn_tmp.pt",
@@ -1225,13 +1336,31 @@ def main() -> None:
         # DCRNNConfig.attach_nwp_geometry().
         model_cfg.attach_nwp_geometry(_trial_graph)
 
+        # Einziel: int wie bisher, damit der Sampler bitgleich dieselben Formen
+        # liefert. Mehrziel: Tupel, dann kommt ground_truth als (N, T, n_targets).
+        _sampler_target = (target_feat_idx if len(target_feat_idxs) == 1
+                           else target_feat_idxs)
         sampler_obj = TrainingSampler(
             model_cfg, _trial_builder, _trial_graph,
-            target_feat_idx=target_feat_idx,
+            target_feat_idx=_sampler_target,
             station_coords=station_coords,
             hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
             neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
         )
+        sampler_obj.station_geo = station_geo   # vom Trainer an sample_* gereicht
+
+        # target_transform: nwp_residual — die HPO muss im selben Raum
+        # optimieren wie das Retrain, sonst tunt sie auf der Absolutgroesse und
+        # das Retrain laeuft im Residuum. residual_spec haengt an den
+        # FOLD-Skalern und wird deshalb unten je Fold gesetzt, nicht hier.
+        _residual_on = str(trial_cfg.get(
+            "target_transform", dcrnn_cfg.get("target_transform", "none"))).lower() == "nwp_residual"
+        if _residual_on:
+            _fehlt_ref = [c for c, i in zip(target_cols, nwp_ref_idxs) if i is None]
+            if _fehlt_ref:
+                raise ValueError(
+                    f"target_transform='nwp_residual', aber fuer {_fehlt_ref} gibt es "
+                    f"keine NWP-Referenzspalte in {trial_i2_features}.")
 
         fold_losses: list[float] = []
         for fold_idx, plan in enumerate(fold_plans):
@@ -1261,6 +1390,18 @@ def main() -> None:
             grid_icond2_runs_scaled = fold_i2_scaler.transform(
                 trial_grid_icond2.reshape(-1, trial_I2)
             ).reshape(R, trial_grid_icond2.shape[1], N_igrid, trial_I2)
+
+            # residual_spec traegt je Zielgroesse den NWP-Spaltenindex und die
+            # vier Skalenparameter, mit denen sich Messung und Prognose auf
+            # dieselbe Skala bringen lassen. Beide Skaler sind fold-spezifisch,
+            # also muss auch die Spezifikation je Fold neu gesetzt werden.
+            sampler_obj.residual_spec = {
+                "nwp_idx":   list(nwp_ref_idxs),
+                "meas_mean": [float(fold_meas_scaler.mean_[i]) for i in target_feat_idxs],
+                "meas_std":  [float(fold_meas_scaler.std_[i] + fold_meas_scaler.eps) for i in target_feat_idxs],
+                "nwp_mean":  [float(fold_i2_scaler.mean_[i]) for i in nwp_ref_idxs],
+                "nwp_std":   [float(fold_i2_scaler.std_[i] + fold_i2_scaler.eps) for i in nwp_ref_idxs],
+            } if _residual_on else None
 
             if trial_E2 > 0:
                 fold_e2_scaler = StandardScaler()
@@ -1321,8 +1462,13 @@ def main() -> None:
                 teacher_forcing_start=float(trial_cfg.get("teacher_forcing_ratio", 0.5)),
                 teacher_forcing_end=0.0,
                 writer=writer,
-                target_scale=float(fold_meas_scaler.std_[target_feat_idx] + fold_meas_scaler.eps),
-                target_mean=float(fold_meas_scaler.mean_[target_feat_idx]),
+                # Je Zielgroesse eine eigene Skala — ghi und dhi unterscheiden
+                # sich um rund Faktor zwei. Einziel gibt weiterhin skalare
+                # Werte heraus, damit sich am Wind-Pfad nichts aendert.
+                target_scale=_skalar_wenn_einziel(
+                    [float(fold_meas_scaler.std_[i] + fold_meas_scaler.eps) for i in target_feat_idxs]),
+                target_mean=_skalar_wenn_einziel(
+                    [float(fold_meas_scaler.mean_[i]) for i in target_feat_idxs]),
             )
             # Override checkpoint path in trainer
             trainer._ckpt_path = ckpt

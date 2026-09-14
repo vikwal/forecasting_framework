@@ -230,6 +230,8 @@ def evaluate(
     target_feat_idxs: tuple | None = None,   # alle Zielspalten; None = Einziel
     target_names: list[str] | None = None,   # Namen dazu, fuer die target-Spalte
     nwp_ref_idxs: list | None = None,        # NWP-Referenzspalte je Ziel (None = keine)
+    step_hours: float = 1.0,                 # Schrittweite (data.freq) in Stunden
+    meas_observed: np.ndarray | None = None, # (T, N_all, K) True = echte Messung
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
     Single-pass evaluation over all test run pairs.
@@ -242,12 +244,36 @@ def evaluate(
                    ist unveraendert, ohne die Spalte.
       raw_df     — per-prediction rows: station_id, run_time, valid_time, horizon, pred, gt, nwp_ref, pers_ref
                    (run_time / valid_time are NaT when timestamps=None)
+
+    step_hours
+        Schrittweite von ``data.freq`` in Stunden. ``horizon`` zaehlt SCHRITTE,
+        ``valid_time`` muss deshalb ``run_ts + (h+1) * step_hours`` sein. Mit
+        dem alten festen ``hours=h+1`` behaupteten die Solar-Records (30 min,
+        96 Leads) Gueltigkeitszeiten bis run+96 h statt run+48 h. Die Metriken
+        laufen ueber Array-Positionen und waren nie betroffen, jeder Join auf
+        ``valid_time`` und jede Tagesgang-Auswertung schon.
+
+    meas_observed
+        ``(T, N_all, K)``-Bool-Array, K in der Reihenfolge von
+        ``target_feat_idxs``: True, wo an dieser Zielposition eine echte
+        Messung stand. Muss VOR der Imputation gebildet werden — danach ist die
+        Information weg. Ist es gesetzt, fallen imputierte Zielpositionen
+        ELEMENTWEISE aus Metriken und ``raw_df``, nicht laufweise: bei 96 Leads
+        kostete ein einziger imputierter Schritt sonst 48 h Auswertung.
+        Modell, Persistenz und NWP sehen dieselbe Maske, sonst waeren die
+        Skill-Quotienten ueber verschiedene Mengen gerechnet. Gegenstueck zu
+        ``eval.exclude_imputed`` im CL-Pfad (``utils/eval.py``), das dort ueber
+        die Spalte ``<target>_observed`` genau dieselben Positionen entfernt —
+        erst damit werden DCRNN und TFT auf derselben Stichprobe gemessen.
     """
     preds_acc: dict[int, list[np.ndarray]] = defaultdict(list)
     gt_acc:    dict[int, list[np.ndarray]] = defaultdict(list)
     nwp_acc:   dict[int, list[np.ndarray]] = defaultdict(list)
     pers_acc:  dict[int, list[np.ndarray]] = defaultdict(list)
+    obs_acc:   dict[int, list[np.ndarray]] = defaultdict(list)
     raw_records: list[dict] = []
+    n_pos_total = 0      # Zielpositionen insgesamt
+    n_pos_kept  = 0      # davon nach der Imputationsmaske uebrig
 
     # Einziel bleibt der Normalfall: dann ist _idxs einelementig, die
     # Schleifen laufen einmal und die Ausgabe traegt keine target-Spalte.
@@ -262,6 +288,14 @@ def evaluate(
     _mean = [float(meas_scaler.mean_[i]) for i in _idxs]
     _std  = [float(meas_scaler.std_[i] + meas_scaler.eps) for i in _idxs]
     mean_ws, std_ws = _mean[0], _std[0]
+
+    # Die Maske ist nach Zielgroesse geordnet (K-Achse == Reihenfolge von
+    # _idxs), nicht nach Messspaltenindex: die Spaltenindizes verschieben sich
+    # durch encode_circular_measurements, die Reihenfolge der Ziele nicht.
+    if meas_observed is not None and meas_observed.shape[2] != len(_idxs):
+        raise ValueError(
+            f"meas_observed hat {meas_observed.shape[2]} Zielkanaele, erwartet "
+            f"{len(_idxs)} (eine je Zielgroesse, in derselben Reihenfolge).")
 
     def _to_phys(arr: np.ndarray, k: int = 0) -> np.ndarray:
         return arr * _std[k] + _mean[k]
@@ -346,6 +380,11 @@ def evaluate(
                 gt_a = meas_raw[
                     t_run_abs:t_run_abs + H_fore, :, fidx
                 ][:, val_station_indices].T                      # (N_val, H_fore)
+                obs_a = (
+                    meas_observed[t_run_abs:t_run_abs + H_fore, :, k
+                                  ][:, val_station_indices].T
+                    if meas_observed is not None else None
+                )                                                # (N_val, H_fore) bool
                 # Die NWP-Referenz zeigt auf EINE Spalte des Gitters
                 # (ws_feat_idx_i2). Fuer weitere Zielgroessen gibt es sie nicht,
                 # ohne dass der Aufrufer sie benennt — dann bleibt skill_nwp NaN,
@@ -359,12 +398,24 @@ def evaluate(
                     gt_acc[key].append(gt_a[i])
                     nwp_acc[key].append(nwp_h)
                     pers_acc[key].append(pers_h)
+                    if obs_a is not None:
+                        obs_acc[key].append(obs_a[i])
                     sid = all_ids[gidx]
+                    n_pos_total += H_fore
                     for h in range(H_fore):
+                        # Imputierte Zielposition: weder in die Metriken noch in
+                        # raw_df. Die Zeile ganz wegzulassen ist hier die sichere
+                        # Variante — ein nachgelagertes Skript, das ein Flag nicht
+                        # kennt, wuerde sonst wieder ueber die volle Menge mitteln.
+                        if obs_a is not None and not obs_a[i, h]:
+                            continue
+                        n_pos_kept += 1
                         rec = {
                             "station_id": sid,
                             "run_time":   run_ts,
-                            "valid_time": (run_ts + pd.Timedelta(hours=h + 1)) if run_ts is not None else None,
+                            # horizon zaehlt SCHRITTE, nicht Stunden — bei 30 min
+                            # ist Schritt 96 der Zeitpunkt run+48 h, nicht run+96 h.
+                            "valid_time": (run_ts + pd.Timedelta(hours=(h + 1) * step_hours)) if run_ts is not None else None,
                             "horizon":    h + 1,
                             "pred":       float(pred_i[h]),
                             "gt":         float(gt_a[i, h]),
@@ -374,6 +425,15 @@ def evaluate(
                         if _multi:
                             rec["target"] = _names[k] or f"target_{k}"
                         raw_records.append(rec)
+
+    if meas_observed is not None:
+        logger.info(
+            "eval.exclude_imputed: %d von %d Zielpositionen bleiben (%.2f %%), "
+            "%d imputierte entfernt — elementweise, Modell und Baselines ueber "
+            "derselben Menge.",
+            n_pos_kept, n_pos_total,
+            100.0 * n_pos_kept / max(n_pos_total, 1), n_pos_total - n_pos_kept,
+        )
 
     logger.info("Computing per-station metrics …")
     records = []
@@ -385,7 +445,13 @@ def evaluate(
         n_all  = np.concatenate(nwp_acc[key])
         ps_all = np.concatenate(pers_acc[key])
 
-        valid = ~(np.isnan(p_all) | np.isnan(g_all))
+        # Eine gemeinsame Imputationsmaske fuer Modell, Persistenz und NWP.
+        # Wuerde sie nur auf das Modell wirken, stuenden im Skill-Quotienten
+        # Zaehler und Nenner ueber verschiedenen Stichproben.
+        obs_all = (np.concatenate(obs_acc[key]) if obs_acc.get(key)
+                   else np.ones_like(g_all, dtype=bool))
+
+        valid = ~(np.isnan(p_all) | np.isnan(g_all)) & obs_all
         if valid.sum() < 2:
             logger.warning(
                 "Station %s: too few valid samples (%d), skipping",
@@ -398,14 +464,14 @@ def evaluate(
         rmse = float(math.sqrt(mean_squared_error(g_v, p_v)))
         mae  = float(mean_absolute_error(g_v, p_v))
 
-        valid_pers = ~(np.isnan(ps_all) | np.isnan(g_all))
+        valid_pers = ~(np.isnan(ps_all) | np.isnan(g_all)) & obs_all
         if valid_pers.sum() >= 2:
             rmse_pers = float(math.sqrt(mean_squared_error(g_all[valid_pers], ps_all[valid_pers])))
             skill     = (1.0 - rmse / rmse_pers) if rmse_pers > 0 else float("nan")
         else:
             skill = float("nan")
 
-        valid_nwp = ~(np.isnan(n_all) | np.isnan(g_all))
+        valid_nwp = ~(np.isnan(n_all) | np.isnan(g_all)) & obs_all
         if valid_nwp.sum() >= 2:
             rmse_nwp  = float(math.sqrt(mean_squared_error(g_all[valid_nwp], n_all[valid_nwp])))
             skill_nwp = (1.0 - rmse / rmse_nwp) if rmse_nwp > 0 else float("nan")

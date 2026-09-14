@@ -288,6 +288,24 @@ def main() -> None:
     )
     T = len(timestamps)
 
+    # Beobachtungsflag je Zielposition, VOR jeder Imputation — danach ist die
+    # Information weg (impute_meas_raw_solar schreibt Modellwerte und
+    # Nacht-Nullen in dieselben Zellen). Gegenstueck zur Spalte
+    # '<target>_observed' im CL-Pfad; erst damit werden DCRNN und TFT auf
+    # derselben Stichprobe gemessen. Die K-Achse folgt target_cols, nicht den
+    # Messspaltenindizes — die verschieben sich durch die Zirkularkodierung.
+    exclude_imputed = bool(cfg.get("eval", {}).get("exclude_imputed", False))
+    meas_observed = None
+    if exclude_imputed:
+        _obs_cols = [measurement_cols.index(c) for c in target_cols]
+        meas_observed = ~np.isnan(meas_raw[:, :, _obs_cols])
+        logger.info(
+            "eval.exclude_imputed: Beobachtungsmaske fuer %s gesichert — "
+            "%d von %d Zielpositionen sind echte Messungen (%.2f %%).",
+            target_cols, int(meas_observed.sum()), meas_observed.size,
+            100.0 * meas_observed.sum() / max(meas_observed.size, 1),
+        )
+
     # Imputation (if paths present) — wind_speed gaps come from the TFT
     # closing model's 'imputed' column under interpol_path
     # (docs/imputation_tft_switch.md), which replaced both Regression-Kriging
@@ -563,9 +581,23 @@ def main() -> None:
     # ── Test run pairs ───────────────────────────────────────────────────
     logger.info("Identifying test run pairs …")
     ts_lookup = pd.Series(np.arange(T), index=timestamps)
-    _meas_nan_any = np.isnan(meas_raw[:, :, 0]).any(axis=1)
-    
+    # ALLE Messspalten pruefen, nicht nur Spalte 0 — identisch zu
+    # train_dcrnn.py. Vorher kam ein NaN in einer Nebenspalte (dhi,
+    # wind_direction) in ein Testfenster, waehrend das Training denselben Lauf
+    # verworfen haette: Training und Auswertung liefen auf verschiedenen
+    # Laufmengen.
+    _meas_nan_any = np.isnan(meas_raw).any(axis=(1, 2))
+
+    # Gegenstueck zum Laufachsen-Filter in train_dcrnn.py. Seit
+    # target_transform='nwp_residual' ist das scharf: ein NaN-Gitterpunkt geht
+    # ueber _nwp_in_meas_scale in JEDE Station des Messhistorien-Kanals, und
+    # evaluate() filtert das anschliessend kommentarlos ueber
+    # ~(isnan(p)|isnan(g)) weg — die Stichprobe schrumpfte ungeloggt.
+    grid_nan_by_run = np.isnan(grid_icond2_runs_raw).any(axis=(1, 2, 3))
+
     test_run_pairs: list[tuple[int, int, int]] = []
+    skipped_meas_nan = 0
+    skipped_grid_nan = 0
     for r_curr in range(R):
         t_run = run_times[r_curr]
         if t_run < split_time: continue
@@ -588,14 +620,18 @@ def main() -> None:
         diffs_s = np.abs((run_times - t_hist_target).total_seconds().values)
         r_hist  = int(np.argmin(diffs_s))
         if diffs_s[r_hist] > 3 * 3600: continue
-        if _meas_nan_any[t_run_abs - H_hist : t_run_abs + H_fore].any(): continue
-        
+        if _meas_nan_any[t_run_abs - H_hist : t_run_abs + H_fore].any():
+            skipped_meas_nan += 1; continue
+        if grid_nan_by_run[r_curr] or grid_nan_by_run[r_hist]:
+            skipped_grid_nan += 1; continue
+
         test_run_pairs.append((r_curr, r_hist, t_run_abs))
 
     if not test_run_pairs:
         logger.error("No test run pairs found!")
         sys.exit(1)
-    logger.info("Test run pairs: %d", len(test_run_pairs))
+    logger.info("Test run pairs: %d  (verworfen — Mess-NaN: %d, Gitter-NaN: %d)",
+                len(test_run_pairs), skipped_meas_nan, skipped_grid_nan)
 
     # ── Model & Graph ────────────────────────────────────────────────────
     model_cfg = DCRNNConfig.from_yaml(
@@ -673,6 +709,8 @@ def main() -> None:
         interpol_meas=interpol_meas_scaled,
         hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
         neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
+        step_hours=freq_h,
+        meas_observed=meas_observed,
     )
 
     # ── Save results ─────────────────────────────────────────────────────
@@ -692,11 +730,23 @@ def main() -> None:
         raw_df.to_parquet(raw_path, index=False)
         logger.info("Raw predictions saved → %s", raw_path)
 
-    # Summary
+    # Summary — je Zielgroesse getrennt. Ueber ghi und dhi gemittelt beschreibt
+    # die Zahl keine der beiden Groessen, und die Einheit haengt am Ziel: m/s
+    # nur beim Wind, W/m² bei den Solar-Strahlungsgroessen.
+    _einheit = {"wind_speed": "m/s", "power": "kW",
+                "ghi": "W/m²", "dhi": "W/m²", "bhi": "W/m²", "dni": "W/m²"}
     if not results_df.empty:
-        logger.info("  Overall: R²=%.3f, RMSE=%.3f m/s, MAE=%.3f m/s, Skill_NWP=%.3f",
-                    results_df["r2"].mean(), results_df["rmse"].mean(),
-                    results_df["mae"].mean(), results_df["skill_nwp"].mean(skipna=True))
+        if "target" in results_df.columns:
+            for _tgt, _sub in results_df.groupby("target"):
+                _u = _einheit.get(str(_tgt), "")
+                logger.info("  Overall [%s]: R²=%.3f, RMSE=%.3f %s, MAE=%.3f %s, Skill_NWP=%.3f",
+                            _tgt, _sub["r2"].mean(), _sub["rmse"].mean(), _u,
+                            _sub["mae"].mean(), _u, _sub["skill_nwp"].mean(skipna=True))
+        else:
+            _u = _einheit.get(str(target_col), "")
+            logger.info("  Overall [%s]: R²=%.3f, RMSE=%.3f %s, MAE=%.3f %s, Skill_NWP=%.3f",
+                        target_col, results_df["r2"].mean(), results_df["rmse"].mean(), _u,
+                        results_df["mae"].mean(), _u, results_df["skill_nwp"].mean(skipna=True))
 
 if __name__ == "__main__":
     main()

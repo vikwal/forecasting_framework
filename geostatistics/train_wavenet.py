@@ -831,6 +831,7 @@ def main() -> None:
             target_mean     = target_mean,
             target_feat_idx = target_feat_idx,
             nwp_ws_feat_idx = nwp_ws_feat_idx,
+            step_hours      = freq_h,
         )
         cols = ["mae", "rmse", "r2", "skill", "skill_nwp"]
         tbl  = eval_df.set_index("station_id")[cols]

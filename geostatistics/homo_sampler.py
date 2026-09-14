@@ -570,6 +570,7 @@ def evaluate_homo_model(
     nwp_ws_feat_idx: int = 0,       # index of wind_speed feature in I2 dim
     max_pairs: int | None = None,   # cap number of val run pairs (None = all)
     timestamps: "pd.DatetimeIndex | None" = None,
+    step_hours: float = 1.0,        # data.freq in Stunden
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """Per-station evaluation on validation run pairs.
 
@@ -585,6 +586,10 @@ def evaluate_homo_model(
 
     skill     = 1 − RMSE_model / RMSE_persistence
     skill_nwp = 1 − RMSE_model / RMSE_{nearest ICON-D2 grid point}
+
+    step_hours: Schrittweite von data.freq in Stunden. ``horizon`` zaehlt
+    SCHRITTE — ohne den Faktor trug ein 30-min-Lauf mit 96 Leads
+    Gueltigkeitszeiten bis run+96 h statt run+48 h.
     """
     import pandas as pd
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -642,7 +647,7 @@ def evaluate_homo_model(
                 raw_records.append({
                     "station_id": sid,
                     "run_time":   run_ts,
-                    "valid_time": (run_ts + pd.Timedelta(hours=h + 1)) if run_ts is not None else None,
+                    "valid_time": (run_ts + pd.Timedelta(hours=(h + 1) * step_hours)) if run_ts is not None else None,
                     "horizon":    h + 1,
                     "pred":       float(pred_phys[i, h]),
                     "gt":         float(gt_phys[i, h]),

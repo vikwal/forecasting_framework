@@ -540,6 +540,25 @@ def main() -> None:
     T = len(timestamps)
     logger.info("Timestamps: %d  (%s … %s)", T, timestamps[0], timestamps[-1])
 
+    # Beobachtungsflag je Zielposition, VOR jeder Imputation. Danach ist die
+    # Information verloren: impute_meas_raw_solar schreibt Modellwerte und
+    # Nacht-Nullen in dieselben Zellen, ein NaN-Test hinterher findet sie nicht
+    # mehr. Gegenstueck zur Spalte '<target>_observed' im CL-Pfad
+    # (utils/imputation.impute_solar_measurements), die dort genauso vor dem
+    # Fuellen gesetzt wird. Die K-Achse folgt target_cols, nicht den
+    # Messspaltenindizes — die verschieben sich durch die Zirkularkodierung.
+    exclude_imputed = bool(cfg.get("eval", {}).get("exclude_imputed", False))
+    meas_observed = None
+    if exclude_imputed:
+        _obs_cols = [measurement_cols.index(c) for c in target_cols]
+        meas_observed = ~np.isnan(meas_raw[:, :, _obs_cols])
+        logger.info(
+            "eval.exclude_imputed: Beobachtungsmaske fuer %s gesichert — "
+            "%d von %d Zielpositionen sind echte Messungen (%.2f %%).",
+            target_cols, int(meas_observed.sum()), meas_observed.size,
+            100.0 * meas_observed.sum() / max(meas_observed.size, 1),
+        )
+
     interpolate_history = dcrnn_cfg.get("interpolate_history", False)
     if interpolate_history:
         raise NotImplementedError(
@@ -663,6 +682,8 @@ def main() -> None:
             bad_set  = set(bad_ids)
             keep_idx = [i for i, sid in enumerate(all_ids) if sid not in bad_set]
             meas_raw = meas_raw[:, keep_idx, :]
+            if meas_observed is not None:
+                meas_observed = meas_observed[:, keep_idx, :]
             all_ids  = [all_ids[i] for i in keep_idx]
             train_ids = [sid for sid in train_ids if sid not in bad_set]
             val_ids   = [sid for sid in val_ids   if sid not in bad_set]
@@ -1334,12 +1355,26 @@ def main() -> None:
             station_k_nearest_ecmwf=station_k_nearest_ecmwf,
             hist_wind_available=dcrnn_cfg.get("hist_wind_available", False),
             neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
+            step_hours=freq_h,
+            meas_observed=meas_observed,
         )
         cols = ["mae", "rmse", "r2", "skill", "skill_nwp"]
-        tbl  = eval_df.set_index("station_id")[cols]
-        mean_row = tbl.mean().to_frame().T
-        mean_row.index = ["MEAN"]
-        tbl = pd.concat([tbl, mean_row])
+        # Bei mehreren Zielgroessen fuehrt eval_df eine Zeile je (Station, Ziel).
+        # Ohne die target-Spalte im Index stuende jede Station zweimal ohne
+        # Kennzeichnung da, und die MEAN-Zeile mittelte ghi und dhi zusammen zu
+        # einer Zahl, die keine der beiden Groessen beschreibt. Deshalb: Index um
+        # target erweitern und je Ziel eine eigene MEAN-Zeile.
+        if "target" in eval_df.columns:
+            tbl = eval_df.set_index(["target", "station_id"])[cols]
+            means = eval_df.groupby("target")[cols].mean()
+            means.index = pd.MultiIndex.from_arrays(
+                [means.index, ["MEAN"] * len(means)], names=tbl.index.names)
+            tbl = pd.concat([tbl, means]).sort_index(level=0, sort_remaining=False)
+        else:
+            tbl  = eval_df.set_index("station_id")[cols]
+            mean_row = tbl.mean().to_frame().T
+            mean_row.index = ["MEAN"]
+            tbl = pd.concat([tbl, mean_row])
         logger.info("Per-station evaluation:\n%s", tbl.to_string(float_format="%.4f"))
 
     # ------------------------------------------------------------------

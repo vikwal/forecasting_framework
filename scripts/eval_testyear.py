@@ -40,6 +40,18 @@ COLORS = {"DCRNN GRID+HIST": "#1f77b4", "MTGNN GRID+HIST": "#d62728", "MTGNN GRI
           "DCRNN GRID": "#2ca02c", "DCRNN IDW (D')": "#9467bd",
           "ICON-D2": "#555555", "Persistenz": "#999999"}
 COLS = ["station_id", "run_time", "valid_time", "horizon", "pred", "gt", "nwp_ref", "pers_ref"]
+# Mehrziel-Laeufe (Solar: ghi + dhi) tragen zusaetzlich 'target'. Ohne die
+# Spalte landen ghi- und dhi-Zeilen in derselben Gruppe und werden zu einem
+# gepoolten RMSE verrechnet, der keine der beiden Groessen beschreibt. Die
+# Wind-Parquets haben sie nicht — dort bleibt alles wie bisher.
+TARGET_COL = "target"
+
+
+def _cols_of(p):
+    """Spaltenliste der Datei, um 'target' ergaenzt, wenn vorhanden."""
+    import pyarrow.parquet as pq
+    have = set(pq.ParquetFile(p).schema.names)
+    return COLS + ([TARGET_COL] if TARGET_COL in have else [])
 
 
 def rmse(a, b):
@@ -48,9 +60,18 @@ def rmse(a, b):
 
 def grouped_rmse(df, by, pred_col="pred", obs_col="gt"):
     """RMSE je Gruppe, ohne groupby.apply — laeuft auf allen pandas-Versionen
-    (include_groups gibt es erst ab 2.2) und ist deutlich schneller."""
+    (include_groups gibt es erst ab 2.2) und ist deutlich schneller.
+
+    ``by`` darf eine Spalte oder eine Liste von Spalten sein; mit Liste ist der
+    Ergebnisindex ein MultiIndex (z. B. station_id x target).
+    """
     e2 = (df[pred_col].to_numpy() - df[obs_col].to_numpy()) ** 2
-    key = df[by] if isinstance(by, str) else by
+    if isinstance(by, str):
+        key = df[by]
+    elif isinstance(by, (list, tuple)):
+        key = [df[c] for c in by]
+    else:
+        key = by
     return np.sqrt(pd.Series(e2, index=df.index).groupby(key, observed=True).mean())
 
 
@@ -59,12 +80,19 @@ def load(arm, fold, mask):
     p = RAW / f"testyear_{arm}_fold{fold}_raw.parquet"
     if not p.exists():
         return None
-    df = pd.read_parquet(p, columns=COLS)
+    df = pd.read_parquet(p, columns=_cols_of(p))
     df["station_id"] = df["station_id"].map(norm_station)
     df = df.loc[~_lookup_imputed(df, mask)].copy()
     df["arm"] = ARMS[arm]
     df["fold"] = fold
     return df
+
+
+def _targets_of(df):
+    """Zielgroessen des Frames; ``[None]`` beim Einziel-Fall (Wind)."""
+    if TARGET_COL not in df.columns:
+        return [None]
+    return sorted(df[TARGET_COL].dropna().unique())
 
 
 def main():
@@ -83,9 +111,40 @@ def main():
     print(f"[i] {len(sids)} Stationen, baue Imputationsmaske …", flush=True)
     mask = build_imputation_mask(sorted(sids), STATION_RAW_DIR)
 
+    geladen = {(a, f): load(a, f, mask) for a, f in have}
+
+    # Mehrziel: die gesamte Auswertung je Zielgroesse getrennt. ghi und dhi
+    # unterscheiden sich um rund Faktor zwei — in einer Gruppe gemittelt
+    # beschreibt der RMSE keine von beiden. Einziel (Wind) laeuft genau einmal
+    # durch und schreibt dieselben Dateinamen wie bisher.
+    ziele = _targets_of(next(iter(geladen.values())))
+    for tgt in ziele:
+        sfx = "" if tgt is None else f"_{tgt}"
+        figdir = FIGS if tgt is None else FIGS / str(tgt)
+        figdir.mkdir(parents=True, exist_ok=True)
+        if tgt is not None:
+            print(f"\n[i] === Zielgroesse '{tgt}' ===", flush=True)
+        _analyse({k: (v if tgt is None else v[v[TARGET_COL] == tgt])
+                  for k, v in geladen.items()}, sfx, figdir)
+    print(f"\n[i] Abbildungen → {FIGS}/")
+
+
+def _analyse(geladen, sfx, figdir):
+    """Tabellen und Abbildungen fuer EINE Zielgroesse."""
+    # _save() liest das Ausgabeverzeichnis aus dem Modulglobal. Statt zehn
+    # Aufrufstellen in make_figures() um einen Parameter zu erweitern, wird es
+    # hier umgesetzt und im finally zurueckgestellt.
+    global FIGS
+    _figs_alt, FIGS = FIGS, figdir
+    try:
+        _analyse_eine(geladen, sfx)
+    finally:
+        FIGS = _figs_alt
+
+
+def _analyse_eine(geladen, sfx):
     frames, per_station, refs = [], {}, {}
-    for a, f in have:
-        d = load(a, f, mask)
+    for (a, f), d in geladen.items():
         g = grouped_rmse(d, "station_id")
         per_station[(ARMS[a], f)] = g
         frames.append(d)
@@ -110,7 +169,7 @@ def main():
         rows.append(dict(arm=rname, **{f"fold{f}": refs[f][rname].mean() for f in refs},
                          mean=float(np.mean(vals))))
     t1 = pd.DataFrame(rows).sort_values("mean")
-    t1.to_csv(OUT / "testyear_overview.csv", index=False)
+    t1.to_csv(OUT / f"testyear_overview{sfx}.csv", index=False)
     print("\n=== Gefilterte Stationsmittel-RMSE, Testjahr ===")
     print(t1.round(4).to_string(index=False))
 
@@ -131,17 +190,16 @@ def main():
         t2 = t2.sort_values("p_raw").reset_index(drop=True)
         m = len(t2)
         t2["p_holm"] = np.maximum.accumulate([(m - i) * p for i, p in enumerate(t2["p_raw"])]).clip(max=1.0)
-        t2.to_csv(OUT / "testyear_wilcoxon.csv", index=False)
+        t2.to_csv(OUT / f"testyear_wilcoxon{sfx}.csv", index=False)
         print("\n=== Wilcoxon zwischen den Armen (Holm) ===")
         print(t2.round(6).to_string(index=False))
 
     # per-Station persistieren
     pd.concat([pd.DataFrame({"arm": k[0], "fold": k[1], "station_id": v.index, "rmse": v.values})
                for k, v in per_station.items()], ignore_index=True).to_csv(
-        OUT / "testyear_per_station.csv", index=False)
+        OUT / f"testyear_per_station{sfx}.csv", index=False)
 
     make_figures(big, t1, t2, per_station, refs, labels)
-    print(f"\n[i] Abbildungen → {FIGS}/")
 
 
 def _save(fig, name):

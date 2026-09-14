@@ -507,6 +507,7 @@ def main() -> None:
         target_feat_idx = target_feat_idx,
         nwp_ws_feat_idx = nwp_ws_feat_idx,
         timestamps      = timestamps,
+        step_hours      = freq_h,
     )
 
     # ── Save per-station CSV ──────────────────────────────────────────────────

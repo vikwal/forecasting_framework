@@ -142,7 +142,15 @@ def evaluate_nwp_baselines(
                                              # (geodesic — from load_icond2_ml_runs itself)
     timestamps:        pd.DatetimeIndex,
     F_h:               int,
+    step_hours:        float = 1.0,   # data.freq in Stunden
 ):
+    """``horizon`` zaehlt SCHRITTE, deshalb ``run_ts + (h+1) * step_hours``.
+
+    Mit dem frueheren festen ``hours=h+1`` trugen die Solar-Records (30 min,
+    96 Leads) Gueltigkeitszeiten bis run+96 h statt run+48 h. Die Metriken
+    laufen ueber Array-Positionen und blieben richtig, jeder Join auf
+    ``valid_time`` war es nicht.
+    """
     N_val     = len(val_ids)
     has_ecmwf = station_ecmwf_nwp is not None
 
@@ -190,7 +198,7 @@ def evaluate_nwp_baselines(
                 i2_recs.append({
                     "station_id": sid,
                     "run_time":   run_ts,
-                    "valid_time": run_ts + pd.Timedelta(hours=h + 1),
+                    "valid_time": run_ts + pd.Timedelta(hours=(h + 1) * step_hours),
                     "horizon":    h + 1,
                     "pred":       float(i2_fc[i, h]),
                     "gt":         float(gt_phys[i, h]),
@@ -207,7 +215,7 @@ def evaluate_nwp_baselines(
                     e2_recs.append({
                         "station_id": sid,
                         "run_time":   run_ts,
-                        "valid_time": run_ts + pd.Timedelta(hours=h + 1),
+                        "valid_time": run_ts + pd.Timedelta(hours=(h + 1) * step_hours),
                         "horizon":    h + 1,
                         "pred":       float(e2_fc[i, h]),
                         "gt":         float(gt_phys[i, h]),
@@ -483,6 +491,7 @@ def main() -> None:
         nearest_i2         = nearest_i2,
         timestamps         = timestamps,
         F_h                = F_h,
+        step_hours         = freq_h,
     )
 
     # ── Save ─────────────────────────────────────────────────────────────────
