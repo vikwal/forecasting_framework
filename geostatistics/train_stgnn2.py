@@ -612,8 +612,39 @@ def load_icond2_ml_runs(
 # ECMWF loader (absolute time — latest-run merged per valid_time)
 # ---------------------------------------------------------------------------
 
-def _reindex_nwp_to_grid(series: "pd.Series", timestamps: "pd.DatetimeIndex") -> np.ndarray:
+def _ist_akkumuliertes_ecmwf_feature(feat: str) -> bool:
+    """True fuer ECMWF-Felder, die ein Intervall beschreiben statt eines Zustands.
+
+    Die Klassifikation kommt aus utils.solar_ecmwf, damit GNN- und CL-Pfad
+    dieselbe Liste benutzen. Wind-Features (u/v, wind_speed) sind Momentanwerte
+    und fallen hier immer auf False.
+    """
+    if not isinstance(feat, str) or not feat.startswith("ecmwf_"):
+        return False
+    try:
+        from utils.solar_ecmwf import (ECMWF_ACCUMULATED_COLS, _DERIVED_FROM_ECMWF,
+                                       ECMWF_GEOMETRY_DERIVED)
+    except Exception:
+        return False
+    if feat in _DERIVED_FROM_ECMWF or feat in ECMWF_GEOMETRY_DERIVED:
+        return True
+    return feat[len("ecmwf_"):] in ECMWF_ACCUMULATED_COLS
+
+
+def _reindex_nwp_to_grid(series: "pd.Series", timestamps: "pd.DatetimeIndex",
+                         akkumuliert: bool = False) -> np.ndarray:
     """NWP-Reihe auf die Zielzeitachse bringen, auch wenn die feiner ist.
+
+    ``akkumuliert=True`` verschiebt die Reihe zuvor um ein Quellintervall nach
+    vorn. Ein akkumuliertes Feld mit ``valid_time = V`` beschreibt das Intervall
+    ``(V-1h, V]``; ein linksbuendig gelabelter Zielzeitstempel ``T`` braucht
+    aber ``[T, T+1h)``, also den Wert von ``V = T+1h``. Das ist dieselbe
+    Unterscheidung, die utils.solar_ecmwf.merge_ecmwf im CL-Pfad ueber
+    ``lead = floor(h)+1`` gegen ``floor(h)`` trifft.
+
+    Ohne sie liegt die Strahlung eine Stunde zu frueh. Nachgemessen an
+    Station 00183 gegen die Messung (Apr-Sep 2024, 30 min): das RMSE-Minimum
+    liegt bei Verschiebung -60 min mit 84.6 W/m², ungeschoben sind es 111.0.
 
     ECMWF-HRES liegt stuendlich vor. Bei stuendlicher Zielachse (Wind) trifft
     ``reindex`` jeden Zeitpunkt und das Ergebnis ist unveraendert. Bei
@@ -628,10 +659,13 @@ def _reindex_nwp_to_grid(series: "pd.Series", timestamps: "pd.DatetimeIndex") ->
     Das ``limit`` wird aus den beiden Rastern bestimmt, nicht gesetzt: bei
     gleichem Raster ist es 0 und die Funktion ist ein reines ``reindex``.
     """
-    werte = series.reindex(timestamps)
     if len(series.index) < 2 or len(timestamps) < 2:
-        return werte.values
+        return series.reindex(timestamps).values
     src_step = pd.Series(series.index).diff().dropna().min()
+    if akkumuliert and pd.notna(src_step):
+        series = series.copy()
+        series.index = series.index - src_step
+    werte = series.reindex(timestamps)
     dst_step = pd.Series(timestamps).diff().dropna().min()
     if pd.isna(src_step) or pd.isna(dst_step) or dst_step >= src_step:
         return werte.values
@@ -1018,7 +1052,9 @@ def load_ecmwf_parquet_at_stations_and_grid(
             gdf = gdf.set_index("valid_time").sort_index()
             for fi, feat in enumerate(features):
                 if feat in gdf.columns:
-                    grid_nwp[:, gi, fi] = _reindex_nwp_to_grid(gdf[feat], timestamps)
+                    grid_nwp[:, gi, fi] = _reindex_nwp_to_grid(
+                        gdf[feat], timestamps,
+                        akkumuliert=_ist_akkumuliertes_ecmwf_feature(feat))
     else:
         df["grid_key"] = list(zip(df["grid_lat"].round(5), df["grid_lon"].round(5)))
         needed_keys_round = {(round(float(k[0]), 5), round(float(k[1]), 5)) for k in grid_keys}
@@ -1035,7 +1071,9 @@ def load_ecmwf_parquet_at_stations_and_grid(
             gdf = gdf.set_index("valid_time").sort_index()
             for fi, feat in enumerate(features):
                 if feat in gdf.columns:
-                    grid_nwp[:, gi, fi] = _reindex_nwp_to_grid(gdf[feat], timestamps)
+                    grid_nwp[:, gi, fi] = _reindex_nwp_to_grid(
+                        gdf[feat], timestamps,
+                        akkumuliert=_ist_akkumuliertes_ecmwf_feature(feat))
 
     for si in tqdm(range(Ns), desc="Filling ECMWF Station Tensors"):
         nearest_key = station_nearest[si][0]
