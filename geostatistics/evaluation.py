@@ -99,9 +99,12 @@ def build_eval_batch(
 
     if station_k_nearest_grid is not None:
         # k nearest: (N_all, k) → features (N_all, 48, k*I2) matching training
+        # L = Leads je Lauf, nicht fest 48 — dieselbe Falle wie im Sampler
+        # (stuendlich 48, 30 min 96), s. 88eae9d.
+        L_i2    = grid_icond2_runs_scaled.shape[1]
         k_idx   = station_k_nearest_grid[all_global]             # (N_all, k)
-        i2_hist = grid_icond2_runs_scaled[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(N_all, 48, -1)
-        i2_curr = grid_icond2_runs_scaled[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(N_all, 48, -1)
+        i2_hist = grid_icond2_runs_scaled[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(N_all, L_i2, -1)
+        i2_curr = grid_icond2_runs_scaled[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(N_all, L_i2, -1)
     else:
         nearest = station_nearest_grid[all_global]
         i2_hist = grid_icond2_runs_scaled[r_hist, :, nearest, :]    # (N_all, 48, I2)
