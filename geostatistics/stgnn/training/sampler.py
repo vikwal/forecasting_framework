@@ -263,10 +263,15 @@ class TrainingSampler:
 
         # ICON-D2: fancy indexing puts advanced dim first → (N_sub, 48, [k*]I2)
         if station_k_nearest_grid is not None:
-            # k nearest grid points: (N_sub, k) → (N_sub, k, 48, I2) → (N_sub, 48, k*I2)
+            # k nearest grid points: (N_sub, k) → (N_sub, k, L, I2) → (N_sub, L, k*I2)
+            # L = Leads je Lauf, NICHT fest 48: bei stuendlichem Raster sind es 48,
+            # bei 30 min 96. Eine feste 48 haette die ueberzaehligen Schritte in die
+            # Feature-Achse gefaltet — der Zeitachsenfehler faellt erst beim
+            # Konkatenieren mit den ECMWF-Kanaelen auf, und auch nur dann.
+            L_i2    = grid_icond2_runs.shape[1]
             k_idx   = station_k_nearest_grid[all_global]             # (N_sub, k)
-            i2_hist = grid_icond2_runs[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
-            i2_curr = grid_icond2_runs[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
+            i2_hist = grid_icond2_runs[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), L_i2, -1)
+            i2_curr = grid_icond2_runs[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), L_i2, -1)
         else:
             nearest_for_sub = station_nearest_grid[all_global]
             i2_hist = grid_icond2_runs[r_hist, :, nearest_for_sub, :]   # (N_sub, 48, I2)
@@ -380,8 +385,9 @@ class TrainingSampler:
         # ICON-D2: fancy indexing puts advanced dim first → (N_all, 48, [k*]I2)
         if station_k_nearest_grid is not None:
             k_idx   = station_k_nearest_grid[all_global]             # (N_all, k)
-            i2_hist = grid_icond2_runs[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
-            i2_curr = grid_icond2_runs[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), 48, -1)
+            L_i2    = grid_icond2_runs.shape[1]   # Leads je Lauf, s. sample_train
+            i2_hist = grid_icond2_runs[r_hist, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), L_i2, -1)
+            i2_curr = grid_icond2_runs[r_curr, :, k_idx, :].transpose(0, 2, 1, 3).reshape(len(all_global), L_i2, -1)
         else:
             nearest_for_all = station_nearest_grid[all_global]
             i2_hist = grid_icond2_runs[r_hist, :, nearest_for_all, :]   # (N_all, 48, I2)
