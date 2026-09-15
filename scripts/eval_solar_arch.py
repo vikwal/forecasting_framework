@@ -327,6 +327,21 @@ def rmse_je_station(df: pd.DataFrame, pred_spalte: str = "pred") -> pd.Series:
                    .groupby([df["target"], df["station_id"]], observed=True).mean())
 
 
+def r2_je_station(df: pd.DataFrame, pred_spalte: str = "pred") -> pd.Series:
+    """Bestimmtheitsmass je (Zielgroesse, Station) auf der Absolutskala.
+
+    Bezugsgroesse ist das stationseigene Mittel der Messung, passend zur
+    RMSE-Aggregation (erst je Station, dann ueber die Stationen mitteln). Ohne
+    ``groupby.apply`` gerechnet, damit es auch auf aelteren pandas laeuft.
+    """
+    key = [df["target"], df["station_id"]]
+    y, p = df["gt"], df[pred_spalte]
+    ss_res = ((y - p) ** 2).groupby(key, observed=True).sum()
+    ss_tot = ((y - y.groupby(key, observed=True).transform("mean")) ** 2
+              ).groupby(key, observed=True).sum()
+    return 1.0 - ss_res / ss_tot.replace(0.0, np.nan)
+
+
 def holm(t: pd.DataFrame) -> pd.DataFrame:
     t = t.sort_values("p_raw").reset_index(drop=True)
     m = len(t)
@@ -415,7 +430,8 @@ def main() -> int:
     print(f"\nGemeinsame Menge: {len(gemeinsam):,} Zeilen "
           f"({len(gemeinsam) / max(len(next(iter(quellen.values()))), 1):5.1%} der ersten Quelle)")
 
-    je_station, zeilen = {}, []
+    je_station, je_station_r2, zeilen = {}, {}, []
+    basis: dict[str, pd.Series] = {}     # RMSE der Baselines je (Ziel, Station)
     referenz_gt: tuple[str, np.ndarray] | None = None
     for name, v in quellen.items():
         g = v.set_index(SCHLUESSEL).loc[gemeinsam].reset_index()
@@ -439,14 +455,25 @@ def main() -> int:
                 else:
                     raise SystemExit(msg)
         je_station[name] = rmse_je_station(g)
+        r2 = r2_je_station(g)
+        je_station_r2[name] = r2
         nwp = rmse_je_station(g, "nwp_ref")
         pers = rmse_je_station(g, "pers_ref")
+        r2_nwp = r2_je_station(g, "nwp_ref")
+        r2_pers = r2_je_station(g, "pers_ref")
+        # Baselines sind ueber alle Quellen identisch (gemeinsame Menge) —
+        # einmal aufheben, um daraus die Skills je Station zu bilden.
+        basis.setdefault("rmse_nwp", nwp)
+        basis.setdefault("rmse_pers", pers)
         for target in ZIELE:
             r = je_station[name].loc[target]
             zeilen.append(dict(
                 modell=name, target=target, n_stationen=len(r),
-                rmse=float(r.mean()),
+                rmse=float(r.mean()), r2=float(r2.loc[target].mean()),
                 rmse_nwp=float(nwp.loc[target].mean()),
+                r2_nwp=float(r2_nwp.loc[target].mean()),
+                rmse_pers=float(pers.loc[target].mean()),
+                r2_pers=float(r2_pers.loc[target].mean()),
                 skill_nwp=float(1 - (r / nwp.loc[target]).mean()),
                 skill_pers=float(1 - (r / pers.loc[target]).mean()),
                 n_punkte=int(len(g) / len(ZIELE)),
@@ -461,10 +488,49 @@ def main() -> int:
               "negative median_diff = A besser:")
         print(sig.to_string(index=False, float_format=lambda x: f"{x:9.4f}"))
 
+    # ── Streuung des R2 ueber die Stationen ──────────────────────────────
+    # Das Stationsmittel allein sagt wenig: R2 misst gegen die stationseigene
+    # Varianz, und die haengt bei Strahlung stark an Lage und Bewoelkungsregime.
+    r2_tab = pd.DataFrame(je_station_r2)
+    print("\nR2 je Station — Streuung (min … max, Spannweite, Standardabweichung):")
+    for target in ZIELE:
+        t = r2_tab.loc[target]
+        print(f"  {target}:")
+        for name in t.columns:
+            v = t[name].dropna()
+            print(f"    {name:16s} Mittel {v.mean():.4f} | Median {v.median():.4f} | "
+                  f"{v.min():.4f} ({v.idxmin()}) … {v.max():.4f} ({v.idxmax()}) | "
+                  f"Spannweite {v.max() - v.min():.4f} | SD {v.std():.4f}")
+
+    # ── Skill je Station: wo ist ein Modell schlechter als ICON-D2? ──────
+    skill = pd.DataFrame({name: 1.0 - je_station[name] / basis["rmse_nwp"]
+                          for name in quellen})
+    print("\nSkill_NWP je Station — Stationen mit NEGATIVEM Skill "
+          "(Modell schlechter als ICON-D2 roh):")
+    for target in ZIELE:
+        st = skill.loc[target]
+        print(f"  {target}:")
+        for name in st.columns:
+            schlechter = st[name][st[name] < 0]
+            if len(schlechter):
+                orte = ", ".join(f"{i} ({v:+.3f})" for i, v in
+                                 schlechter.sort_values().items())
+                print(f"    {name:16s} {len(schlechter):2d} von {len(st)}: {orte}")
+            else:
+                print(f"    {name:16s}  0 von {len(st)} — an jeder Station besser als ICON-D2")
+        schwaechste = st.min(axis=1).sort_values().head(3)
+        print(f"    schwaechste Stationen (Minimum ueber die Modelle): "
+              + ", ".join(f"{i} {v:+.3f}" for i, v in schwaechste.items()))
+
     praefix = args.out or f"solar_arch_{args.dcrnn}"
     OUT.mkdir(parents=True, exist_ok=True)
     tab.to_csv(OUT / f"{praefix}_metriken.csv", index=False)
-    pd.DataFrame(je_station).to_csv(OUT / f"{praefix}_je_station.csv")
+    je_st = pd.DataFrame(je_station)
+    for k, v in basis.items():
+        je_st[k] = v
+    je_st.to_csv(OUT / f"{praefix}_je_station.csv")
+    skill.to_csv(OUT / f"{praefix}_skill_je_station.csv")
+    r2_tab.to_csv(OUT / f"{praefix}_r2_je_station.csv")
     if not sig.empty:
         sig.to_csv(OUT / f"{praefix}_wilcoxon.csv", index=False)
     print(f"\nGeschrieben: {OUT}/{praefix}_{{metriken,je_station,wilcoxon}}.csv")
