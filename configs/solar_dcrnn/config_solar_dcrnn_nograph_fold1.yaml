@@ -178,3 +178,5 @@ cache:
 output:
   path: results/geostatistics
   prefix: solar_spatial_interp
+eval:
+  exclude_imputed: true

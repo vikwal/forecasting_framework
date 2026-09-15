@@ -178,6 +178,18 @@ def main() -> int:
         # stillschweigend zu verwerfen.
         g['handle_nans'] = 'break'
 
+        # --- Auswertung ----------------------------------------------
+        # Imputierte Zielpositionen elementweise aus allen Metriken nehmen,
+        # genau wie es scripts/make_solar_tft_configs.py fuer den TFT-Pfad
+        # setzt. Ohne den Schluessel misst das DCRNN im Testjahr auf 8.7 %
+        # Nicht-Messungen (Modellfuellung + Nachtnullen), waehrend der TFT sie
+        # entfernt — der Architekturvergleich liefe dann ueber verschiedene
+        # Stichproben. train_dcrnn.py und get_test_results_dcrnn.py sichern
+        # die Maske VOR der Imputation und reichen sie an evaluation.evaluate;
+        # Modell, Persistenz und NWP sehen dieselbe Menge, die Skill-Quotienten
+        # bleiben also Quotienten ueber derselben Stichprobe.
+        cfg['eval'] = {'exclude_imputed': True}
+
         for schluessel, wert in abweichung.items():
             g[schluessel] = wert
 

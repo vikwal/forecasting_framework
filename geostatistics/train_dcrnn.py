@@ -1357,6 +1357,7 @@ def main() -> None:
             neighbour_meas_available=dcrnn_cfg.get("neighbour_meas_available", True),
             step_hours=freq_h,
             meas_observed=meas_observed,
+            lead0_offset=lead0_off,
         )
         cols = ["mae", "rmse", "r2", "skill", "skill_nwp"]
         # Bei mehreren Zielgroessen fuehrt eval_df eine Zeile je (Station, Ziel).

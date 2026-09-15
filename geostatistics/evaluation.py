@@ -232,6 +232,7 @@ def evaluate(
     nwp_ref_idxs: list | None = None,        # NWP-Referenzspalte je Ziel (None = keine)
     step_hours: float = 1.0,                 # Schrittweite (data.freq) in Stunden
     meas_observed: np.ndarray | None = None, # (T, N_all, K) True = echte Messung
+    lead0_offset: int = 1,                   # Schritte zwischen Laufzeit und t_run_abs
 ) -> "tuple[pd.DataFrame, pd.DataFrame]":
     """
     Single-pass evaluation over all test run pairs.
@@ -252,6 +253,18 @@ def evaluate(
         96 Leads) Gueltigkeitszeiten bis run+96 h statt run+48 h. Die Metriken
         laufen ueber Array-Positionen und waren nie betroffen, jeder Join auf
         ``valid_time`` und jede Tagesgang-Auswertung schon.
+
+    lead0_offset
+        Schritte zwischen der ICON-Laufzeit und ``t_run_abs``, dem Zeitindex von
+        Lead 0 — derselbe Wert, mit dem der Aufrufer ``t_run_abs`` gebildet hat
+        (``shared.resolution.lead0_offset``): 1 fuer ICON-D2 ML (Wind, Lead 0 ist
+        ``t_run + 1 h``), 0 fuer SL (Solar, Lead 0 ist linksbuendig auf
+        ``t_run``). Nur die ausgewiesene ``run_time`` haengt daran; ``gt`` und
+        ``valid_time`` sind in beiden Faellen dieselben Zeitpunkte. Ohne den
+        Parameter stand in der Solar-``run_time`` seit der Lead-0-Reparatur ein
+        Schritt zu frueh — ein Join TFT gegen DCRNN ueber
+        ``(station_id, run_time, horizon)`` haette dann nicht ein einziges Paar
+        gefunden. Der Default 1 haelt den Wind-Pfad unveraendert.
 
     meas_observed
         ``(T, N_all, K)``-Bool-Array, K in der Reihenfolge von
@@ -366,7 +379,10 @@ def evaluate(
             if raw_out.ndim == 2:
                 raw_out = raw_out[:, :, None]       # (N_val, H_fore, 1)
 
-            run_ts = timestamps[t_run_abs - 1] if timestamps is not None else None
+            # Laufzeit, nicht Lead-0-Zeit: bei Wind liegt Lead 0 eine Stunde
+            # nach dem Lauf (Offset 1), bei Solar auf dem Lauf selbst (Offset 0).
+            run_ts = (timestamps[t_run_abs - lead0_offset]
+                      if timestamps is not None else None)
             _resid = getattr(sampler, "residual_spec", None) is not None
             for k, fidx in enumerate(_idxs):
                 # Im Residuumsraum sagt das Modell (Messung - NWP) in Einheiten
@@ -413,9 +429,12 @@ def evaluate(
                         rec = {
                             "station_id": sid,
                             "run_time":   run_ts,
-                            # horizon zaehlt SCHRITTE, nicht Stunden — bei 30 min
-                            # ist Schritt 96 der Zeitpunkt run+48 h, nicht run+96 h.
-                            "valid_time": (run_ts + pd.Timedelta(hours=(h + 1) * step_hours)) if run_ts is not None else None,
+                            # horizon zaehlt SCHRITTE ab dem ersten vorhergesagten
+                            # Schritt, nicht Stunden — bei 30 min deckt Schritt 1..96
+                            # die 48 h des Laufs ab, nicht 96 h. Welcher Zeitpunkt
+                            # Schritt 1 ist, sagt lead0_offset: bei Wind t_run+1 h,
+                            # bei Solar das Intervall [t_run, t_run+freq).
+                            "valid_time": (run_ts + pd.Timedelta(hours=(h + lead0_offset) * step_hours)) if run_ts is not None else None,
                             "horizon":    h + 1,
                             "pred":       float(pred_i[h]),
                             "gt":         float(gt_a[i, h]),
