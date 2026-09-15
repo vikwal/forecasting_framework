@@ -17,8 +17,8 @@ aus ICON-D2-SL und ECMWF-HRES. Zwei Architekturen sollen gegeneinander
 gehalten werden:
 
 * **TFT** (`train_cl.py`, `configs/solar_tft/`) — fertig, Zahlen gültig
-* **DCRNN** (`geostatistics/train_dcrnn.py`, `configs/solar_dcrnn/`) — Läufe
-  vorhanden, aber **ungültig**, s. §3
+* **DCRNN** (`geostatistics/train_dcrnn.py`, `configs/solar_dcrnn/`) — sechs
+  Arme neu trainiert (`v5`, 15.09.2026) und gegen den TFT gehalten, s. §2.1
 
 Zeitachse: Training 2023-08-01…2024-07-31, Validierung 2024-08-01…2025-07-31,
 Testjahr 2025-08-01…2026-07-31 **zurückgehalten**. Stationen: 21 Testsatz nie
@@ -32,9 +32,54 @@ die drei Folds sind für die HPO vorgesehen.
 | TFT Arm A, Fold 1–3 | GHI RMSE **63.56**, Skill_NWP 0.108 / DHI **36.08**, 0.114 |
 | TFT Arm B (+9 Trainingsstationen) | GHI −0.05 (p = 0.66) / DHI −0.145 (p = 0.0094) |
 | TFT Static-Ablation (6 statt 3 statische Features) | Null-Ergebnis, p = 0.66 / 0.56 |
+| DCRNN v5, sechs Arme, Fold 1 | s. §2.1 — gegen den TFT gehalten |
 
-Dateien unter `results/solar/`. Die Auswertung der beiden Arme steht im
-Gesprächsverlauf, ein Skript dafür gibt es noch nicht.
+Dateien unter `results/solar/` (TFT) und `results/solar_dcrnn_*_v5_*.pkl` (DCRNN).
+Die Auswertung der beiden TFT-Arme steht im Gesprächsverlauf, ein Skript dafür
+gibt es noch nicht; der Architekturvergleich läuft über
+`scripts/eval_solar_arch.py`.
+
+### 2.1 Architekturvergleich DCRNN ↔ TFT (15.09.2026)
+
+Gemeinsame Auswertung über `scripts/eval_solar_arch.py`: beide Seiten liefern
+nur Rohvorhersagen, Filter und Aggregation liegen einmal darüber. 5 585 478
+gepaarte Zeilen (21 Zielstationen × ~1 428 Läufe × 96 Leads × 2 Zielgrößen),
+Validierungsjahr 2024-08…2025-07. NWP-Baseline für alle Quellen identisch:
+72.50 (GHI) / 41.29 (DHI) W/m² — der Beleg, dass dieselbe Stichprobe gemessen
+wird.
+
+| Modell | GHI RMSE | DHI RMSE |
+|---|---|---|
+| **TFT** | **65.32** | **36.55** |
+| DCRNN `idw_alt` | 65.55 | 37.54 |
+| DCRNN `nomeas` | 66.31 | 38.14 |
+| DCRNN `nograph` | 66.38 | 38.19 |
+| DCRNN `a` | 66.53 | 37.64 |
+| DCRNN `base` | 66.64 | 38.36 |
+| DCRNN `nwp_hist` | 66.65 | 37.22 |
+
+**Bei GHI sind die Architekturen nicht unterscheidbar.** TFT und `idw_alt`
+trennen 0.23 W/m² im Stationsmittel; gepaart über die 21 Stationen liegt der
+Median auf der DCRNN-Seite (−0.50 W/m², an 15 von 21 Stationen besser),
+p_holm = 1.0. Bei DHI liegt der TFT vorn, nach Holm-Korrektur aber knapp nicht
+signifikant (gegen `nwp_hist` +0.76 W/m², p_holm = 0.062).
+
+**Die Leiter trägt nicht, wo sie sollte.** Die beiden als tragend angelegten
+Differenzen sind null: `a − nomeas` (Wert der Nachbarmessungen) p_holm = 1.0
+(GHI) / 0.17 (DHI), `nomeas − nograph` (Geometrie- und Kontextkanal)
+p_holm = 1.0 in beiden Zielgrößen. Signifikant sind dafür zwei Sprossen, die
+beide an der NWP-Aggregation hängen und sich je eine Zielgröße teilen:
+
+* `a` gegen `base` bei **DHI**: −0.69 W/m² für die GATv2-Attention über
+  NWP-Knoten, p_holm = 0.0037 — bei GHI nichts (p_holm = 1.0).
+* `a` gegen `idw_alt` bei **GHI**: +1.30 W/m² für die Distanzgewichtung mit
+  Höhenkorrektur, p_holm = 0.033 — bei DHI nichts (p_holm = 1.0).
+
+Tabellen: `data/test_results/solar_arch_v5_{metriken,je_station,wilcoxon}.csv`.
+
+Die TFT-Zahl hier ist **nicht** die aus der Tabelle oben (63.56): die ist über
+Fold 1–3 gemittelt, diese ist Fold 1 auf der gepaarten Laufmenge. Und es gibt
+weiterhin keine Solar-HPO für das DCRNN (§6) — der Vergleich bleibt vorläufig.
 
 **Befund aus der Static-Ablation:** `dist_coast`, `svf` und `horizon_solar`
 bringen nichts. Das Screening gegen den per-Station-RMSE hatte das
@@ -43,11 +88,16 @@ Topo-Größen partiell |r| ≤ 0.23, und `slope`/`aspect` liegen bei 0.00, genau
 wie die Physik es für einen waagerecht liegenden Pyranometer vorhersagt.
 Es bleibt bei `altitude`, `latitude`, `longitude`.
 
-## 3. Was ungültig ist und warum
+## 3. Der 30-min-Versatz — erledigt, aber der Testaufbau bleibt
+
+> **Stand 15.09.2026:** die sechs `v4`-Arme waren davon betroffen und sind
+> durch `v5` ersetzt. Der Abschnitt bleibt stehen, weil der Fehler die Art von
+> Fehler ist, die dieser Pfad wiederholt produziert — und weil der Test, der
+> ihn findet, jetzt in `scripts/eval_solar_arch.py` fest eingebaut ist.
 
 Die sechs DCRNN-Arme (`results/solar_dcrnn_*v4*.pkl`, Modelle unter
-`models/solar_dcrnn_*_v4_*.pt`) sind **mit einem um 30 Minuten verschobenen
-NWP-Kanal trainiert** worden. Vier Prüfagenten haben das am 14./15.09. gefunden
+`models/solar_dcrnn_*_v4_*.pt`) waren **mit einem um 30 Minuten verschobenen
+NWP-Kanal trainiert**. Vier Prüfagenten haben das am 14./15.09. gefunden
 und belegt; behoben in `dc8d295`.
 
 Ursache: `t_run_abs = ts_lookup[t_run] + 1`. Für ICON-D2 **ML** (Wind) ist das
@@ -65,14 +115,24 @@ Verschiebungstest, Station 00183, `ghi_nwp` gegen die Messung, 415 384 Paare:
 Der alte Code fuhr +30 min, also **9.0 % RMSE** über alle Läufe.
 
 **Das betrifft das Training, nicht nur die Auswertung** — die sechs Arme
-müssen neu trainiert werden, erneutes Auswerten reicht nicht.
+mussten neu trainiert werden, erneutes Auswerten reichte nicht. Erledigt am
+15.09.2026 (`v5`, 08:52–09:52 auf l2, je 41–56 Epochen bis Early Stopping).
+
+`scripts/eval_solar_arch.py` fährt denselben Test jetzt bei jeder Auswertung:
+beide Seiten über ±2 Schritte gegen die Messreihe, Abbruch wenn das
+RMSE-Minimum nicht bei 0 liegt. Gegen die alten `v4`-Parquets gehalten findet
+er deren +30 min selbständig wieder — der Test ist also scharf, nicht
+dekorativ. Die TFT-Seite lässt sich dabei nicht über `gt` prüfen (das entsteht
+dort erst durch Nachschlagen in der Zielreihe, ein Vergleich gegen dieselbe
+Reihe wäre zirkulär), sondern läuft über ihr Residuum gegen die
+`nwp_ref`-Spalte des DCRNN: 0.0083 W/m² bei Offset 0 gegen 48 W/m² bei ±1
+Schritt.
 
 ## 4. Was am 14./15.09. repariert wurde
 
-Alles committet und auf allen drei Hosts (`0ffb797`).
-
 | Commit | Inhalt |
 |---|---|
+| (15.09., s. §4.1) | `run_time` bei Solar einen Schritt zu früh, `eval.exclude_imputed` im DCRNN-Generator |
 | `dc8d295` | Lead-0-Semantik (`shared/resolution.lead0_offset`), `freq_h` an drei Stellen tot, unbekanntes `ist_tag` galt als Nacht |
 | `0ffb797` | `exclude_imputed` im GNN-Pfad, `valid_time` in Schritten, NaN-Filter der Auswertung, `hpo_dcrnn` nachgezogen, `target`-Spalte in drei Berichten |
 | `21d76fc`, `935dbca`, `88eae9d` | Lead-Zahl nicht auf 48 festnageln (Sampler, `build_eval_batch`, Reshape) |
@@ -87,27 +147,58 @@ Die Wind-Regression ist über alle Commits belegt: `station_df`/`raw_df`
 byte-identisch, Laufpaarlisten auf echten Winddaten elementweise gleich,
 Decoder-Forward und `state_dict` unverändert, 566 Wind-Configs geprüft.
 
+### 4.1 Folgefehler von `dc8d295`: `run_time` bei Solar
+
+`evaluation.py` bildete `run_ts = timestamps[t_run_abs - 1]`. Für Wind ist das
+richtig (Lead 0 liegt eine Stunde nach dem Lauf, `lead0_offset` = 1); seit der
+Lead-0-Reparatur ist der Offset bei Solar 0, und damit zeigte `run_ts` auf
+einen Schritt **vor** den ICON-Lauf. In den Roh-Parquets stand `run_time`
+also auf 05:30 statt 06:00 — `gt` und `valid_time` waren richtig, weil beide
+denselben Versatz trugen und er sich heraushob.
+
+Gefunden beim Aufbau der gemeinsamen Auswertung: ein Join TFT gegen DCRNN über
+`(station_id, run_time, horizon)` hätte **kein einziges Paar** gefunden.
+Behoben über einen `lead0_offset`-Parameter an `evaluate()` mit Default 1.
+Wind-Neutralität: bei Offset 1 sind `run_time` und `valid_time` über ein reales
+Jahresraster elementweise identisch zur alten Formel. Am `v5`-Parquet belegt:
+Laufstunden 6/9/12/15 bei Minute 0, `valid_time = run_time + (horizon−1)·30 min`,
+horizon 1 = Laufzeitpunkt — dieselbe Konvention wie beim TFT.
+
+**Die Masken beider Pfade stimmen überein.** Das intern gefilterte
+`v5`-Parquet hat 40 520 Zeilen weniger als das ungefilterte `v4`-Parquet —
+exakt die Zahl, die der unabhängig aus der Rohmessung rekonstruierte Filter in
+`eval_solar_arch.py` entfernt. Der Anteil echter Messungen ist auf beiden Wegen
+93.76 %.
+
 ## 5. Was noch zu tun ist
 
-### 5.1 Blockierend für den Architekturvergleich
+### 5.1 Erledigt am 15.09.2026
 
-1. **`eval.exclude_imputed: true` in `scripts/make_solar_dcrnn_configs.py`
-   aufnehmen**, Configs neu erzeugen. Ohne den Schlüssel misst das DCRNN auf
-   8.73 % Nicht-Messungen (17 520 Modellfüllung + 14 598 Nachtnullen von
-   367 920 Zielpositionen im Testjahr, Fold 1), während der TFT genau die
-   entfernt. Der Code kann es seit `0ffb797`, die Configs setzen es nicht.
-2. **Die sechs DCRNN-Arme neu trainieren** (`a`, `base`, `nomeas`, `nograph`,
-   `idw_alt`, `nwp_hist`), Fold 1. Rund 45–75 min je Arm, sechs GPUs
-   vorhanden. Danach auswerten — `get_test_results_dcrnn.py` lädt den
-   Checkpoint und schreibt zusätzlich die Rohvorhersagen.
-3. **Gemeinsame Auswertung schreiben.** Beide Seiten liefern ungefilterte
-   Rohvorhersagen über dieselben 1 444 Läufe: DCRNN als
-   `data/raw_preds/solar_dcrnn_*_raw.parquet`, TFT im Ergebnis-Pickle unter
-   `predictions` (je Station und Zielgröße `pred`, `true`, Persistenz- und
-   NWP-Baseline, 1 444 × 96). Eine Filterfunktion und eine Aggregation für
-   beide, statt TFT-intern gegen GNN-intern. Vorbild: die Wind-Auswertung in
-   `scripts/eval_testmode.py` (`build_imputation_mask`, dann elementweise
-   filtern, dann RMSE je Station, dann Stationsmittel, Wilcoxon + Holm).
+Die drei blockierenden Punkte sind abgearbeitet:
+
+1. **`eval.exclude_imputed: true`** steht in `scripts/make_solar_dcrnn_configs.py`,
+   die sechs Configs sind neu erzeugt (Diff: genau zwei Zeilen je Datei).
+2. **Die sechs Arme sind neu trainiert** (`v5`) und ausgewertet:
+   `scripts/run_solar_dcrnn_arms.sh` startet das Training, die GPU hängt am
+   Armnamen statt an der Aufrufreihenfolge; `scripts/run_solar_dcrnn_eval.sh`
+   schreibt die Rohvorhersagen nach
+   `data/raw_preds/solar_dcrnn_v5_<arm>_raw.parquet`.
+3. **Die gemeinsame Auswertung** liegt als `scripts/eval_solar_arch.py` vor,
+   Ergebnis in §2.1.
+
+Was dabei über die Aufgabe hinaus anfiel: der `run_time`-Folgefehler (§4.1) und
+der ECMWF-NaN-Befund in §5.3.
+
+**Offen bleibt:**
+
+* **Solar-HPO für das DCRNN.** Ohne sie bleibt jeder Architekturvergleich
+  vorläufig (§6): die DCRNN-Parameter stammen aus einer Stunden-Wind-Config,
+  die TFT-Defaults immerhin aus einer Wind-HPO. Der Befund aus §2.1, dass die
+  NWP-Aggregation die einzige tragende Sprosse ist, wäre der erste Kandidat
+  für den Suchraum.
+* **Die Folds 2 und 3** für das DCRNN — bisher läuft die Leiter nur auf Fold 1.
+* **`kt_nwp`** fehlt weiterhin als einziges der 13 TFT-Features im
+  DCRNN-Featuresatz.
 
 ### 5.2 Lead-0-Fehler in weiteren Solar-Pfaden
 
@@ -141,6 +232,7 @@ dürfen so bleiben.
 | `geostatistics/train_stgnn2.py` | `_ist_akkumuliertes_ecmwf_feature` hat `except Exception: return False` — schlägt der Import fehl, kommt der 1-h-Versatz stumm zurück. |
 | `geostatistics/evaluation.py` | `gt_scaled` wird nur für das erste Ziel gebaut, die Residuumskorrektur nutzt hart `nwp_idx[0]`. Der Rückgabewert wird aktuell verworfen, ist also tot — aber eine Falle. |
 | `get_test_results_dcrnn.py` | `residual_spec` ohne die `None`-Prüfung, die `train_dcrnn.py` hat: undurchsichtiger `TypeError` statt klarer Meldung. |
+| `get_test_results_dcrnn.py` | schließt die Läufe mit ECMWF-NaN **nicht** aus, die `train_dcrnn.py` verwirft (dort: `val: 1460 → 1444`). Das Modell liefert auf ihnen NaN — im `v5`-Lauf 42 560 Zeilen aus 16 Läufen vom 28.–31.08.2024, über alle Stationen und beide Ziele. Bei `nograph` (leeres Kantenset) tritt es nicht auf, die NaN kommen also über den Nachbarkontext. In `eval_solar_arch.py` fallen sie über den Schnitt heraus; in die DCRNN-internen Metriken gehen sie über den NaN-Filter aus `0ffb797`. |
 | `train_fl.py:685,727` | reicht `exclude_imputed` nicht durch — FL-Solar misst auf gefüllten Zielen, CL-Solar nicht. |
 | `utils/preprocessing.py:3853`, `utils/data_cache.py:519` | `Timedelta(hours=history_length)`, wobei `history_length` Schritte zählt. Vorbestehend; beide Stellen spiegeln einander, die Grenze wandert nur konservativ. |
 | `geostatistics/solar_preprocessing.py:16-21` | Docstring behauptet, SL-Dateinamen seien lon-first und die Spalten vertauscht. Nachgemessen ist es lat-first ohne Vertauschung — der **Code ist richtig, der Docstring falsch**. |
