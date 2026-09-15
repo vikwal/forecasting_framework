@@ -633,6 +633,26 @@ def main() -> None:
     logger.info("Test run pairs: %d  (verworfen — Mess-NaN: %d, Gitter-NaN: %d)",
                 len(test_run_pairs), skipped_meas_nan, skipped_grid_nan)
 
+    # ── ECMWF-NaN: dieselben Laufpaare verwerfen wie das Training ────────
+    # train_dcrnn.py filtert hier, dieses Skript tat es nicht. Folge: das Modell
+    # bekam in der Auswertung Laeufe vorgesetzt, die es nie gesehen hat, mit NaN
+    # im ECMWF-Kanal — im v5-Lauf 42 560 NaN-Vorhersagezeilen aus 16 Laeufen.
+    # Der Filter arbeitet auf der Zeitachse (ECMWF ist nach Zeitstempel
+    # indiziert, nicht nach Lauf) und nutzt dasselbe Fenster wie oben.
+    _ecmwf_nan_arrays = [a for a in (station_ecmwf_nwp, ecmwf_nwp) if a is not None]
+    if _ecmwf_nan_arrays:
+        from geostatistics.train_stgnn2 import exclude_run_pairs_with_ecmwf_nan
+        _n_before = len(test_run_pairs)
+        test_run_pairs = exclude_run_pairs_with_ecmwf_nan(
+            test_run_pairs, _ecmwf_nan_arrays, timestamps, H_hist, H_fore,
+        )
+        if len(test_run_pairs) != _n_before:
+            logger.info("Test run pairs nach ECMWF-NaN-Ausschluss: %d (-%d)",
+                        len(test_run_pairs), _n_before - len(test_run_pairs))
+        if not test_run_pairs:
+            logger.error("Keine Laufpaare mehr nach dem ECMWF-NaN-Ausschluss!")
+            sys.exit(1)
+
     # ── Model & Graph ────────────────────────────────────────────────────
     model_cfg = DCRNNConfig.from_yaml(
         dcrnn_cfg, icond2_features=icond2_features, ecmwf_features=ecmwf_features,

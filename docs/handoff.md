@@ -42,27 +42,27 @@ gibt es noch nicht; der Architekturvergleich läuft über
 ### 2.1 Architekturvergleich DCRNN ↔ TFT (15.09.2026)
 
 Gemeinsame Auswertung über `scripts/eval_solar_arch.py`: beide Seiten liefern
-nur Rohvorhersagen, Filter und Aggregation liegen einmal darüber. 5 585 478
-gepaarte Zeilen (21 Zielstationen × ~1 428 Läufe × 96 Leads × 2 Zielgrößen),
+nur Rohvorhersagen, Filter und Aggregation liegen einmal darüber. 5 628 006
+gepaarte Zeilen (21 Zielstationen × ~1 440 Läufe × 96 Leads × 2 Zielgrößen),
 Validierungsjahr 2024-08…2025-07. NWP-Baseline für alle Quellen identisch:
 72.50 (GHI) / 41.29 (DHI) W/m² — der Beleg, dass dieselbe Stichprobe gemessen
 wird.
 
 | Modell | GHI RMSE | DHI RMSE |
 |---|---|---|
-| **TFT** | **65.32** | **36.55** |
-| DCRNN `idw_alt` | 65.55 | 37.54 |
-| DCRNN `nomeas` | 66.31 | 38.14 |
-| DCRNN `nograph` | 66.38 | 38.19 |
-| DCRNN `a` | 66.53 | 37.64 |
-| DCRNN `base` | 66.64 | 38.36 |
-| DCRNN `nwp_hist` | 66.65 | 37.22 |
+| **TFT** | **65.31** | **36.53** |
+| DCRNN `idw_alt` | 65.56 | 37.53 |
+| DCRNN `nomeas` | 66.32 | 38.14 |
+| DCRNN `nograph` | 66.39 | 38.18 |
+| DCRNN `a` | 66.55 | 37.65 |
+| DCRNN `base` | 66.66 | 38.36 |
+| DCRNN `nwp_hist` | 66.67 | 37.22 |
 
 **Bei GHI sind die Architekturen nicht unterscheidbar.** TFT und `idw_alt`
-trennen 0.23 W/m² im Stationsmittel; gepaart über die 21 Stationen liegt der
-Median auf der DCRNN-Seite (−0.50 W/m², an 15 von 21 Stationen besser),
+trennen 0.24 W/m² im Stationsmittel; gepaart über die 21 Stationen liegt der
+Median auf der DCRNN-Seite (−0.47 W/m², an 71 % der Stationen besser),
 p_holm = 1.0. Bei DHI liegt der TFT vorn, nach Holm-Korrektur aber knapp nicht
-signifikant (gegen `nwp_hist` +0.76 W/m², p_holm = 0.062).
+signifikant (gegen `nwp_hist` +0.76 W/m², p_holm = 0.054).
 
 **Die Leiter trägt nicht, wo sie sollte.** Die beiden als tragend angelegten
 Differenzen sind null: `a − nomeas` (Wert der Nachbarmessungen) p_holm = 1.0
@@ -70,10 +70,20 @@ Differenzen sind null: `a − nomeas` (Wert der Nachbarmessungen) p_holm = 1.0
 p_holm = 1.0 in beiden Zielgrößen. Signifikant sind dafür zwei Sprossen, die
 beide an der NWP-Aggregation hängen und sich je eine Zielgröße teilen:
 
-* `a` gegen `base` bei **DHI**: −0.69 W/m² für die GATv2-Attention über
+* `a` gegen `base` bei **DHI**: −0.68 W/m² für die GATv2-Attention über
   NWP-Knoten, p_holm = 0.0037 — bei GHI nichts (p_holm = 1.0).
-* `a` gegen `idw_alt` bei **GHI**: +1.30 W/m² für die Distanzgewichtung mit
-  Höhenkorrektur, p_holm = 0.033 — bei DHI nichts (p_holm = 1.0).
+* `a` gegen `idw_alt` bei **GHI**: +1.27 W/m² für die Distanzgewichtung mit
+  Höhenkorrektur, p_holm = 0.039 — bei DHI nichts (p_holm = 1.0).
+
+**Vorbehalt, der über die HPO hinausgeht:** je Arm gibt es nur **einen** Lauf.
+Die Solar-Ablationen vom August liefen mit 2–4 Wiederholungen, die
+Lauf-zu-Lauf-Streuung lag dort bei rund 0.45 W/m² — in der Größenordnung der
+Armunterschiede hier. Der Wilcoxon-Test ist über die 21 Stationen gepaart, er
+trennt also Stationsrauschen ab, **nicht** Seed-Rauschen: ein Seed-Effekt, der
+alle Stationen gleich trifft, sähe genauso aus. Die beiden signifikanten
+Sprossen sind damit nicht gegen Wiederholungen abgesichert; die Nullbefunde
+sind es eher (ein Nulleffekt wird durch Wiederholungen selten größer). Zwei
+weitere Seeds je Arm kosten rund eine Stunde auf vier GPUs.
 
 Tabellen: `data/test_results/solar_arch_v5_{metriken,je_station,wilcoxon}.csv`.
 
@@ -170,6 +180,52 @@ exakt die Zahl, die der unabhängig aus der Rohmessung rekonstruierte Filter in
 `eval_solar_arch.py` entfernt. Der Anteil echter Messungen ist auf beiden Wegen
 93.76 %.
 
+### 4.2 Der ECMWF-9999-Bug (15.09.2026)
+
+Aufgefallen als 42 560 NaN-Vorhersagen im `v5`-Lauf, aus 16 Läufen Ende
+August 2024. Die Kette von der Ursache zur Wirkung:
+
+1. `/mnt/nas/ecmwf/write_db.py:274` verwarf beim GRIB-Import **jeden Wert, der
+   exakt 9999 ist**, als Fehlwert: `bad = data == 9999`. Das war falsch — die
+   echte Fehlstellenbehandlung passiert eine Zeile darüber über `vals.mask`,
+   und 9999 ist bloß der eccodes-**Default** für den `missingValue`-Platzhalter.
+   Belegt: `bitmapPresent = 0`, `numberOfMissing = 0`, und mit einem anderen
+   Platzhalter (`grib_get -m -777`) kommt weiterhin 9999 zurück. Bei
+   akkumulierter Strahlung (J/m²) liegt 9999 mitten im Wertebereich — die
+   Nachricht reicht von 0 bis 55 812, die Nachbargitterpunkte tragen dort
+   8753, 8803 und 12 737.
+2. Ein genullter Akkumulationswert reißt über die Dekumulation
+   (`x[t] = (x_acc[t] − x_acc[t−1]) / 3600`) **zwei** stündliche Werte auf.
+3. `exclude_run_pairs_with_ecmwf_nan` prüft mit `any(axis=(1,2))` — ein NaN
+   macht den ganzen Zeitschritt für alle 759 Gitterpunkte ungültig.
+4. Über das ±48-h-Fenster fallen daraus 16 Laufpaare.
+5. `get_test_results_dcrnn.py` spiegelte den Filter nicht, das Modell bekam die
+   Läufe also trotzdem — mit NaN im ECMWF-Kanal.
+
+Umfang: **8 genullte Zellen** (= 16 stündliche Werte) in 73.9 Mio
+Parquet-Zeilen, 7 von 759 Gitterpunkten, ab 2024-05. Immer der erste
+Sonnenaufgangsschritt, wo die Akkumulation den Bereich um 10 000 J/m²
+durchläuft. **Der Wind-Pfad war nie betroffen** — dort kann keine Größe 9999
+annehmen (Temperatur 270–304 K, Wind ±19 m/s, Dichte < 0.02).
+
+Behoben: `write_db.py` korrigiert (Backup `write_db.py.bak_20260915`), die 16
+Zellen aus den GRIB-Dateien in `ecmwf_solar` nachgetragen und in den Parquets
+gesetzt, der Filter in `get_test_results_dcrnn.py` gespiegelt. Nachzählung über
+alle 759 Gitterpunkte: 0 verbleibende NaN ab 2024-05. Die Auswertung aller
+sechs Arme wurde danach neu gefahren — 1460 statt 1444 Läufe, keine
+NaN-Vorhersage mehr, die Zahlen in §2.1 ändern sich erst in der dritten
+Nachkommastelle.
+
+**Nicht zu verwechseln** mit dem großen NaN-Block Juli 2023 – März 2024: dort
+fehlt ausschließlich `ssrdc` (Clear-Sky-GHI), und zwar in allen Leads aller 550
+Läufe. Das ist kein Defekt, sondern Bestandserweiterung — das Feld existiert in
+den GRIB-Rohdaten vor April 2024 gar nicht (`aug23.grib`: 0 Nachrichten,
+`may24.grib`: 3596) und wird in keiner Ableitung verwendet
+(`utils/solar_ecmwf.py:344` begründet, warum `ecmwf_kt` bewusst gegen
+`ghi_clearsky` statt gegen `ssrdc` rechnet). Es hat deshalb nie ein Laufpaar
+gekostet. Wer `ssrdc` künftig als Feature will, hat dafür erst ab April 2024
+Daten.
+
 ## 5. Was noch zu tun ist
 
 ### 5.1 Erledigt am 15.09.2026
@@ -186,8 +242,9 @@ Die drei blockierenden Punkte sind abgearbeitet:
 3. **Die gemeinsame Auswertung** liegt als `scripts/eval_solar_arch.py` vor,
    Ergebnis in §2.1.
 
-Was dabei über die Aufgabe hinaus anfiel: der `run_time`-Folgefehler (§4.1) und
-der ECMWF-NaN-Befund in §5.3.
+Was dabei über die Aufgabe hinaus anfiel und ebenfalls behoben ist: der
+`run_time`-Folgefehler (§4.1) und der ECMWF-9999-Bug in der Ingest-Pipeline
+(§4.2).
 
 **Offen bleibt:**
 
@@ -199,6 +256,8 @@ der ECMWF-NaN-Befund in §5.3.
 * **Die Folds 2 und 3** für das DCRNN — bisher läuft die Leiter nur auf Fold 1.
 * **`kt_nwp`** fehlt weiterhin als einziges der 13 TFT-Features im
   DCRNN-Featuresatz.
+* **Wiederholungsläufe je Arm** — bisher ein Seed je Arm, s. den Vorbehalt am
+  Ende von §2.1.
 
 ### 5.2 Lead-0-Fehler in weiteren Solar-Pfaden
 
@@ -232,7 +291,7 @@ dürfen so bleiben.
 | `geostatistics/train_stgnn2.py` | `_ist_akkumuliertes_ecmwf_feature` hat `except Exception: return False` — schlägt der Import fehl, kommt der 1-h-Versatz stumm zurück. |
 | `geostatistics/evaluation.py` | `gt_scaled` wird nur für das erste Ziel gebaut, die Residuumskorrektur nutzt hart `nwp_idx[0]`. Der Rückgabewert wird aktuell verworfen, ist also tot — aber eine Falle. |
 | `get_test_results_dcrnn.py` | `residual_spec` ohne die `None`-Prüfung, die `train_dcrnn.py` hat: undurchsichtiger `TypeError` statt klarer Meldung. |
-| `get_test_results_dcrnn.py` | schließt die Läufe mit ECMWF-NaN **nicht** aus, die `train_dcrnn.py` verwirft (dort: `val: 1460 → 1444`). Das Modell liefert auf ihnen NaN — im `v5`-Lauf 42 560 Zeilen aus 16 Läufen vom 28.–31.08.2024, über alle Stationen und beide Ziele. Bei `nograph` (leeres Kantenset) tritt es nicht auf, die NaN kommen also über den Nachbarkontext. In `eval_solar_arch.py` fallen sie über den Schnitt heraus; in die DCRNN-internen Metriken gehen sie über den NaN-Filter aus `0ffb797`. |
+| ~~`get_test_results_dcrnn.py`, ECMWF-NaN~~ | **erledigt 15.09.2026**, s. §4.2 — Filter gespiegelt und die Datenursache behoben. |
 | `train_fl.py:685,727` | reicht `exclude_imputed` nicht durch — FL-Solar misst auf gefüllten Zielen, CL-Solar nicht. |
 | `utils/preprocessing.py:3853`, `utils/data_cache.py:519` | `Timedelta(hours=history_length)`, wobei `history_length` Schritte zählt. Vorbestehend; beide Stellen spiegeln einander, die Grenze wandert nur konservativ. |
 | `geostatistics/solar_preprocessing.py:16-21` | Docstring behauptet, SL-Dateinamen seien lon-first und die Spalten vertauscht. Nachgemessen ist es lat-first ohne Vertauschung — der **Code ist richtig, der Docstring falsch**. |
