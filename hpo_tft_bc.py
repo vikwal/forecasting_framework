@@ -279,7 +279,16 @@ def main() -> None:
         f'next_n_stations range: {stations_range}'
     )
 
+    # features wird je Trial neu abgeleitet, sobald hpo.optional_features gesetzt
+    # ist (s. Trial-Schleife): die Flags aendern params.icond2_features und damit
+    # die Spalten, die das Preprocessing erzeugt. Ohne optionale Features bleibt
+    # es bei genau diesem Wert — der Wind-Pfad ist unberuehrt.
     features = preprocessing.get_features(config=base_config)
+    optional_features = [str(f) for f in base_config['hpo'].get('optional_features', []) or []]
+    if optional_features:
+        logging.info(
+            "hpo.optional_features: %d Feature(s) werden je Trial binaer zu- oder "
+            "abgeschaltet — %s", len(optional_features), optional_features)
 
     data_dir = base_config['data']['path']
     base_dir = os.path.basename(data_dir)
@@ -371,6 +380,28 @@ def main() -> None:
         config['params']['next_n_grid_ecmwf'] = n_grid_ecmwf
         config['params']['next_n_stations'] = n_stations
 
+        # ── Optionale Features: je eines ein binaerer Hyperparameter ──────────
+        # Statt vorab zu entscheiden, ob z. B. u_10m etwas beitraegt, entscheidet
+        # es die Studie. Screening vom 16.09.2026: die staerksten Kandidaten
+        # liegen bei 0.06-0.16 % zusaetzlich erklaerter Restvarianz, also in der
+        # Groessenordnung mehrerer bereits genutzter Features — zu wenig fuer
+        # eine Vorab-Entscheidung in beide Richtungen.
+        #
+        # Die Flags aendern die Datenform, muessen also VOR dem Preprocessing
+        # stehen; data_cache._get_config_hash hasht params.icond2_features mit,
+        # jede Kombination bekommt somit ihren eigenen Cache-Eintrag.
+        trial_features = features
+        if optional_features:
+            aktiv = [f for f in optional_features
+                     if trial.suggest_categorical(f'use_{f}', [False, True])]
+            p_cfg = config['params']
+            for schluessel in ('icond2_features', 'known_features'):
+                if schluessel in p_cfg:
+                    p_cfg[schluessel] = list(dict.fromkeys(list(p_cfg[schluessel]) + aktiv))
+            trial_features = preprocessing.get_features(config=config)
+            logging.info("Trial %d: optionale Features aktiv: %s",
+                         trial_number, aktiv or "keine")
+
         hyperparameters = hpo.get_hyperparameters(config=config, hpo=True, trial=trial)
 
         # Epochenbudget explizit setzen. utils/hpo.py:670 laesst die epochs-Ziehung
@@ -412,7 +443,7 @@ def main() -> None:
                 )
                 lazy_fold_loader, cache_id = data_cache.create_or_load_preprocessed_data(
                     config=config,
-                    features=features,
+                    features=trial_features,
                     model_name=args.model,
                     force_reprocess=False,
                     use_cache=use_cache,
@@ -436,7 +467,7 @@ def main() -> None:
                     fold_config['data']['val_files'] = [all_station_ids[i] for i in sf.val_idx]
                     lazy_fold_loader, cache_id = data_cache.create_or_load_preprocessed_data_spatial(
                         config=fold_config,
-                        features=features,
+                        features=trial_features,
                         model_name=args.model,
                         force_reprocess=False,
                         use_cache=use_cache,
