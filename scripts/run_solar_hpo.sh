@@ -38,12 +38,29 @@ cachedir_fuer() { case "$1" in ws) echo '$HOME/data_cache';; *) echo /mnt/nvme2/
 # Folds = ~400 GB je Host, und enforce_cache_budget raeumte bei einem Budget von
 # 500 GB im Dauerbetrieb Eintraege weg, die ein anderer Worker kurz darauf neu
 # bauen musste (60 Evictions allein am 16.09.2026).
-cachegb_fuer()  { echo 150; }
+# l1 traegt daneben noch ~420 GB Cache der abgeschlossenen Wind-Studien
+# (wind_tft_sp_base/_hist) im selben Manifest. Das Budget gilt fuer das ganze
+# Manifest, nicht je Studie — mit 150 GB wuerde der erste Solar-Trial dort den
+# Wind-Bestand evictieren.
+cachegb_fuer()  { case "$1" in l1) echo 600;; *) echo 150;; esac; }
 repo_fuer()     { case "$1" in lokal) echo "$REPO_L2";; *) echo '$HOME/Work/forecasting_framework';; esac; }
 
 echo "Studie: $(basename $CFG .yaml)${SUF:+ (Suffix $SUF)} — ${#SLOTS[@]} Worker"
+# Ein zweiter Aufruf legte am 16.09.2026 einen kompletten zweiten Workersatz
+# neben den laufenden: zwei Trainings je GPU, und auf der A100 mit 80 GB starb
+# der Worker an CUDA-OOM. Belegte Slots werden deshalb uebersprungen.
+laeuft_schon() {
+    local host="$1" gpu="$2"
+    local probe="pgrep -af 'hpo_tft_bc[.]py' | grep -F -- '$(basename "$CFG")' | grep -q -- '--gpu $gpu '"
+    if [ "$host" = lokal ]; then bash -c "$probe"; else ssh "$host" "$probe"; fi
+}
+
 for slot in "${SLOTS[@]}"; do
     host="${slot%%:*}"; gpu="${slot##*:}"
+    if laeuft_schon "$host" "$gpu"; then
+        echo "  $slot  UEBERSPRUNGEN — dort laeuft bereits ein Worker dieser Studie"
+        continue
+    fi
     repo="$(repo_fuer "$host")"; droot="$(dataroot_fuer "$host")"; cgb="$(cachegb_fuer "$host")"
     cdir="$(cachedir_fuer "$host")"
     log="logs/hpo_solar/w_${host}_g${gpu}.log"
