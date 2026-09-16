@@ -30,6 +30,14 @@
 #
 # prs_gsp und prg_gsp fehlen bewusst: exakt 0.000 % in beiden Zielgroessen.
 #
+# Zeitachse: cv_mode spatial verlangt eine FESTE Train/Val-Grenze data.val_start;
+# Training liegt strikt davor, die Validierung in [val_start, test_start). Die
+# Arm-Configs markierten den Val-Beginn bisher mit test_start (2024-08-01) — hier
+# steht die Achse deshalb in der Form der GNN-spatial-Configs:
+#
+#     train_start 2023-08-01 -> val_start 2024-08-01 -> test_start 2025-08-01
+#     Training                  Validierung              Testjahr, unberuehrt
+#
 # Erzeugt aus configs/solar_tft/config_solar_tft_fold1.yaml.
 
 data:
@@ -112,8 +120,9 @@ data:
   - 05906
   train_start: '2023-08-01'
   train_end: '2024-07-31'
-  test_start: '2024-08-01'
-  test_end: '2025-08-01'
+  val_start: '2024-08-01'
+  test_start: '2025-08-01'
+  test_end: '2026-07-31'
   train_frac: 1
   scale_x: true
   scale_y: false
