@@ -78,6 +78,13 @@ class DataCache:
             'measurement_time_label': config['params'].get('measurement_time_label', None),
             'max_nan_frac': config['params'].get('max_nan_frac', None),
             'next_n_grid_points': config['params']['next_n_grid_points'],
+            # nwp_aggregation/idw_power nur hashen, wenn sie vom Default abweichen:
+            # so bleiben alle bisherigen Cache-Eintraege (aggregation='nearest')
+            # gueltig, statt beim Hinzufuegen des Schluessels komplett zu verfallen.
+            **({'nwp_aggregation': config['params'].get('nwp_aggregation'),
+                'idw_power': config['params'].get('idw_power', 2.0)}
+               if str(config['params'].get('nwp_aggregation', 'nearest')).lower() != 'nearest'
+               else {}),
             'get_next_grid_points_method': config['params'].get('get_next_grid_points_method', None),
             'next_n_grid_ecmwf': config['params'].get('next_n_grid_ecmwf', None),
             'next_n_stations': config['params'].get('next_n_stations', None),

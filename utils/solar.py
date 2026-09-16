@@ -683,6 +683,8 @@ def load_icond2_sl_for_station(nwp_path: str,
                                next_n_grid_points: int,
                                step_h: float,
                                n_leads: int,
+                               nwp_aggregation: str = 'nearest',
+                               idw_power: float = 2.0,
                                starttime_min: pd.Timestamp | None = None,
                                starttime_max: pd.Timestamp | None = None,
                                n_workers: int = 8,
@@ -703,6 +705,7 @@ def load_icond2_sl_for_station(nwp_path: str,
     """
     jobs: list[tuple[str, str, int]] = []   # (fpath, forecast_hour, rank)
     nearest_label = None
+    dist_je_rang: dict[int, float] = {}     # Rang -> Entfernung in km, fuer IDW
 
     for fh in forecast_hours:
         nearest = select_nearest_sl_points(nwp_path, fh, station_lat, station_lon,
@@ -712,6 +715,7 @@ def load_icond2_sl_for_station(nwp_path: str,
             continue
         nearest_label = '1'
         for rank, (stem, _lat, _lon, _dist) in enumerate(nearest, start=1):
+            dist_je_rang.setdefault(rank, _dist)
             fpath = os.path.join(nwp_path, 'SL', fh, f'{stem}_SL.parquet')
             jobs.append((fpath, fh, rank))
 
@@ -751,6 +755,37 @@ def load_icond2_sl_for_station(nwp_path: str,
         merged = frame if merged is None else merged.merge(
             frame, on=['starttime', 'forecasttime'], how='outer'
         )
+
+    # ── Optional: Gitterpunkte zu EINER Spalte je Feature kombinieren ────
+    # nwp_aggregation='idw' gewichtet die k naechsten Punkte mit 1/d^p und legt
+    # das Ergebnis auf den Rang 1. Die uebrigen Rangspalten fallen weg, der Rest
+    # der Pipeline sieht also unveraendert '<feature>_1' — Featurelisten und
+    # Modellverdrahtung bleiben gleich, nur der Inhalt ist interpoliert statt
+    # vom naechstgelegenen Punkt uebernommen.
+    #
+    # Gedacht als Gegenstueck zum Wind-Pfad, wo dieselbe Aggregation
+    # (dcrnn nwp_aggregation=idw_alt) messbar hilft. Default bleibt 'nearest',
+    # bestehende Laeufe aendern sich also nicht.
+    if merged is not None and str(nwp_aggregation).lower() == 'idw' and len(per_rank) > 1:
+        raenge = sorted(per_rank)
+        w = np.array([1.0 / max(dist_je_rang.get(r, 1.0), 0.05) ** idw_power for r in raenge])
+        w = w / w.sum()
+        basis = sorted({c.rsplit('_', 1)[0] for c in merged.columns
+                        if c not in ('starttime', 'forecasttime')
+                        and c.rsplit('_', 1)[-1].isdigit()})
+        for feat in basis:
+            spalten = [f'{feat}_{r}' for r in raenge if f'{feat}_{r}' in merged.columns]
+            if len(spalten) < 2:
+                continue
+            gew = w[:len(spalten)] / w[:len(spalten)].sum()
+            merged[f'{feat}_1'] = merged[spalten].to_numpy() @ gew
+            for c in spalten[1:]:
+                del merged[c]
+        logger.info(
+            "nwp_aggregation=idw: %d Gitterpunkte je Feature mit 1/d^%g kombiniert "
+            "(Entfernungen %s km) — Ergebnis liegt auf Rang 1.",
+            len(raenge), idw_power,
+            ', '.join(f"{dist_je_rang.get(r, float('nan')):.2f}" for r in raenge))
 
     # In ganzen Minuten rechnen: step_h ist bei 10 min = 1/6 h binär nicht exakt,
     # und ``lead · step_h`` verfehlt dann das 10-min-Raster der Messungen um
@@ -1049,6 +1084,8 @@ def preprocess_solar_icond2(path: str,
         features=icond2_features,
         forecast_hours=forecast_hours,
         next_n_grid_points=params_cfg.get('next_n_grid_points', 1),
+        nwp_aggregation=params_cfg.get('nwp_aggregation', 'nearest'),
+        idw_power=float(params_cfg.get('idw_power', 2.0)),
         step_h=step_h,
         n_leads=n_leads,
         starttime_min=lower,
