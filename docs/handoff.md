@@ -246,6 +246,62 @@ Was dabei über die Aufgabe hinaus anfiel und ebenfalls behoben ist: der
 `run_time`-Folgefehler (§4.1) und der ECMWF-9999-Bug in der Ingest-Pipeline
 (§4.2).
 
+### 5.1.1 Solar-HPO für den TFT — läuft seit 16.09.2026
+
+`configs/solar_tft/config_solar_tft_hpo.yaml`, Studie
+`cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo`, zehn Worker über l2/l1/ws
+(`scripts/run_solar_hpo.sh`). Räumliche 3-Fold-CV über `configs/solar_folds.yaml`,
+150 Trials à drei Trainings, Training bis `val_start` 2024-08-01, Validierung
+bis `test_start` 2025-08-01 — das Testjahr bleibt unberührt.
+
+Gemessene Laufzeit: rund 36 min je Fold (15 min Vorlauf, 21 min für 13 Epochen).
+Early Stopping greift bei Epoche 3–4, `max_epochs_per_trial: 100` ist also nur
+eine nie erreichte Obergrenze; `hpo_tft_bc.py:511` meldet ohnehin den besten
+Epochenwert an Optuna. Mit MedianPruner überschlägig 9–12 h.
+
+**`hpo.optional_features`** — drei Kandidaten als binäre Hyperparameter
+(`relhum_2m`, `t_2m`, `u_10m`), statt sie vorab festzulegen. Grundlage ist ein
+Leave-one-out-Screening auf den Fold-1-Zielstationen im Validierungsjahr; die
+Begründung je Feature steht im Kopf der Config. Kurzfassung der Befunde, die
+gegen weitere Features sprechen:
+
+* Der Featuresatz ist gesättigt: die genutzten Features erklären bei GHI 85.0 %
+  der Restvarianz gegen ICON, kein einzelnes trägt mehr als 0.21 % bei, und die
+  Strahlungstripel (ghi/dhi/bhi, je ICON und ECMWF) sind exakt linear abhängig.
+* Zur Windfrage: der **Betrag** trägt weniger als die **Richtung**
+  (`wind_speed` 0.063 % gegen `wind_dir_sin` 0.155 % bei DHI). `u_10m` enthält
+  beides und braucht kein abgeleitetes Feature.
+* `td_2m` ist über die Magnus-Formel exakt aus `t_2m` und `relhum_2m`
+  berechenbar — keine dritte Information.
+
+**`next_n_grid_points` bleibt fest auf 1.** Zwei unabhängige Tests:
+
+* Gittertest (ohne Training): die ICON-Strahlungsprognose ist räumlich extrem
+  glatt — Korrelation zum Stationspunkt 0.998 auf 5 km und 0.982 auf 40 km,
+  kein Punkt trägt nach Herausrechnen des Stationspunktes etwas zur Korrektur
+  bei (alle |r| < 0.012). Das erklärt `ab_grid4` weitergehend als bisher: nicht
+  die Nähe der vier Punkte ist der Grund, sondern dass ICON-D2 die Bewölkung
+  auf dieser Skala nicht differenziert auflöst.
+* IDW-Test (mit Training, `params.nwp_aggregation: idw`, neu in `utils/solar.py`):
+  drei Varianten à drei Wiederholungen. `nearest` 53.331 ± 0.199,
+  `idw4` 53.316 ± 0.126, `idw9` 53.258 ± 0.209 — die Unterschiede liegen unter
+  der Lauf-zu-Lauf-Streuung. Gepaart über die Stationen zeigt `idw9` bei GHI
+  einen schwachen Hinweis (Median −0.165 W/m², an 76 % der Stationen besser,
+  p = 0.076), bei DHI dreht das Vorzeichen. Nicht in den Suchraum aufgenommen;
+  die Option bleibt im Code, Default `nearest`.
+
+**Offener Punkt: Station 05792 fällt aus dem CL-Pfad.** Seit `dc8d295`
+(`ist_tag`-Fix) verwirft das Preprocessing die Alpenstation vollständig
+("keine Daten übrig") — auch mit der unveränderten Arm-Config, mit der sie am
+14.09. noch durchlief. Ursache ist die Korrektur selbst: wo vorher Nachtnullen
+erfunden wurden, bleiben die Lücken offen, und bei dieser ohnehin dünnen
+Station (18 % echte Messwerte im Testjahr) kippt das über `dropna()` den
+gesamten Bestand. Die HPO läuft deshalb auf **61 statt 62 Pool-Stationen**, für
+alle Trials gleich. Der **GNN-Pfad verliert sie nicht** — die `v5`-Parquets
+haben 21 Zielstationen. Ein späterer Vergleich der HPO-Ergebnisse gegen die
+DCRNN-Arme steht damit auf 20 gegen 21 Stationen; `eval_solar_arch.py` fängt
+das über die gemeinsame Menge ab, es sollte aber bewusst entschieden werden.
+
 **Offen bleibt:**
 
 * **Solar-HPO für das DCRNN.** Ohne sie bleibt jeder Architekturvergleich
