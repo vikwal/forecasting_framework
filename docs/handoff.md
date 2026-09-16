@@ -276,10 +276,20 @@ kann eine halb geschriebene `prepared.pkl` sehen — ein plausiblerer Auslöser 
 "empty split"-Fehlschläge als das Cache-Evicting, das zuerst verdächtigt wurde.
 Erst einen Worker je Host, dann die übrigen.
 
-Gemessene Laufzeit: rund 36 min je Fold (15 min Vorlauf, 21 min für 13 Epochen).
-Early Stopping greift bei Epoche 3–4, `max_epochs_per_trial: 100` ist also nur
-eine nie erreichte Obergrenze; `hpo_tft_bc.py:511` meldet ohnehin den besten
-Epochenwert an Optuna. Mit MedianPruner überschlägig 9–12 h.
+Gemessene Laufzeit **mit warmem Cache** (16.09.2026, l2): ein ganzer Trial rund
+23 min — 40 s Vorlauf für alle drei Fold-Einträge zusammen, dann 6–9 min je Fold
+bei 19–29 Epochen bis Early Stopping. Die früher notierten "36 min je Fold,
+davon 15 min Vorlauf" galten für Läufe, die den Cache noch bauen mussten; sie
+beschreiben nicht den Dauerbetrieb. Fold 1 kostet je Trial ~27 s/Epoche, Fold 2
+und 3 nur 12–15 s — der Unterschied ist der `torch.compile`-Aufwand, der einmal
+je Trial anfällt. `max_epochs_per_trial: 100` ist eine nie erreichte Obergrenze;
+`hpo_tft_bc.py:511` meldet ohnehin den besten Epochenwert an Optuna. Bei 150
+Trials auf zehn Workern überschlägig 5–6 h, mit MedianPruner darunter.
+
+GPU-Auslastung schwankt stark mit der Trial-Größe und ist kein Fehlerzeichen:
+gemessen 25 % bei `batch=64, hidden=44` gegen 91 % bei `batch=382, hidden=111`.
+Ein kleiner TFT lastet eine A100 nicht aus; auf A6000 und 4090 liegt der Wert
+entsprechend höher.
 
 **`u_10m` fest aufgenommen, `hpo.optional_features` leer.** Die drei Kandidaten
 (`relhum_2m`, `t_2m`, `u_10m`) standen zunächst als binäre Hyperparameter im
