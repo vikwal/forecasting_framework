@@ -32,7 +32,13 @@ dataroot_fuer() { case "$1" in l1) echo /mnt/nvme1;; *) echo /mnt/lambda1/nvme1;
 # Cache-Verzeichnis: der Default /mnt/nvme2/data_cache existiert auf l2 und l1,
 # auf ws nicht — dort scheiterte jeder Trial mit "Permission denied: /mnt/nvme2".
 cachedir_fuer() { case "$1" in ws) echo '$HOME/data_cache';; *) echo /mnt/nvme2/data_cache;; esac; }
-cachegb_fuer()  { echo 500; }   # l2 2.5 TB, l1 5.1 TB, ws 2.1 TB frei
+# 150 GB reichen, seit hpo.optional_features leer ist: die Studie braucht dann
+# genau 3 Cache-Eintraege (einen je spatialem Fold) zu je ~16.5 GB, zusammen
+# ~50 GB. Mit den drei binaeren Feature-Flags waren es 8 Kombinationen mal 3
+# Folds = ~400 GB je Host, und enforce_cache_budget raeumte bei einem Budget von
+# 500 GB im Dauerbetrieb Eintraege weg, die ein anderer Worker kurz darauf neu
+# bauen musste (60 Evictions allein am 16.09.2026).
+cachegb_fuer()  { echo 150; }
 repo_fuer()     { case "$1" in lokal) echo "$REPO_L2";; *) echo '$HOME/Work/forecasting_framework';; esac; }
 
 echo "Studie: $(basename $CFG .yaml)${SUF:+ (Suffix $SUF)} — ${#SLOTS[@]} Worker"

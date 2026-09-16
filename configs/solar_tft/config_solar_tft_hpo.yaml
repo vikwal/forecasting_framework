@@ -12,15 +12,23 @@
 #   extra_train_files    leer: Arm A ist die Referenz, die neun Zusatzstationen
 #                        aus Arm B bleiben aussen vor.
 #
-# optional_features: drei Kandidaten als BINAERE Hyperparameter, statt sie vorab
-# aufzunehmen oder zu verwerfen. Grundlage ist ein Leave-one-out-Screening auf
-# den 21 Fold-1-Zielstationen im Validierungsjahr (partielle Korrelation mit
-# dem Rest gegen ICON, kontrolliert gegen alle genutzten Features):
+# Zusatzfeature u_10m, FEST aufgenommen (Entscheidung Viktor, 16.09.2026).
+# Grundlage ist ein Leave-one-out-Screening auf den 21 Fold-1-Zielstationen im
+# Validierungsjahr (partielle Korrelation mit dem Rest gegen ICON, kontrolliert
+# gegen alle genutzten Features):
 #
-#     relhum_2m  GHI 0.055 %   DHI 0.010 %   staerkster GHI-Kandidat
-#     u_10m      GHI 0.015 %   DHI 0.161 %   staerkster DHI-Kandidat
-#     t_2m       GHI 0.008 %   DHI  < 0.01 % dabei, weil ecmwf_t_2m genutzt wird
-#                                            und die Asymmetrie sonst offen bliebe
+#     u_10m      GHI 0.015 %   DHI 0.161 %   aufgenommen, staerkster Kandidat
+#     relhum_2m  GHI 0.055 %   DHI 0.010 %   verworfen, ein Drittel von u_10m
+#     t_2m       GHI 0.008 %   DHI  < 0.01 % verworfen, im Rauschen
+#
+# Die drei standen zunaechst als BINAERE Hyperparameter in hpo.optional_features.
+# Das kostete das Achtfache: die Flags aendern params.icond2_features, das in
+# data_cache._get_config_hash eingeht, also bekam jede der 8 Kombinationen einen
+# eigenen Cache-Eintrag — mal 3 spatiale Folds mal ~16.5 GB rund 400 GB je Host,
+# bei einem Budget von 500 GB. Das Ergebnis war ein Dauerlauf von
+# enforce_cache_budget, der Eintraege verwarf, die ein anderer Worker kurz darauf
+# neu bauen musste. Fuer 0.06-0.16 % Restvarianz ist das nicht zu rechtfertigen;
+# hpo.optional_features bleibt deshalb leer.
 #
 # Nicht aufgenommen, mit Begruendung:
 #   td_2m    exakt aus t_2m und relhum_2m berechenbar (Magnus) — keine dritte
@@ -42,6 +50,13 @@
 #
 #     train_start 2023-08-01 -> val_start 2024-08-01 -> test_start 2025-08-01
 #     Training                  Validierung              Testjahr, unberuehrt
+#
+# Suchraumgrenzen batch_size <= 512 und hidden_dim <= 128 (statt 1024/256):
+# die Worker laufen auf drei GPU-Generationen — A100 80 GB (l2), RTX A6000
+# 49 GB (l1) und RTX 4090 24 GB (ws). Ein Trial mit 1024/256 sprengt die 24 GB
+# und killt dort den ganzen Worker (CUDA OOM beendet hpo_tft_bc.py, statt nur
+# den Trial als FAIL zu markieren). Mit den kleineren Grenzen bleibt ws im
+# Verbund, statt zwei von 19 Workern zu verlieren.
 #
 # WICHTIG: kein train_end. preprocessing.prepare_data setzt es sonst als harte
 # Obergrenze des Trainingsblocks (Z. 381ff) — mit train_end 2024-07-31 UND
@@ -158,6 +173,7 @@ params:
   - h_snow
   - rho_snow
   - prr_gsp
+  - u_10m
   known_features:
   - ghi_nwp
   - dhi_nwp
@@ -188,6 +204,7 @@ params:
   - ecmwf_t_2m
   - ecmwf_tp
   - ecmwf_fal
+  - u_10m
   observed_features:
   - ghi
   - dhi
@@ -198,6 +215,11 @@ params:
   next_n_grid_points: 1
   get_next_grid_points_method: geodesic_next
   next_n_stations: 0
+  # explizit 0 statt weggelassen: hpo_tft_bc._range faellt ohne hpo-Range auf
+  # params zurueck und der Trial schreibt den Wert nach config['params'], wo
+  # data_cache._get_config_hash ihn liest. Fehlt der Schluessel hier, hasht die
+  # Config None und der Trial 0 — zwei Schluessel fuer dieselben Daten.
+  next_n_grid_ecmwf: 0
   topo_features_path: !ENV '${DATA_ROOT}/topo_features'
   target_transform: nwp_residual
   measurement_time_label: right
@@ -290,7 +312,7 @@ hpo:
     disable_pruning: false
   batch_size:
   - 32
-  - 1024
+  - 512
   epochs:
   - 1
   - 150
@@ -315,7 +337,7 @@ hpo:
     - 8
     hidden_dim:
     - 8
-    - 256
+    - 128
     dropout:
     - 0.01
     - 0.8
@@ -371,10 +393,7 @@ hpo:
   spatial_folds: configs/solar_folds.yaml
   max_epochs_per_trial: 100
   extra_train_files: []
-  optional_features:
-  - relhum_2m
-  - t_2m
-  - u_10m
+  optional_features: []
 eval:
   results_path: results/solar_hpo
   eval_on_all_test_data: true
