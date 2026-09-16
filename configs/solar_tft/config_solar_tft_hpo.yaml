@@ -307,7 +307,15 @@ hpo:
   pruning:
     use_median_pruner: true
     n_startup_trials: 10
-    n_warmup_steps: 2
+    # n_warmup_steps 1, nicht 2: hpo_tft_bc.py meldet je spatialem Fold einen
+    # Zwischenwert (trial.report(..., step=fold_idx), Schritte 0/1/2). Bei 2 darf
+    # Optuna erst ab Schritt 2 prunen — also nach dem letzten Fold, wenn die
+    # Arbeit schon getan ist. Messung vom 16.09.2026: alle 20 gepruneten Trials
+    # hatten alle drei Folds gerechnet und dauerten im Median 75.8 min gegen
+    # 39.6 min bei den vollstaendigen. Mit 1 faellt die Entscheidung nach Fold 2
+    # und der dritte entfaellt; gemeldet wird ohnehin der laufende Mittelwert
+    # ueber die bisherigen Folds, nicht der Einzelwert.
+    n_warmup_steps: 1
     interval_steps: 1
     disable_pruning: false
   batch_size:

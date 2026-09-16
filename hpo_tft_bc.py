@@ -365,7 +365,20 @@ def main() -> None:
     logging.info(f'Previous trials: {len_trials} total, {completed_trials} completed, {pruned_trials} pruned.')
 
     trial_counter = 0
-    while completed_trials < base_config['hpo']['trials']:
+    while True:
+        # Den Studienstand JE ITERATION abfragen statt den prozesslokalen Zaehler
+        # fortzuschreiben. Zeile 361 liest ihn nur beim Start; mit N parallelen
+        # Workern rechnete deshalb jeder bis zu hpo.trials EIGENEN COMPLETE-Trials,
+        # die Studie lief also um den Faktor N zu lang (am 16.09.2026 mit zehn
+        # Workern: 1450 statt 150 Trials, rund zwoelf Tage statt eines). Der Read
+        # faellt einmal je Trial an, also etwa alle 40 min — unkritisch.
+        completed_trials = len(study.get_trials(
+            deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)))
+        if completed_trials >= base_config['hpo']['trials']:
+            logging.info(
+                f'Ziel erreicht: {completed_trials}/{base_config["hpo"]["trials"]} '
+                f'abgeschlossene Trials in der Studie. Worker beendet sich.')
+            break
         trial = study.ask()
         trial.set_user_attr("host", _PROV_HOST)
         trial.set_user_attr("commit", _PROV_COMMIT)
