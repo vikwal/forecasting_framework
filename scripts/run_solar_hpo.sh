@@ -51,7 +51,11 @@ echo "Studie: $(basename $CFG .yaml)${SUF:+ (Suffix $SUF)} — ${#SLOTS[@]} Work
 # der Worker an CUDA-OOM. Belegte Slots werden deshalb uebersprungen.
 laeuft_schon() {
     local host="$1" gpu="$2"
-    local probe="pgrep -af 'hpo_tft_bc[.]py' | grep -F -- '$(basename "$CFG")' | grep -q -- '--gpu $gpu '"
+    # Der Filter auf python ist noetig: die ssh-Wrapper der Remote-Slots laufen
+    # auf l2 und tragen deren '--gpu N' in der eigenen Kommandozeile. Ohne ihn
+    # haelt der lokale Test einen Slot fuer belegt, auf dem nichts laeuft.
+    local probe="pgrep -af 'hpo_tft_bc[.]py' | grep -E '^[0-9]+ [^ ]*python[0-9.]* ' \
+| grep -F -- '$(basename "$CFG")' | grep -q -- '--gpu $gpu '"
     if [ "$host" = lokal ]; then bash -c "$probe"; else ssh "$host" "$probe"; fi
 }
 
