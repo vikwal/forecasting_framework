@@ -12,23 +12,28 @@
 #   extra_train_files    leer: Arm A ist die Referenz, die neun Zusatzstationen
 #                        aus Arm B bleiben aussen vor.
 #
-# optional_features: sechs Kandidaten als BINAERE Hyperparameter, statt sie
-# vorab aufzunehmen oder zu verwerfen. Das Screening vom 16.09.2026 (partielle
-# Korrelation mit dem Rest gegen ICON, Leave-one-out gegen alle genutzten
-# Features) gibt ihnen 0.001-0.16 % zusaetzlich erklaerte Restvarianz — das ist
-# die Groessenordnung bereits genutzter Features wie clct (0.04 % GHI) und zu
-# wenig fuer eine Vorab-Entscheidung in die eine oder andere Richtung:
+# optional_features: drei Kandidaten als BINAERE Hyperparameter, statt sie vorab
+# aufzunehmen oder zu verwerfen. Grundlage ist ein Leave-one-out-Screening auf
+# den 21 Fold-1-Zielstationen im Validierungsjahr (partielle Korrelation mit
+# dem Rest gegen ICON, kontrolliert gegen alle genutzten Features):
 #
-#     u_10m      GHI 0.008 %   DHI 0.159 %   <- staerkster Kandidat, bei DHI
-#     t_g        GHI 0.027 %   DHI 0.078 %
-#     relhum_2m  GHI 0.069 %   DHI 0.006 %
-#     td_2m      GHI 0.060 %   DHI 0.007 %
-#     v_10m      GHI 0.005 %   DHI 0.060 %
-#     t_2m       GHI 0.001 %   DHI < 0.001 %  <- dabei, weil ecmwf_t_2m genutzt
-#                                               wird und die Asymmetrie sonst
-#                                               ungeklaert bliebe
+#     relhum_2m  GHI 0.055 %   DHI 0.010 %   staerkster GHI-Kandidat
+#     u_10m      GHI 0.015 %   DHI 0.161 %   staerkster DHI-Kandidat
+#     t_2m       GHI 0.008 %   DHI  < 0.01 % dabei, weil ecmwf_t_2m genutzt wird
+#                                            und die Asymmetrie sonst offen bliebe
 #
-# prs_gsp und prg_gsp fehlen bewusst: exakt 0.000 % in beiden Zielgroessen.
+# Nicht aufgenommen, mit Begruendung:
+#   td_2m    exakt aus t_2m und relhum_2m berechenbar (Magnus) — keine dritte
+#            Information, nur eine dritte Schreibweise derselben zwei Groessen.
+#   t_g      GHI 0.019 %, DHI 0.044 %, dazu Zirkularitaetsverdacht: die
+#            Bodentemperatur ist im Modell teilweise FOLGE der modellierten
+#            Einstrahlung und traegt damit vor allem die Modellmeinung, die
+#            ghi_nwp schon liefert (niedrigster eigenstaendiger Anteil, 51 %).
+#   v_10m    DHI 0.033 %, und u_10m deckt die Richtungsinformation bereits ab.
+#   wind_speed  DHI 0.063 %, GHI 0.003 % — der Betrag traegt deutlich weniger
+#            als die Richtung (wind_dir_sin allein: DHI 0.155 %). Ein Kanal
+#            genuegt, aber es muss die Richtung sein; u_10m enthaelt sie.
+#   prs_gsp, prg_gsp  exakt 0.000 % in beiden Zielgroessen.
 #
 # Zeitachse: cv_mode spatial verlangt eine FESTE Train/Val-Grenze data.val_start;
 # Training liegt strikt davor, die Validierung in [val_start, test_start). Die
@@ -308,7 +313,7 @@ hpo:
     - 0.8
     n_lstm_layers:
     - 1
-    - 5
+    - 3
     static_embedding_dim:
     - 8
     - 128
@@ -359,12 +364,9 @@ hpo:
   max_epochs_per_trial: 100
   extra_train_files: []
   optional_features:
-  - t_2m
   - relhum_2m
-  - td_2m
-  - t_g
+  - t_2m
   - u_10m
-  - v_10m
 eval:
   results_path: results/solar_hpo
   eval_on_all_test_data: true
