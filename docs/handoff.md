@@ -246,7 +246,7 @@ Was dabei über die Aufgabe hinaus anfiel und ebenfalls behoben ist: der
 `run_time`-Folgefehler (§4.1) und der ECMWF-9999-Bug in der Ingest-Pipeline
 (§4.2).
 
-### 5.1.1 Solar-HPO für den TFT — läuft seit 16.09.2026
+### 5.1.1 Solar-HPO für den TFT — neu aufgesetzt am 16.09.2026, 16:19
 
 `configs/solar_tft/config_solar_tft_hpo.yaml`, Studie
 `cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo`, zehn Worker über l2/l1/ws
@@ -254,16 +254,72 @@ Was dabei über die Aufgabe hinaus anfiel und ebenfalls behoben ist: der
 150 Trials à drei Trainings, Training bis `val_start` 2024-08-01, Validierung
 bis `test_start` 2025-08-01 — das Testjahr bleibt unberührt.
 
+**Der erste Anlauf vom Vormittag wurde verworfen und die Studie neu angelegt**
+(23 Trials gesichert in `archiv/optuna_…_vor_reset_20260916.csv`). Drei Ursachen,
+alle behoben in `a9ab2c6` und dem Folgecommit:
+
+* **GPU-OOM.** Der Suchraum reichte bis `batch_size` 1024 und `hidden_dim` 256;
+  ein Trial am oberen Ende belegte über 50 GB. Das sprengt die RTX 4090 auf ws
+  (24 GB), und der CUDA-OOM beendet nicht nur den Trial, sondern den ganzen
+  Worker — sein Trial bleibt als Zombie auf RUNNING stehen und blockiert den
+  MedianPruner (`n_startup_trials: 10` zählt COMPLETE). Jetzt 512 / 128.
+* **Doppelstart.** Ein zweiter Aufruf des Startskripts legte einen kompletten
+  zweiten Workersatz neben den laufenden: zwei Trainings je GPU, worauf auch die
+  A100 mit 80 GB an OOM starb. `run_solar_hpo.sh` überspringt belegte Slots jetzt.
+* **Cache-Explosion.** Siehe unten.
+
+Beim Neustart die Worker **gestaffelt** starten, wenn der Cache eines Hosts leer
+ist: `DataCache.save_preprocessed_data` schreibt ohne Lock und ohne atomares
+`os.replace` (den flock hat nur `GNNCache`). Mehrere Worker, die gleichzeitig mit
+leerem Cache anlaufen, bauen denselben Eintrag mehrfach parallel, und ein Leser
+kann eine halb geschriebene `prepared.pkl` sehen — ein plausiblerer Auslöser der
+"empty split"-Fehlschläge als das Cache-Evicting, das zuerst verdächtigt wurde.
+Erst einen Worker je Host, dann die übrigen.
+
 Gemessene Laufzeit: rund 36 min je Fold (15 min Vorlauf, 21 min für 13 Epochen).
 Early Stopping greift bei Epoche 3–4, `max_epochs_per_trial: 100` ist also nur
 eine nie erreichte Obergrenze; `hpo_tft_bc.py:511` meldet ohnehin den besten
 Epochenwert an Optuna. Mit MedianPruner überschlägig 9–12 h.
 
-**`hpo.optional_features`** — drei Kandidaten als binäre Hyperparameter
-(`relhum_2m`, `t_2m`, `u_10m`), statt sie vorab festzulegen. Grundlage ist ein
-Leave-one-out-Screening auf den Fold-1-Zielstationen im Validierungsjahr; die
-Begründung je Feature steht im Kopf der Config. Kurzfassung der Befunde, die
-gegen weitere Features sprechen:
+**`u_10m` fest aufgenommen, `hpo.optional_features` leer.** Die drei Kandidaten
+(`relhum_2m`, `t_2m`, `u_10m`) standen zunächst als binäre Hyperparameter im
+Suchraum. Das kostete das Achtfache an Cache: die Flags ändern
+`params.icond2_features`, das in `data_cache._get_config_hash` eingeht, also
+bekam jede der 8 Kombinationen mal 3 spatialer Folds einen eigenen Eintrag zu
+~16.5 GB — rund 400 GB je Host bei einem Budget von 500 GB. `enforce_cache_budget`
+lief daraufhin im Dauerbetrieb (60 Evictions an einem Vormittag) und verwarf
+Einträge, die ein anderer Worker kurz darauf neu bauen musste. Für 0.06–0.16 %
+Restvarianz ist das nicht zu rechtfertigen. Aufgenommen ist `u_10m` als
+stärkster Kandidat (DHI 0.161 %), verworfen `relhum_2m` (0.055 %) und `t_2m`
+(< 0.01 %). Bedarf jetzt 3 Einträge à ~16.5 GB je Host, Budget 150 GB (l1 600 GB,
+weil dort noch ~420 GB Wind-Cache im selben Manifest liegen — das Budget gilt
+für das Manifest als Ganzes, nicht je Studie).
+
+Zwei Fallstricke beim Cache-Schlüssel, beide am 16.09. aufgelaufen:
+
+* `params.next_n_grid_ecmwf` muss **explizit** in der Config stehen.
+  `hpo_tft_bc._range` fällt ohne `hpo`-Range auf `params` zurück und der Trial
+  schreibt den Wert nach `config['params']`, wo der Hash ihn liest. Fehlt der
+  Schlüssel, hasht die Config `None` und der Trial `0` — zwei Schlüssel für
+  dieselben Daten.
+* Der `model_name` im Hash ist **`tft`**, nicht `tft-bc`: `--model` hat den
+  Default `tft`, das `-bc` in `cl_m-tft-bc_…` ist Teil des Studien-Namensmusters
+  (`hpo_tft_bc.py:307`). Wer den Cache-Schlüssel von Hand nachrechnet, trifft
+  mit `tft-bc` daneben.
+
+**Wind-Cache auf l2 ist weg (16.09.2026).** Beim Aufräumen des Solar-Caches
+wurde auf l2 auch der Cache der abgeschlossenen Wind-Studien `wind_tft_sp_base`
+und `wind_tft_sp_hist` gelöscht (~310 GB) — `hpo_tft_bc.py` führt beide Use Cases
+im selben `.tft_bc_cache_manifest.json`, die Löschgrenze lag am Manifest statt am
+`data.use_case`. Die Optuna-Studien selbst sind unberührt, verloren ist nur
+vorprozessierter Cache: ein Wind-Retrain oder Testlauf auf l2 rechnet sein
+Preprocessing einmal neu. **Auf l1 liegt der Wind-Cache noch** (~420 GB,
+`/mnt/nvme2/data_cache`) — wer die Wind-Kette nochmal anfasst, tut das dort
+günstiger.
+
+Grundlage der Featurewahl ist ein Leave-one-out-Screening auf den
+Fold-1-Zielstationen im Validierungsjahr; die Begründung je Feature steht im Kopf
+der Config. Kurzfassung der Befunde, die gegen weitere Features sprechen:
 
 * Der Featuresatz ist gesättigt: die genutzten Features erklären bei GHI 85.0 %
   der Restvarianz gegen ICON, kein einzelnes trägt mehr als 0.21 % bei, und die
