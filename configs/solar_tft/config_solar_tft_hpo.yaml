@@ -43,6 +43,15 @@
 #     train_start 2023-08-01 -> val_start 2024-08-01 -> test_start 2025-08-01
 #     Training                  Validierung              Testjahr, unberuehrt
 #
+# WICHTIG: kein train_end. preprocessing.prepare_data setzt es sonst als harte
+# Obergrenze des Trainingsblocks (Z. 381ff) — mit train_end 2024-07-31 UND
+# test_start 2025-08-01 faellt das gesamte Validierungsjahr in die Luecke
+# zwischen beiden Bloecken, und der spatiale Val-Split ist leer. Ohne train_end
+# gilt train_end = test_start - 15 min, der Trainingsblock enthaelt also
+# Training UND Validierung, die _split_prepared_by_time bei val_start trennt.
+# Die funktionierenden spatial-Configs (configs/tft_bc/, configs/solar_dcrnn/)
+# setzen aus demselben Grund weder train_end noch train_start.
+#
 # Erzeugt aus configs/solar_tft/config_solar_tft_fold1.yaml.
 
 data:
@@ -124,7 +133,6 @@ data:
   - 05792
   - 05906
   train_start: '2023-08-01'
-  train_end: '2024-07-31'
   val_start: '2024-08-01'
   test_start: '2025-08-01'
   test_end: '2026-07-31'
