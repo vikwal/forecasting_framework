@@ -71,6 +71,7 @@ done | grep -c x"
     if [ "$host" = lokal ]; then bash -c "$probe"; else ssh "$host" "$probe"; fi
 }
 
+declare -A lfd   # laufende Nummer je host_gpu, fuer getrennte Logdateien
 for slot in "${SLOTS[@]}"; do
     host="${slot%%:*}"; gpu="${slot##*:}"
     n_laeuft="$(laufende_worker "$host" "$gpu")"; n_max="$(maxprogpu_fuer "$host")"
@@ -80,7 +81,13 @@ for slot in "${SLOTS[@]}"; do
     fi
     repo="$(repo_fuer "$host")"; droot="$(dataroot_fuer "$host")"; cgb="$(cachegb_fuer "$host")"
     cdir="$(cachedir_fuer "$host")"
-    log="logs/hpo_solar/w_${host}_g${gpu}.log"
+    # Eigene Logdatei je Worker, sonst schreiben bei Mehrfachbelegung beide in
+    # dieselbe und die Trials lassen sich nicht mehr auseinanderhalten. Die
+    # Nummer zaehlt die bereits laufenden mit, damit ein Nachstart einzelner
+    # Slots nicht in ein fremdes Log schreibt.
+    slot_key="${host}_${gpu}"
+    lfd["$slot_key"]=$(( ${lfd["$slot_key"]:-$n_laeuft} + 1 ))
+    log="logs/hpo_solar/w_${host}_g${gpu}_${lfd[$slot_key]}.log"
 
     rumpf="cd $repo && mkdir -p logs/hpo_solar && \
 eval \"\$(grep -E '^export (WEATHER_DB_URL|ECMWF_WIND_SL_URL|OPTUNA_STORAGE)=' ~/.bashrc)\" && \
