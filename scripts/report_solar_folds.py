@@ -326,6 +326,29 @@ def abb_heatmap(df: pd.DataFrame) -> str:
     return fig_zu_html(fig)
 
 
+def abb_ablation(pfad: Path) -> str:
+    """Beitrag des observed-Fensters je Lead-Block (Permutationstest)."""
+    d = pd.read_csv(pfad)
+    reihenfolge = ["0.0 h", "0.5 h", "1 h", "1.5–3 h", "3–6 h", "6–12 h", "12–24 h", "24–48 h"]
+    fig, ax = plt.subplots(figsize=(9.5, 3.6))
+    breite = .38
+    for i, (ziel, farbe) in enumerate((("ghi", C_MODELL), ("dhi", "#7fb1e8"))):
+        z = (d[d["target"] == ziel].groupby("block", sort=False)[["rmse_echt", "rmse_perm"]]
+             .mean().reindex(reihenfolge))
+        anteil = 100 * (z["rmse_perm"] - z["rmse_echt"]) / z["rmse_echt"]
+        x = np.arange(len(reihenfolge)) + (i - .5) * breite
+        balken = ax.bar(x, anteil, breite, color=farbe, label=ziel.upper())
+        for b, w in zip(balken, anteil):
+            if w > 1:
+                ax.text(b.get_x() + b.get_width() / 2, w + .4, f"{w:.0f}", ha="center",
+                        fontsize=8, color=C_TEXT)
+    ax.set_xticks(np.arange(len(reihenfolge))); ax.set_xticklabels(reihenfolge, fontsize=8.5)
+    ax.set_xlabel("Vorlaufzeit"); ax.set_ylabel("RMSE-Anstieg ohne Historie (%)")
+    ax.legend(fontsize=8.5); _grid(ax)
+    ax.set_title("Was die eigene Messhistorie beiträgt")
+    return fig_zu_html(fig)
+
+
 def abb_stationen(je_station: pd.DataFrame) -> str:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
     for ax, ziel in zip(axes, ("ghi", "dhi")):
@@ -497,6 +520,10 @@ def baue_bericht(df: pd.DataFrame, folds, pfad: Path) -> None:
     lead = nach(df[df["target"] == "ghi"], "lead_h")
     skill_kurz = lead.loc[lead["lead_h"] <= 6, "skill_nwp"].mean()
     skill_lang = lead.loc[lead["lead_h"] >= 36, "skill_nwp"].mean()
+    # Lead 0 gesondert: dort wirkt die eigene Messhistorie, und ein Block 0-6 h
+    # mittelt genau diesen Effekt weg (12 Leads, von denen zwei ihn tragen).
+    skill_lead0 = float(lead.loc[lead["lead_h"] == 0, "skill_nwp"].iloc[0])
+    skill_1_6 = float(lead.loc[(lead["lead_h"] > 1) & (lead["lead_h"] <= 6), "skill_nwp"].mean())
 
     stunden = nach(df[df["target"] == "ghi"], "hour")
     schlimmste_stunde = int(stunden.loc[stunden["rmse"].idxmax(), "hour"])
@@ -577,12 +604,21 @@ ICON-D2 liegt {abs(d['bias_nwp']):.1f} {EINHEIT} zu niedrig, der TFT {abs(d['bia
 <h2>2. Wie lange trägt die Korrektur?</h2>
 {abb_lead(df)}
 {abb_skill_lead(df)}
-<p>Der absolute Fehler beider Seiten wächst mit der Vorlaufzeit, der Abstand zwischen
-ihnen bleibt aber weitgehend erhalten: der Skill liegt in den ersten sechs Stunden bei
-{skill_kurz:+.3f} und jenseits von 36 Stunden noch bei {skill_lang:+.3f}. Anders als beim
-Wind, wo der Vorsprung der Nachbearbeitung mit dem Lead spürbar schrumpft, ist der
-Gewinn hier fast lead-unabhängig — ein Hinweis darauf, dass er aus einer systematischen
-Korrektur stammt und nicht aus Information über den aktuellen Zustand.</p>
+<p>Der absolute Fehler beider Seiten wächst mit der Vorlaufzeit, der Skill verläuft
+dabei aber nicht flach, sondern in drei Abschnitten:</p>
+<div class="befund">
+<b>Lead 0</b> — Skill {skill_lead0:+.3f}. Hier wirkt die eigene Messhistorie: das Modell
+sieht im observed-Fenster die letzten 48 h NWP-Fehler dieser Station, und der Fehler des
+laufenden Zeitschritts hängt mit dem zuletzt gemessenen stark zusammen.<br>
+<b>Lead 1–6 h</b> — Skill {skill_1_6:+.3f}. Die Autokorrelation des Residuums ist nach
+ein bis zwei Stunden aufgebraucht; was bleibt, ist die Bias-Korrektur aus Abschnitt 4.<br>
+<b>Lead ab 36 h</b> — Skill {skill_lang:+.3f}. Der Vorsprung wächst wieder, weil die rohe
+NWP-Prognose mit der Vorlaufzeit stärker verliert als die Korrektur.
+</div>
+<p>Wichtig für die Lesart der Abbildung: Vorlaufzeit und Tageszeit sind bei Solarstrahlung
+gekoppelt. Lead 0–3 h bedeutet beim 06-UTC-Lauf den Morgen, beim 15-UTC-Lauf den späten
+Nachmittag — beide mit wenig Strahlung und entsprechend kleinem absolutem Fehler. Deshalb
+die folgende Auftrennung nach Laufstunde, in der die Tageszeit kontrolliert ist.</p>
 {abb_runstunde(df)}
 <p>Nach Läufen getrennt zeigt sich dasselbe Bild für alle vier Startzeiten.</p>
 """)
@@ -645,9 +681,10 @@ trüber ICON-D2 die Lage sieht, desto mehr ist von der Nachbearbeitung zu erwart
 {abb_heatmap(df)}
 <p>Regime und Vorlaufzeit zusammen: die Zeilen trennen sich deutlich, die Spalten kaum —
 was zählt, ist die Wetterlage. Innerhalb der ergiebigen Regime <i>wächst</i> der Vorsprung
-sogar mit der Vorlaufzeit (heiter: {hm_kurz:+.3f} bei 0–6 h auf {hm_lang:+.3f} bei 36–48 h).
-Das passt zum Befund aus Abschnitt 2: die Korrektur ist über den ganzen Horizont gleich
-wirksam, während die rohe NWP-Prognose mit der Zeit an Qualität verliert.</p>
+sogar mit der Vorlaufzeit (heiter: {hm_kurz:+.3f} bei 0–6 h auf {hm_lang:+.3f} bei 36–48 h),
+weil die rohe NWP-Prognose mit der Zeit stärker verliert als die Korrektur. Der
+Lead-0-Effekt aus Abschnitt 2 geht in diesen Blöcken unter — er betrifft nur die ersten
+ein bis zwei Zeitschritte.</p>
 """)
 
     sk = st_ghi["skill_nwp"]
@@ -656,8 +693,32 @@ wirksam, während die rohe NWP-Prognose mit der Zeit an Qualität verliert.</p>
     schwach = st_ghi.nsmallest(1, "skill_nwp").iloc[0]
     stark = st_ghi.nlargest(1, "skill_nwp").iloc[0]
 
+    abl_pfad = OUT_CSV / "solar_tft_ablation_observed.csv"
+    if abl_pfad.exists():
+        abl = pd.read_csv(abl_pfad)
+        _g = abl[abl["target"] == "ghi"].groupby("block", sort=False)[["rmse_echt", "rmse_perm"]].mean()
+        _p = lambda b: 100 * (_g.loc[b, "rmse_perm"] - _g.loc[b, "rmse_echt"]) / _g.loc[b, "rmse_echt"]
+        teile.append(f"""
+<h2>5. Was trägt die eigene Messhistorie bei?</h2>
+<p>Das Modell sieht im observed-Fenster die letzten 48 h der Zielstation — wegen
+<code>target_transform: nwp_residual</code> genauer: 48 h NWP-<i>Fehler</i>historie. Wie viel
+davon in der Vorhersage ankommt, lässt sich am fertigen Modell messen: dieselben Eingaben
+zweimal durchrechnen, einmal mit echtem Fenster und einmal mit über die Läufe permutiertem.
+Die Permutation erhält die Verteilung des Kanals und zerstört nur seinen Bezug zum Lauf.</p>
+{abb_ablation(abl_pfad)}
+<div class="befund"><b>Der Beitrag ist groß, aber kurz.</b> Bei Lead 0 steigt der RMSE ohne
+Historie um {_p("0.0 h"):.0f} % (GHI), nach einer halben Stunde sind es {_p("0.5 h"):.0f} %,
+nach einer Stunde {_p("1 h"):.0f} %, ab drei Stunden unter {_p("3–6 h"):.1f} %. Das deckt sich
+mit der Autokorrelation des Residuums selbst: 0.55 am Laufzeitpunkt, 0.33 nach einer Stunde,
+ab sechs Stunden nicht mehr messbar. Über alle 96 Leads gemittelt bleiben rund 1 % (GHI)
+bzw. 2 % (DHI) — genug, um zwei Studien zu trennen, aber wenig für eine 48-h-Prognose.</div>
+<p>Für das Nowcasting ist das der wichtigste Kanal des Modells, für die Tagesplanung fast
+bedeutungslos. Gemessen an 12 Stationen über alle drei Folds
+(<code>scripts/ablate_solar_observed.py</code>).</p>
+""")
+
     teile.append(f"""
-<h2>5. Welche Stationen profitieren?</h2>
+<h2>6. Welche Stationen profitieren?</h2>
 {abb_stationen(je_station)}
 <div class="befund"><b>Alle.</b> {gewinner} von {len(st_ghi)} Stationen liegen bei GHI unter
 der ICON-D2-Referenz, bei DHI {gewinner_dhi} von {len(st_dhi)} — im Scatter liegt jeder Punkt
@@ -675,7 +736,7 @@ Netz, ohne dass sich Nord/Süd oder Höhenlagen klar absetzen.</p>
 """)
 
     teile.append(f"""
-<h2>6. Vorhersage gegen Messung</h2>
+<h2>7. Vorhersage gegen Messung</h2>
 {abb_scatter(df)}
 <div class="befund"><b>Der TFT deckelt seine Vorhersagen.</b> Bei DHI endet die
 Punktwolke bei rund {deckel['dhi']:.0f} {EINHEIT} — darüber sagt das Modell praktisch
@@ -691,7 +752,7 @@ was eine Nachbearbeitung ohne zusätzliche Beobachtungsinformation leisten kann.
     bestes_s = str(bestes).replace("\n", " ")
     schlecht_s = str(schlechtestes).replace("\n", " ")
     teile.append(f"""
-<h2>7. Stationen im Einzelnen</h2>
+<h2>8. Stationen im Einzelnen</h2>
 {tabelle(st_ghi.sort_values('skill_nwp', ascending=False)
          .assign(station_id=st_ghi.sort_values('skill_nwp', ascending=False)['station_id']),
          {"station_id": "Station", "n": "Schritte", "rmse": "RMSE TFT", "rmse_nwp": "RMSE ICON",
