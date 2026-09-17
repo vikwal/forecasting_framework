@@ -20,7 +20,12 @@ REPO_L2="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_L2" || exit 1
 
 SUF="${1:-}"; shift || true
-CFG="configs/solar_tft/config_solar_tft_hpo.yaml"
+# Welcher Arm gefahren wird, steht in CFG. Default ist die Studie mit eigener
+# Messhistorie; der Arm ohne sie laeuft ueber
+#   CFG=configs/solar_tft_nohist/config_solar_tft_nohist_hpo.yaml scripts/run_solar_hpo.sh
+# Die Worker-Zaehlung unten filtert auf den Config-Basename, zwei Arme koennen
+# sich also nicht gegenseitig als "laeuft schon" zaehlen.
+CFG="${CFG:-configs/solar_tft/config_solar_tft_hpo.yaml}"
 [ -f "$CFG" ] || { echo "Config fehlt: $CFG"; exit 1; }
 
 #: host:gpu — auf l1 tragen 4-7 derzeit Fremdlast eines anderen Nutzers,

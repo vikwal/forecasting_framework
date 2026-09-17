@@ -1,9 +1,20 @@
-# solar_tft — HPO ueber die drei raeumlichen Folds aus configs/solar_folds.yaml
+# solar_tft_nohist, Fold 1 — 41+0 Trainings-, 21 Zielstationen
 #
-# Trainingspool: 62 Poolstationen.
-# Die Stationsrollen je Fold setzt hpo_tft_bc.py aus spatial_folds; 'files' hier
-# ist der Gesamtpool, aus dem gezogen wird. hpo.extra_train_files nennt die
-# Stationen, die in JEDEM Fold Trainingsrolle haben und nie Zielstation werden.
+# Trainingspool: 62 Poolstationen, ohne eigene Messhistorie.
+# Zielstationen identisch zum jeweils anderen Arm — nur so ist der Vergleich
+# der beiden Arme gepaart.
+#
+# cv_mode: spatial, Zeitachse wie in der HPO-Studie
+# cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo: Training < val_start
+# (2024-08-01), Early Stopping auf den Zielstationen des Folds im
+# Validierungsjahr [val_start, test_start). Kein train_end — siehe
+# FENSTER_FOLD im Generator.
+#
+# Auswertung ZWINGEND mit --eval-split val:
+#   get_test_results_tft_bc.py -c <diese Datei> \
+#       --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+#       --model-tag train_tft_bc_m-tft_c-solar_tft_nohist_fold1 --eval-split val
+# Ohne das Flag misst die Auswertung im Testjahr (test_start 2025-08-01).
 #
 # Erzeugt von scripts/make_solar_tft_configs.py — nicht von Hand pflegen.
 
@@ -23,32 +34,23 @@ data:
   - dhi
   files:
   - '00232'
-  - 00282
   - '00342'
   - '00460'
   - 00591
   - 00596
   - '00662'
   - 00691
-  - '00701'
   - '00704'
   - 00853
   - 00867
-  - 00880
-  - 00963
   - 01048
   - '01303'
-  - '01346'
   - 01468
   - '01503'
   - '01550'
   - '01612'
-  - 01639
   - 01684
   - 01691
-  - 01975
-  - '02014'
-  - '02115'
   - '02171'
   - '02261'
   - 02290
@@ -56,60 +58,69 @@ data:
   - 02559
   - '02601'
   - 02638
-  - '02667'
-  - '02712'
-  - 02932
   - '03015'
   - 03098
   - '03231'
   - 03287
   - '03366'
   - '03660'
-  - 03668
   - '04104'
   - '04177'
   - '04271'
-  - '04336'
   - 04393
   - '04466'
-  - 04911
   - '05100'
-  - '05142'
-  - '05404'
   - '05426'
-  - 05480
-  - '05705'
-  - 05792
   - 05856
-  - 05906
   - '07374'
   - '15444'
   val_files:
-  - 00183
-  - 00856
-  - 00953
-  - 01358
-  - '01420'
-  - '01443'
-  - 02925
-  - '03032'
-  - '03167'
-  - '03631'
-  - '03730'
-  - '03761'
-  - 03987
-  - '04745'
-  - 04928
-  - 05397
-  - 05779
-  - '06163'
-  - 06197
-  - '07370'
-  - '15000'
+  - 00282
+  - '00701'
+  - 00880
+  - 00963
+  - '01346'
+  - 01639
+  - 01975
+  - '02014'
+  - '02115'
+  - '02667'
+  - '02712'
+  - 02932
+  - 03668
+  - '04336'
+  - 04911
+  - '05142'
+  - '05404'
+  - 05480
+  - '05705'
+  - 05792
+  - 05906
+  test_files:
+  - 00282
+  - '00701'
+  - 00880
+  - 00963
+  - '01346'
+  - 01639
+  - 01975
+  - '02014'
+  - '02115'
+  - '02667'
+  - '02712'
+  - 02932
+  - 03668
+  - '04336'
+  - 04911
+  - '05142'
+  - '05404'
+  - 05480
+  - '05705'
+  - 05792
+  - 05906
   train_start: '2023-08-01'
-  train_end: '2024-07-31'
-  test_start: '2024-08-01'
-  test_end: '2025-08-01'
+  test_start: '2025-08-01'
+  test_end: '2026-07-31'
   train_frac: 1
   scale_x: true
   scale_y: false
@@ -121,6 +132,7 @@ data:
   eval_interval: 1
   ecmwf_solar_path: !ENV '${DATA_ROOT}/ecmwf/parquet/solar'
   interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/solar'
+  val_start: '2024-08-01'
 params:
   icond2_features:
   - ghi_nwp
@@ -164,9 +176,7 @@ params:
   - ecmwf_tp
   - ecmwf_fal
   - u_10m
-  observed_features:
-  - ghi
-  - dhi
+  observed_features: []
   static_features:
   - altitude
   - latitude
@@ -256,8 +266,8 @@ hpo:
     direction: minimize
   objective_reduction: best
   trials: 150
-  kfolds: 12
-  min_train_date: '2024-06-30'
+  kfolds: 1
+  min_train_date: null
   pruning:
     use_median_pruner: true
     n_startup_trials: 10
@@ -344,10 +354,8 @@ hpo:
     - 0.0001
     - 0.1
   cv_mode: spatial
-  spatial_folds: configs/solar_folds.yaml
-  extra_train_files: []
 eval:
-  results_path: results/solar_tft
+  results_path: results/solar_tft_nohist
   eval_on_all_test_data: true
   retrain_interval: 0
   t_0: 12

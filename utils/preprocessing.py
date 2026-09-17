@@ -4005,10 +4005,18 @@ def prepare_data_for_tft(data: pd.DataFrame,
         train_df_scaled = train_df.copy()
         test_df_scaled = test_df.copy()
 
+        # sklearn lehnt transform() auf 0 Zeilen ab ("Found array with 0 sample(s)").
+        # Bei einem leer erlaubten Testsplit (test_split_optional, s.o.) gibt es
+        # nichts zu skalieren — die leeren Spalten bleiben, wie sie sind.
+        def _skaliere_test(spalten, scaler):
+            if test_leer or not len(test_df):
+                return
+            test_df_scaled[spalten] = scaler.transform(test_df[spalten].values)
+
         # Transform all features
         # We use the DataFrame directly so sklearn can match feature names
         train_df_scaled[feature_cols] = scaler_x.transform(train_df[feature_cols].values)
-        test_df_scaled[feature_cols] = scaler_x.transform(test_df[feature_cols].values)
+        _skaliere_test(feature_cols, scaler_x)
 
         # feature_cols deliberately excludes target_col — but for target_col='wind_speed'
         # that same column is ALSO an observed input in the 'hist' variant (the station's
@@ -4028,7 +4036,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
                     f"{list(_tgt_scaler_cols)}, but this station provides {_tgt_present}."
                 )
             train_df_scaled[_tgt_scaler_cols] = _tgt_feat_scaler.transform(train_df[_tgt_scaler_cols].values)
-            test_df_scaled[_tgt_scaler_cols] = _tgt_feat_scaler.transform(test_df[_tgt_scaler_cols].values)
+            _skaliere_test(_tgt_scaler_cols, _tgt_feat_scaler)
 
         # Now extract the specific columns from the scaled dataframes
         if known_future_cols:
@@ -4043,20 +4051,26 @@ def prepare_data_for_tft(data: pd.DataFrame,
 
     else:
         # LOCAL SCALING STRATEGY (Per Group)
+        # Bei leerem Testsplit bekommt apply_scaling den Trainingsblock auch als
+        # Testblock und liefert dessen Ergebnis zurueck, das anschliessend verworfen
+        # wird — ein leeres Array wuerde sklearn hier genauso ablehnen wie oben.
+        _test_known = train_df if test_leer else test_df
         if known_future_cols:
             known_train_data, known_test_data, scalers['x_known'] = apply_scaling(train_df[known_future_cols].values,
-                                                                                test_df[known_future_cols].values,
+                                                                                _test_known[known_future_cols].values,
                                                                                 StandardScaler)
         if observed_past_cols:
             observed_train_data, observed_test_data, scalers['x_observed'] = apply_scaling(train_df[observed_past_cols].values,
-                                                                                        test_df[observed_past_cols].values,
+                                                                                        _test_known[observed_past_cols].values,
                                                                                         StandardScaler)
     # Scale Target Variable (y) Separately
     target_train_raw = train_df[target_cols].values
     target_test_raw = test_df[target_cols].values
     if scale_target:
+        # Leerer Testsplit: apply_scaling bekommt den Trainingsblock als Platzhalter,
+        # sein Testergebnis wird ohnehin verworfen (s. _skaliere_test oben).
         target_train_scaled, target_test_scaled, target_scaler = apply_scaling(
-            target_train_raw, target_test_raw,
+            target_train_raw, target_train_raw if test_leer else target_test_raw,
             scaler_type=scaler_y if scaler_y is not None else StandardScaler,
             fit=(scaler_y is None)
         )

@@ -24,7 +24,7 @@ wo sie in keinem Arm Zielstation sind.
 
 Je Arm entstehen:
 
-    config_solar_tft.yaml           HPO ueber die 3 raeumlichen Folds
+    config_<arm>_hpo.yaml           HPO ueber die 3 raeumlichen Folds
     config_solar_tft_fold{1,2,3}.yaml   Retrain je Fold
     config_solar_tft_testyear.yaml  Schlussmessung auf den 21 Teststationen
 
@@ -86,10 +86,28 @@ FENSTER_FOLD = dict(train_start='2023-08-01', val_start='2024-08-01',
 FENSTER_TEST = dict(train_start='2023-08-01', val_start='2025-08-01',
                     test_start='2026-08-01', test_end='2026-08-01')
 
+#: Vorlage der HPO-Config ist die TATSAECHLICH gefahrene Studie, nicht die alte
+#: Basisconfig: nur so ist ein neuer Arm bis auf den einen geaenderten Punkt
+#: identisch zum erprobten Aufbau (Suchraum, kfolds 3, val_start,
+#: max_epochs_per_trial, leeres optional_features).
+VORLAGE_HPO = REPO / 'configs/solar_tft/config_solar_tft_hpo.yaml'
+
+#: ``observed``: Was das Modell an gemessener Vergangenheit sieht. None laesst die
+#: Vorlage unveraendert (beide Zielgroessen als eigene Historie ueber das
+#: Lookback-Fenster). Eine leere Liste nimmt ihm jede Beobachtung — der TFT
+#: arbeitet dann nur auf known_past (utils/models.py:759, observed_dim=0) und ist
+#: eine reine Nachbearbeitung der NWP-Prognose.
 ARME = {
-    'solar_tft':      {'extra': [],              'label': '62 Poolstationen'},
-    'solar_tft_plus': {'extra': NEU_IM_TRAINING, 'label': '62 + 9 Stationen aus der Imputation'},
+    'solar_tft':        {'extra': [], 'observed': None,
+                         'label': '62 Poolstationen'},
+    'solar_tft_plus':   {'extra': NEU_IM_TRAINING, 'observed': None,
+                         'label': '62 + 9 Stationen aus der Imputation'},
+    'solar_tft_nohist': {'extra': [], 'observed': [],
+                         'label': '62 Poolstationen, ohne eigene Messhistorie'},
 }
+
+#: Fuer diesen Arm ist die HPO-Config die Vorlage selbst — nicht ueberschreiben.
+ARM_DER_VORLAGE = 'solar_tft'
 
 
 def _yaml_env_repr(dumper, data):
@@ -120,6 +138,17 @@ def _lade_vorlage() -> dict:
         return yaml.load(fh, Loader=loader)
 
 
+def _hpo_vorlage() -> dict:
+    """Config der gefahrenen HPO-Studie, !ENV-Knoten bleiben erhalten."""
+    def env_ctor(loader, node):
+        return EnvTag(loader.construct_scalar(node))
+
+    loader = yaml.SafeLoader
+    yaml.add_constructor('!ENV', env_ctor, Loader=loader)
+    with open(VORLAGE_HPO) as fh:
+        return yaml.load(fh, Loader=loader)
+
+
 def _folds() -> tuple[list[str], list[tuple[str, list[str], list[str]]]]:
     with open(FOLDS) as fh:
         raw = yaml.safe_load(fh)
@@ -132,7 +161,7 @@ def _folds() -> tuple[list[str], list[tuple[str, list[str], list[str]]]]:
     return test, folds
 
 
-def _grundgeruest(vorlage: dict, arm: str, extra: list[str]) -> dict:
+def _grundgeruest(vorlage: dict, arm: str, extra: list[str], observed=None) -> dict:
     cfg = copy.deepcopy(vorlage)
     d, p, e = cfg['data'], cfg['params'], cfg['eval']
 
@@ -158,6 +187,8 @@ def _grundgeruest(vorlage: dict, arm: str, extra: list[str]) -> dict:
         if 'u_10m' not in p[schluessel]:
             p[schluessel] = list(p[schluessel]) + ['u_10m']
     p['next_n_grid_ecmwf'] = 0
+    if observed is not None:
+        p['observed_features'] = list(observed)
     e['exclude_imputed'] = True
     e['results_path'] = f'results/{arm}'
     cfg['_arm'] = {'name': arm, 'zusatzstationen': list(extra)}
@@ -197,26 +228,40 @@ def main() -> int:
         ziel = REPO / 'configs' / arm
 
         # --- HPO ueber die drei raeumlichen Folds -----------------------
-        cfg = _grundgeruest(vorlage, arm, extra)
-        cfg['data'].update(FENSTER_CV)
-        cfg['data']['files'] = pool + extra
-        cfg['data']['val_files'] = list(test_ids)   # Platzhalter; die Folds ueberschreiben ihn
-        cfg['data'].pop('test_files', None)
-        cfg['hpo']['cv_mode'] = 'spatial'
-        cfg['hpo']['spatial_folds'] = 'configs/solar_folds.yaml'
-        cfg['hpo']['extra_train_files'] = list(extra)
-        _schreibe(cfg, ziel / f'config_{arm}.yaml', f"""# {arm} — HPO ueber die drei raeumlichen Folds aus configs/solar_folds.yaml
+        # Abgeleitet aus der GEFAHRENEN Studie (VORLAGE_HPO), nicht aus der alten
+        # Basisconfig: Suchraum, kfolds 3, val_start, max_epochs_per_trial und das
+        # leere optional_features stehen dort so, wie sie sich bewaehrt haben. Ein
+        # neuer Arm unterscheidet sich damit in genau einem Punkt.
+        if arm != ARM_DER_VORLAGE:
+            cfg = _hpo_vorlage()
+            # data.files bleibt, wie die Vorlage es hat: in cv_mode='spatial' liest
+            # hpo_tft_bc.py den Pool aus hpo.spatial_folds und baut je Fold eine
+            # eigene Configkopie — das Feld ist dort Dokumentation, und jede
+            # Abweichung machte den Vergleich der Configs unnoetig unuebersichtlich.
+            cfg['hpo']['extra_train_files'] = list(extra)
+            cfg['eval']['results_path'] = f'results/{arm}'
+            if spez['observed'] is not None:
+                cfg['params']['observed_features'] = list(spez['observed'])
+            _schreibe(cfg, ziel / f'config_{arm}_hpo.yaml', f"""# {arm} — HPO ueber die drei raeumlichen Folds aus configs/solar_folds.yaml
 #
 # Trainingspool: {spez['label']}.
-# Die Stationsrollen je Fold setzt hpo_tft_bc.py aus spatial_folds; 'files' hier
-# ist der Gesamtpool, aus dem gezogen wird. hpo.extra_train_files nennt die
-# Stationen, die in JEDEM Fold Trainingsrolle haben und nie Zielstation werden.
+# Abgeleitet von configs/solar_tft/config_solar_tft_hpo.yaml, der Config der
+# abgeschlossenen Studie cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo. Alles ausser
+# dem Armunterschied ist von dort uebernommen, damit die Studien vergleichbar sind.
+#
+# Unterschied dieses Arms: params.observed_features = {spez['observed']!r}.
+# Leer heisst: der TFT sieht keine gemessene Vergangenheit, weder die eigene noch
+# eine fremde (next_n_stations ist 0), und arbeitet nur auf known_past —
+# utils/models.py:759 faengt observed_dim=0 ab.
 #
 # Erzeugt von scripts/make_solar_tft_configs.py — nicht von Hand pflegen.""", args.force)
+        else:
+            print(f'  uebersprungen (ist selbst die Vorlage): '
+                  f'{(ziel / f"config_{arm}_hpo.yaml").relative_to(REPO)}')
 
         # --- Retrain je Fold --------------------------------------------
         for i, (_, train_ids, val_ids) in enumerate(folds, start=1):
-            cfg = _grundgeruest(vorlage, arm, extra)
+            cfg = _grundgeruest(vorlage, arm, extra, spez['observed'])
             cfg['data'].update(FENSTER_FOLD)
             # train_end der Vorlage MUSS weg: es begrenzt df_train
             # (utils/preprocessing.py:412), und cv_mode='spatial' schneidet sein
@@ -263,7 +308,7 @@ def main() -> int:
 # Erzeugt von scripts/make_solar_tft_configs.py — nicht von Hand pflegen.""", args.force)
 
         # --- Schlussmessung ---------------------------------------------
-        cfg = _grundgeruest(vorlage, arm, extra)
+        cfg = _grundgeruest(vorlage, arm, extra, spez['observed'])
         cfg['data'].update(FENSTER_TEST)
         cfg['data'].pop('train_end', None)   # begrenzt df_train, s. FENSTER_FOLD
         cfg['data']['files'] = sorted(pool + extra)
