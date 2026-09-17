@@ -1028,6 +1028,13 @@ def _build_spatial_fold_data(fold_config: Dict, features: Dict, logger) -> Tuple
     # applies to its (fixed, whole-study) 'files' stations; here 'files' just rotates
     # per fold instead of being fixed for the whole study.
     fold_config['data']['neighbor_pool'] = list(train_ids)
+    # Der Testsplit [test_start, test_end] wird hier nie gelesen — Training und
+    # Validierung entstehen beide aus X_train, getrennt bei val_start. Bei der
+    # Schlussmessung liegt test_start am Ende der Datenreihe (das Val-Fenster IST
+    # das Testjahr), der Testsplit ist dann zu kurz fuer ein Fenster. Das ist kein
+    # Datenmangel, sondern die Bauart; prepare_data_for_tft darf deshalb nicht
+    # daran abbrechen. Der Trainingssplit bleibt geprueft.
+    fold_config['_test_split_optional'] = True
     logger.info("Spatial fold: neighbour pool for %d training stations: %d candidates "
                 "(train-role only)", len(train_ids), len(fold_config['data']['neighbor_pool']))
     train_dfs = preprocessing.get_data(data_dir=data_dir, config=fold_config, freq=freq,

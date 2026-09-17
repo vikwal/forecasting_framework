@@ -482,7 +482,8 @@ def pipeline(data: pd.DataFrame,
                                              scale_target=scale_target,
                                              scaler_x=config.get('scaler_x', None),
                                              scaler_y=config.get('scaler_y', None),
-                                             nwp_baseline_col=config.get('params', {}).get('nwp_baseline_col'))
+                                             nwp_baseline_col=config.get('params', {}).get('nwp_baseline_col'),
+                                             test_split_optional=config.get('_test_split_optional', False))
     elif config['model']['name'] == 'chronos':
         prepared_data = prepare_data_for_chronos2(
             data=df,
@@ -3798,7 +3799,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          scale_target: bool = False,
                          scaler_x: StandardScaler = None,
                          scaler_y: StandardScaler = None,
-                         nwp_baseline_col: str = None):
+                         nwp_baseline_col: str = None,
+                         test_split_optional: bool = False):
     """
     Prepares data for a Temporal Fusion Transformer, creating a lagged target input.
     Args:
@@ -3864,7 +3866,13 @@ def prepare_data_for_tft(data: pd.DataFrame,
     # Verwerfen unvollstaendiger NWP-Laeufe plus dropna() kann eine Station im
     # Testfenster leer sein. Ohne diese Pruefung faellt das erst tief in
     # get_static_features als "IndexError: index 0 is out of bounds" auf.
-    if len(test_df) == 0 or len(train_df) == 0:
+    # test_split_optional: cv_mode='spatial' schneidet Training UND Validierung aus
+    # X_train (data_cache._build_spatial_fold_data) und ruehrt X_test nie an. Liegt
+    # test_start am Ende der Datenreihe — bei der Solar-Schlussmessung ist das
+    # Val-Fenster [val_start, test_start) das ganze Testjahr, danach kommt nichts
+    # mehr —, dann ist der Testsplit leer oder zu kurz, ohne dass irgendetwas fehlt.
+    # Der Trainingssplit wird weiterhin geprueft.
+    if len(train_df) == 0 or (len(test_df) == 0 and not test_split_optional):
         raise EmptySplitError(
             f"Leerer Datensplit: train={len(train_df)} Zeilen, test={len(test_df)} Zeilen "
             f"(train_start={train_start}, test_start={test_start}, test_end={test_end}). "
@@ -3874,11 +3882,16 @@ def prepare_data_for_tft(data: pd.DataFrame,
     #logging.info(f"Training data range: {train_df.index.min()} to {train_df.index.max()} ({len(train_df)} rows)")
     #logging.info(f"Test data range:     {test_df.index.min()} to {test_df.index.max()} ({len(test_df)} rows)")
     scalers = {}
+    # Ein leerer Testsplit ist nur unter test_split_optional erlaubt (s.o.). Dann
+    # muss der gesamte Test-Zweig uebersprungen werden, nicht bloss seine Pruefung:
+    # get_static_features greift auf die erste Zeile zu und stirbt sonst mit
+    # "IndexError: index 0 is out of bounds".
+    test_leer = len(test_df) == 0
     # Static
     X_static_train = get_static_features(data=train_df,
                                          static_cols=static_cols)
-    X_static_test = get_static_features(data=test_df,
-                                        static_cols=static_cols)
+    X_static_test = (np.empty((0,), dtype=float) if test_leer
+                     else get_static_features(data=test_df, static_cols=static_cols))
 
     # Scale Static Features if scaler_x is provided and static features exist
     # CRITICAL: Static features must be scaled with the same scaler as dynamic features!
@@ -3899,7 +3912,13 @@ def prepare_data_for_tft(data: pd.DataFrame,
                     if col in static_features_in_scaler:
                         col_idx = scaler_feature_cols.index(col)
                         dummy_row_train[0, col_idx] = X_static_train[i]
-                        dummy_row_test[0, col_idx] = X_static_test[i]
+                        # Bei leerem Testsplit gibt es keine Testwerte. Der Zugriff
+                        # liefe hier in einen IndexError, den das except unten
+                        # abfangen wuerde — mit der Folge, dass auch die
+                        # TRAININGS-Statics unskaliert blieben und das Modell mit
+                        # falsch skalierten Eingaengen trainiert wuerde.
+                        if not test_leer:
+                            dummy_row_test[0, col_idx] = X_static_test[i]
 
                 # Transform
                 scaled_train = scaler_x.transform(dummy_row_train)
@@ -3908,7 +3927,8 @@ def prepare_data_for_tft(data: pd.DataFrame,
                 # Extract only the static feature columns
                 static_indices = [scaler_feature_cols.index(col) for col in static_features_in_scaler]
                 X_static_train = scaled_train[0, static_indices]
-                X_static_test = scaled_test[0, static_indices]
+                if not test_leer:
+                    X_static_test = scaled_test[0, static_indices]
 
                 logging.debug(f"Static features scaled using global scaler_x: {static_features_in_scaler}")
             else:
@@ -4057,15 +4077,21 @@ def prepare_data_for_tft(data: pd.DataFrame,
         future_horizon,
         step_size
     )
-    X_known_test, X_observed_test, y_test, test_indices = create_tft_sequences(
-        known_test_data,
-        observed_test_data,
-        target_test_scaled, # Pass the separately handled target data
-        test_df.index,
-        history_length,
-        future_horizon,
-        step_size
-    )
+    if test_leer:
+        X_known_test = np.empty((0, history_length + future_horizon, 0))
+        X_observed_test = np.empty((0, history_length, 0))
+        y_test = np.empty((0,))
+        test_indices = test_df.index[:0]
+    else:
+        X_known_test, X_observed_test, y_test, test_indices = create_tft_sequences(
+            known_test_data,
+            observed_test_data,
+            target_test_scaled, # Pass the separately handled target data
+            test_df.index,
+            history_length,
+            future_horizon,
+            step_size
+        )
 
     # Nicht-leerer Split heisst noch nicht: mindestens ein vollstaendiges Fenster.
     # Die Pruefung oben (Zeile ~3815) zaehlt Zeilen, hier zaehlen NWP-Laeufe: eine
@@ -4076,8 +4102,10 @@ def prepare_data_for_tft(data: pd.DataFrame,
     # array". Gemessen an synth_04887: 488 Trainings-, aber nur 4 Testlaeufe.
     # Als EmptySplitError faellt die Station wie jede andere lueckenhafte durch den
     # bestehenden Filter, statt den gesamten Lauf ueber alle Stationen abzubrechen.
-    for _name, _arr, _rows in (('Training', y_train, len(train_df)),
-                               ('Test', y_test, len(test_df))):
+    _zu_pruefen = [('Training', y_train, len(train_df))]
+    if not test_split_optional:
+        _zu_pruefen.append(('Test', y_test, len(test_df)))
+    for _name, _arr, _rows in _zu_pruefen:
         if len(_arr) == 0:
             raise EmptySplitError(
                 f"Kein vollstaendiges Fenster im {_name}zeitraum: {_rows} Zeilen "
@@ -4088,7 +4116,7 @@ def prepare_data_for_tft(data: pd.DataFrame,
 
     # --- Window raw NWP data with the same logic, then extract horizon portion ---
     nwp_raw_test_windowed = None
-    if nwp_raw_test_data is not None:
+    if nwp_raw_test_data is not None and len(y_test) > 0:
         # Window NWP raw data using the same windowing as known features
         # We pass it as "known" data and use a dummy for observed/target since
         # create_tft_sequences needs them. We only care about the known output.
