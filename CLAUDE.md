@@ -40,9 +40,11 @@ blockiert und braucht zuerst die Solar-Imputation.
 ## Wo nachschlagen (`docs/`, bei Bedarf lesen)
 
 **Stand & Übergaben** — [handoff.md](docs/handoff.md) (**AKTUELL, 17.09.2026**:
-Solar-TFT-HPO abgeschlossen §5.1.1, **Arbeitsauftrag Retrain + Schlussmessung in
-§5.1.2**; dazu die neun finalen Testläufe auf l1/l2/ws, Imputationskette, offene
-Stolperfallen), [handoff_testmode.md](docs/handoff_testmode.md),
+Solar-TFT-HPO abgeschlossen §5.1.1, **Fold-Retrain samt Auswertung erledigt und
+Schlussmessung laufend in §5.1.2** — dort auch `hpo.val_split` entfallen,
+Cache-Guard und die Multi-Target-Reparatur der Auswertung; dazu die
+Imputationskette und die offenen Stolperfallen),
+[handoff_testmode.md](docs/handoff_testmode.md),
 [expanding_window_retrain_handoff.md](docs/expanding_window_retrain_handoff.md)
 
 **Imputation** — [imputation_tft_switch.md](docs/imputation_tft_switch.md) (Sep 2026:

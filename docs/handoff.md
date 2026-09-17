@@ -1,4 +1,4 @@
-# Handoff — Solar-Kampagne, Stand 15.09.2026
+# Handoff — Solar-Kampagne, Stand 17.09.2026
 
 > **Vorgänger ersetzt.** Hier stand bis zum 14.09.2026 die abgeschlossene
 > Wind-Testauswertung (neun Läufe, Ergebnis als §19 in
@@ -33,11 +33,19 @@ die drei Folds sind für die HPO vorgesehen.
 | TFT Arm B (+9 Trainingsstationen) | GHI −0.05 (p = 0.66) / DHI −0.145 (p = 0.0094) |
 | TFT Static-Ablation (6 statt 3 statische Features) | Null-Ergebnis, p = 0.66 / 0.56 |
 | DCRNN v5, sechs Arme, Fold 1 | s. §2.1 — gegen den TFT gehalten |
+| TFT HPO-Retrain, Fold 1–3 (17.09.) | GHI RMSE **64.16**, Skill_NWP 0.105 / DHI **36.69**, 0.110 — s. §5.1.2 |
 
-Dateien unter `results/solar/` (TFT) und `results/solar_dcrnn_*_v5_*.pkl` (DCRNN).
+Dateien unter `results/solar/` (TFT Arm A/B), `results/solar_dcrnn_*_v5_*.pkl`
+(DCRNN) und `data/{test_results,raw_preds}/tft_solar_tft_fold<N>*` (HPO-Retrain).
 Die Auswertung der beiden TFT-Arme steht im Gesprächsverlauf, ein Skript dafür
 gibt es noch nicht; der Architekturvergleich läuft über
 `scripts/eval_solar_arch.py`.
+
+Der HPO-Retrain liegt **nicht** besser als Arm A, obwohl er dessen Aufgabe mit
+optimierten Hyperparametern löst. Das ist der Beleg für den HPO-Befund aus
+§5.1.1 — an dieser Stelle ist das Modell datenlimitiert. Die Zahlen beider Zeilen
+stammen aus verschiedenen Skripten und Laufmengen und sind auf ±0.5 W/m² genau zu
+lesen, nicht schärfer.
 
 ### 2.1 Architekturvergleich DCRNN ↔ TFT (15.09.2026)
 
@@ -430,182 +438,161 @@ das über die gemeinsame Menge ab, es sollte aber bewusst entschieden werden.
 * **Wiederholungsläufe je Arm** — bisher ein Seed je Arm, s. den Vorbehalt am
   Ende von §2.1.
 
-### 5.1.2 ARBEITSAUFTRAG: Retrain und Schlussmessung des Solar-TFT
+### 5.1.2 Retrain und Schlussmessung — Folds erledigt am 17.09.2026, Testjahr läuft
 
-**Ausgangslage.** Die HPO ist beendet (§5.1.1), die Hyperparameter stehen fest.
-Was fehlt, ist die Modellkette wie beim Wind-Pfad: erst je Fold ein Modell mit
-den besten Parametern nachtrainieren, speichern und auswerten, danach die
-Schlussmessung auf dem zurückgehaltenen Testjahr. Nichts davon ist begonnen —
-`results/solar_tft/` und `models/` enthalten noch keine Solar-TFT-Artefakte.
+**Die drei Fold-Modelle stehen und sind ausgewertet.** Trainiert mit den
+Hyperparametern aus Trial 111 (`--hpo-study`, nicht abgetippt), je Fold auf den
+41 bzw. 42 Trainingsstationen bis `val_start` 2024-08-01, Early Stopping auf den
+Zielstationen desselben Folds im Validierungsjahr — dieselbe CV-Achse wie die HPO.
 
-**Die besten Hyperparameter** (Trial 111, `val_rmse` 51.7188, gefunden auf `ws`,
-Commit `3a0a6c8`). Sie müssen nicht abgetippt werden — beide Skripte lesen sie
-über `--hpo-study` direkt aus der Optuna-Studie:
+| Fold | GHI RMSE | Skill_NWP | DHI RMSE | Skill_NWP | Stationen | val_rmse | Epochen |
+|---|---|---|---|---|---|---|---|
+| 1 | 65.72 | 0.098 | 37.53 | 0.105 | 21 | 53.160 | 12 |
+| 2 | 63.19 | 0.109 | 36.25 | 0.107 | 21 | 51.126 | 15 |
+| 3 | 63.56 | 0.107 | 36.30 | 0.117 | 20 | 51.663 | 17 |
+| **Mittel** | **64.16** | **0.105** | **36.69** | **0.110** | | | |
 
-```
-batch_size            59        num_lstm_layers        1
-lr                    0.005740  static_embedding_dim  36
-hidden_dim            33        clipnorm               2.1235
-n_heads                3        dropout                0.52135
-next_n_grid_points     1        next_n_grid_ecmwf      0      next_n_stations  0
-```
+Dateien: `models/train_tft_bc_m-tft_c-solar_tft_fold<N>.pt`,
+`data/test_results/tft_solar_tft_fold<N>.csv`,
+`data/raw_preds/tft_solar_tft_fold<N>_raw.parquet` (Schema wie DCRNN, mit
+`target`-Spalte).
 
-#### Schritt 1 — drei Fold-Modelle auf dem Validierungsjahr
+**Der HPO-Retrain ist nicht besser als Arm A** (§2: GHI 63.56 / 0.108, DHI 36.08
+/ 0.114). Fold 1 liegt sogar deutlich darüber. Das ist kein Widerspruch, sondern
+die Bestätigung des HPO-Befunds aus §5.1.1: der Abstand zwischen bestem Trial und
+Median lag bei 0.236 W/m², also in der Größenordnung der bloßen
+Wiederholungsstreuung. An dieser Stelle ist das Modell datenlimitiert, nicht
+hyperparameterlimitiert — **von der Schlussmessung ist entsprechend kein Sprung
+zu erwarten.**
 
-Je Fold ein Modell: Training auf den 41 bzw. 42 Trainingsstationen des Folds
-(Zeitraum 2023-08-01 … 2024-07-31), ausgewertet auf den 21 bzw. 20 Zielstationen
-desselben Folds im Validierungsjahr 2024-08-01 … 2025-07-31. Die Configs sind
-fertig und liegen in `configs/solar_tft/`.
+Zwei Belege, dass die Kette sauber sitzt:
+
+* Die val_rmse der Retrains treffen die Fold-Werte der HPO auf zwei
+  Nachkommastellen (53.160/51.126/51.663 gegen 53.14/51.21/51.65).
+* Verschiebungstest gegen die DCRNN-Seite über 5 627 915 gepaarte Zeilen: die
+  `nwp_ref`-Spalten beider Pfade stimmen bei Versatz 0 auf **0.0000 W/m²**
+  überein, bei ±1 Schritt liegen 34.65 W/m² dazwischen. Zeitachse, Basisspalte
+  und Gitterpunkt sind damit identisch; `horizon 1 = run_time` auf beiden Seiten.
+
+#### Was dafür zu reparieren war
+
+**Die vier Configs wären nach dem vollständigen Preprocessing abgebrochen.** Sie
+erbten aus `configs/solar_final/config_solar_final_lag.yaml` `hpo.kfolds: 12`,
+`train_cl_tft_bc.py` verlangt aber genau einen Fold; `cv_mode` setzte der
+Generator nur für die HPO-Config. Behoben in `scripts/make_solar_tft_configs.py`
+(Commit `d024146`) — die Configs sind **generiert und nicht von Hand zu pflegen**:
+
+* `fold{1,2,3}`: `cv_mode: spatial`, `kfolds: 1`, Zeitachse der HPO-Studie
+  (`val_start` 2024-08-01, `test_start` 2025-08-01). **`train_end` muss fehlen** —
+  es begrenzt `df_train` (`preprocessing.py:412`), und der spatial-Pfad schneidet
+  sein Val-Fenster genau daraus heraus; mit `train_end` bliebe es leer.
+* `testyear`: temporal, `kfolds: 1`. Validierung sind die 21 Teststationen im
+  Trainingszeitraum ab `min_train_date`, zeitlich getrennt vom Testjahr.
+
+**`hpo.val_split` ist ersatzlos entfallen** (Commit `fefd8f6`, 489 Configs und
+`utils/hpo.py`/`utils/data_cache.py`/`hpo_fl.py`). Getrennt wird nach Datum: im
+temporalen Pfad schneidet `_replace_val_with_val_files` die `val_files`-Stationen
+zeitlich zu, im räumlichen trennt `val_start`. `val_split` schnitt daneben nur
+noch Trainingsdaten ab, die anschließend verworfen wurden — die Schlussmessung
+lief damit zunächst auf 162 993 statt 171 572 Fenstern, also ohne die letzten
+fünf Wochen vor dem Testjahr. **`kfolds: 1` ohne `val_files` bricht jetzt ab**,
+das trifft `train_cl_tft_bc.py --test-mode` (leert `val_files`) und damit die
+beiden Wind-Testyear-Configs; sie vermerken es in ihrem Kopf.
+
+**Cache-Guard.** `data_cache.pruefe_cache_config` hält bei jedem Cache-Treffer 23
+Schlüssel gegen die Config des Erzeugerlaufs, die das Ergebnis verändern, ohne in
+`_get_config_hash` einzugehen (Zeitgrenzen, `val_start`, Skalierungsflags,
+Imputationspfade, `t_0`, `cv_mode`) — Abbruch mit beiden Werten statt stiller
+Weiterverwendung. Anlass: der korrigierte Testyear-Lauf bekam denselben Eintrag
+mit dem alten 5-%-Schnitt zurück, ohne dass etwas gewarnt hätte. Den Hash zu
+erweitern schied aus — er ist ein md5 über das ganze `hash_data`-Dict, jeder neue
+Schlüssel entwertet **jede** bestehende `cache_id` und macht bereits trainierte
+Modelle unauswertbar, weil `get_test_results_tft_bc.py` darüber `scaler_x`
+zurückholt.
+
+**`get_test_results_tft_bc.py` wertet jetzt je Zielgröße aus** — und hatte neben
+dem bekannten Multi-Target-Punkt drei weitere, die für Solar still falsch
+gerechnet hätten:
+
+* `tools.get_y` lief mit `clip_negative=True`; bei `target_transform:
+  nwp_residual` ist rund die Hälfte der Zielwerte negativ und wäre auf 0
+  geschnitten worden.
+* `valid_time` war auf die Wind-Konvention verdrahtet — jetzt über
+  `shared.resolution.lead0_offset`, sonst läge das Parquet 30 min gegen die
+  DCRNN-Seite versetzt (§3).
+* `pers_ref` war **durchgängig NaN, auch im Wind-Pfad**: `reindex` mit einem
+  `DatetimeIndex` trifft den MultiIndex nicht. Nachgeprüft an
+  `data/raw_preds/retrain_tft_sp_base_fold1_raw.parquet` — 100 % NaN, `skill` in
+  allen 51 Zeilen leer. Jetzt gefüllt (Bezugspunkt: ein Schritt vor
+  Prognosestart, wie `homo_sampler`).
+
+Dazu: `eval.exclude_imputed` elementweise über `<target>_observed`, `pred`/`gt`
+im Parquet in W/m² zurückgerechnet über die abgezogene Basisspalte, und `n_values`
+neben `n_samples` (Einzelwerte gegen Vorhersagefenster — was DCRNN `n_samples`
+nennt, ist `n_values`).
+
+#### Kommandos
 
 ```bash
-for N in 1 2 3; do
-  frcst/bin/python train_cl_tft_bc.py \
-      -c configs/solar_tft/config_solar_tft_fold${N}.yaml \
-      --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
-      --gpu <G> --cache-dir /mnt/nvme2/data_cache --max-cache-gb 150
-done
-```
-
-Erzeugt je Fold `models/train_tft_bc_m-tft_c-solar_tft_fold<N>.pt` (state_dict),
-`…_meta.pkl` und `…_history.pkl`. Danach die Auswertung:
-
-```bash
-for N in 1 2 3; do
-  frcst/bin/python get_test_results_tft_bc.py \
-      -c configs/solar_tft/config_solar_tft_fold${N}.yaml \
-      --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
-      --model-tag train_tft_bc_m-tft_c-solar_tft_fold${N} \
-      --raw-out-name tft_solar_tft_fold${N} --gpu <G>
-done
-```
-
-Erzeugt `data/test_results/tft_solar_tft_fold<N>.csv` (Metriken je Station) und
-`data/raw_preds/tft_solar_tft_fold<N>_raw.parquet` (Rohprognosen) — dasselbe
-Schema wie bei DCRNN/MTGNN/WaveNet, damit die Arme vergleichbar bleiben.
-
-#### Schritt 2 — Schlussmessung auf dem Testjahr
-
-**Erst starten, wenn Schritt 1 steht und geprüft ist.** Training auf allen 62
-Poolstationen über **beide** Jahre (2023-08-01 … 2025-07-31, `train_end` ist in
-der Config gesetzt), Test auf den 21 zurückgehaltenen Teststationen im dritten
-Jahr 2025-08-01 … 2026-07-31.
-
-```bash
-frcst/bin/python train_cl_tft_bc.py \
-    -c configs/solar_tft/config_solar_tft_testyear.yaml \
+# Fold-Retrain (erledigt)
+frcst/bin/python train_cl_tft_bc.py -c configs/solar_tft/config_solar_tft_fold${N}.yaml \
     --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
-    --gpu <G> --cache-dir /mnt/nvme2/data_cache --max-cache-gb 150
+    --gpu <G> --cache-dir /mnt/nvme2/data_cache
 
-frcst/bin/python get_test_results_tft_bc.py \
-    -c configs/solar_tft/config_solar_tft_testyear.yaml \
+# Fold-Auswertung — --eval-split val ist PFLICHT, sonst misst sie im Testjahr
+frcst/bin/python get_test_results_tft_bc.py -c configs/solar_tft/config_solar_tft_fold${N}.yaml \
+    --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+    --model-tag train_tft_bc_m-tft_c-solar_tft_fold${N} \
+    --raw-out-name tft_solar_tft_fold${N} --eval-split val \
+    --cache-dir /mnt/nvme2/data_cache --gpu <G>
+```
+
+#### Schritt 2 — Schlussmessung auf dem Testjahr (läuft)
+
+Training auf allen 62 Poolstationen über beide Jahre, Test auf den 21
+zurückgehaltenen Teststationen im dritten. Seit 17.09.2026, 15:07 auf l2, GPU 0;
+171 572 Trainingsfenster, 16 133 Validierungsfenster.
+
+```bash
+frcst/bin/python train_cl_tft_bc.py -c configs/solar_tft/config_solar_tft_testyear.yaml \
+    --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+    --gpu <G> --cache-dir /mnt/nvme2/data_cache
+
+frcst/bin/python get_test_results_tft_bc.py -c configs/solar_tft/config_solar_tft_testyear.yaml \
     --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
     --model-tag train_tft_bc_m-tft_c-solar_tft_testyear \
     --raw-out-name tft_solar_tft_testyear --gpu <G>
 ```
 
-**Trockentest am 17.09.2026, 12:58 (l2, GPU 1):** Das Retrain-Kommando für
-Fold 1 läuft an — die Studie wird aufgelöst (`best_trial=111,
-best_value=51.718800`), die Hyperparameter werden korrekt übernommen, das
-Preprocessing lädt die 41 Trainingsstationen und fittet den globalen `scaler_x`
-auf **35 Feature-Spalten** (30 known inklusive `u_10m`, 2 observed, 3 static).
-Der Lauf wurde an dieser Stelle abgebrochen; Training und Auswertung sind noch
-offen. Der Cache-Eintrag war zu diesem Zeitpunkt noch nicht geschrieben, der
-erste echte Lauf baut ihn also neu.
+Hier **ohne** `--eval-split val`: die Schlussmessung soll im Testfenster messen.
 
-#### Stolperfallen — vor dem Start lesen
+#### Stolperfallen, die weiter gelten
 
-1. **`get_test_results_tft_bc.py` ist noch nicht multi-target-fähig und muss
-   angepasst werden.** Zeile 257 und 264 lesen `config['data']['target_col']`
-   (Singular). Solar-Configs setzen `data.target_cols: [ghi, dhi]`, `target_col`
-   ist dort **`None`** — verifiziert über `tools.load_config`. Richtig ist
-   `preprocessing.get_target_cols(config)`, das `target_cols` bevorzugt und für
-   Wind unverändert `['wind_speed']` liefert. Zweitens rechnet die Metrikschleife
-   (ab Zeile 287) RMSE/MAE/R² über das ganze Array: bei zwei Zielgrößen hat
-   `y_pred` die Form `(n, horizon, 2)`, und man erhielte **eine vermischte Zahl
-   über GHI und DHI statt zweier getrennter Werte**. Beides muss vor der
-   Auswertung behoben werden — sonst laufen die Skripte entweder auf einen
-   Fehler oder, schlimmer, auf ein stilles Fehlergebnis. Vorbild für die
-   Aufteilung je Zielgröße: `scripts/eval_testyear.py` (dort für Wind, aber
-   Multi-Target-tauglich; die Wind-Beschriftungen „m/s"/„Windklasse" in den
-   Abbildungen 04/05/06 sind bekannt und müssten für Solar angepasst werden).
-
-2. **`--test-mode` hier NICHT verwenden** — anders als beim Wind-Pfad, wo
-   `train_cl_tft_bc.py` es im Docstring ausdrücklich für den finalen Testlauf
-   vorsieht. Grund: Das Flag mischt `val_files` in den Trainingspool. Bei Wind
-   sind `val_files` und `test_files` disjunkt (50 gegen 50, Überschneidung 0),
-   dort ist das korrekt. **In `config_solar_tft_testyear.yaml` sind `val_files`
-   und `test_files` identisch** (dieselben 21 Teststationen) — `--test-mode`
-   zöge sie ins Training und machte die Schlussmessung wertlos. Ohne das Flag
-   trainiert die Config auf 62 Poolstationen und misst auf den 21 Teststationen,
-   genau wie in `station_splits_solar.md` §4 festgelegt.
-
-3. **Dass `val_files` gleich `test_files` ist, ist Absicht, kein Fehler.** Die
-   21 Teststationen dienen im Trainingszeitraum als Validierungsset für Early
-   Stopping und werden erst im Testjahr zur Messung herangezogen — zeitlich
-   getrennt. Der dadurch entstehende Optimismus ist gemessen und bewusst
-   akzeptiert (`station_splits_solar.md` §6, Entscheidung Viktor 18.08.2026:
-   rund ein Prozent, kein Umbau).
-
-4. **`--hpo-study` immer explizit angeben.** Beide Skripte leiten den
-   Studiennamen sonst aus dem Config-Dateinamen ab und kämen bei
-   `config_solar_tft_fold1.yaml` auf `…_solar_tft`, nicht auf das tatsächliche
-   `…_solar_tft_hpo`. Ohne das Flag greifen sie ins Leere oder auf eine falsche
-   Studie.
-
-5. **Die Fold-Configs hatten kein `test_files` — am 17.09.2026 ergänzt.**
-   `get_test_results_tft_bc.py` liest per Default `files_key='test_files'`; ohne
-   den Schlüssel fände die Fold-Auswertung keine Station und liefe ins Leere.
-   Die Zielstationen des Folds stehen jetzt in `val_files` **und** `test_files`
-   (21/21/20), ausgewertet im Fenster `test_start`…`test_end` = 2024-08-01 …
-   2025-08-01, also im Validierungsjahr. Der zurückgehaltene Testsatz bleibt
-   unberührt. Das spiegelt, was der Generator bei der Schlussmessung ohnehin
-   tut. Alternativ gäbe es `--eval-split val`, das dafür aber ein `val_start` in
-   der Config braucht, das die Fold-Configs nicht setzen — bei
-   `next_n_stations: 0` liefern beide Wege dasselbe, weil sich die Wege nur im
-   `neighbor_pool` unterscheiden.
-
-   Zum Kontrast, damit die Wind-Analogie nicht in die Irre führt: Wind-Folds
-   haben drei getrennte Mengen (103 train / 50 val / 50 test), Solar-Folds nur
-   zwei (41 train / 21 Ziel) — die 21 Teststationen liegen außerhalb des Pools
-   und kommen erst in der Schlussmessung vor.
-
-6. **Featuresatz ist am 17.09.2026 angeglichen worden.** Die Fold- und
-   Testyear-Configs enthielten `u_10m` nicht, die HPO lief aber damit — sie
-   hätten ein anderes Modell trainiert als das optimierte. `u_10m` steht jetzt
-   am **Ende** von `icond2_features` und `known_features` (genau dort hängt
-   `hpo_tft_bc.py` optionale Features an, damit bleibt der Cache-Schlüssel
-   identisch), dazu `next_n_grid_ecmwf: 0` explizit. Erzeugt wurde das über
-   `scripts/make_solar_tft_configs.py --force`; die Configs sind generiert und
-   **nicht von Hand zu pflegen**.
-
-7. **Cache.** Auf l2 liegen die drei HPO-Fold-Einträge unter
-   `/mnt/nvme2/data_cache` (~50 GB, Budget 150 GB). Die Retrain-Läufe haben
-   andere Zeitachsen als die HPO und bauen daher **eigene** Einträge — je Lauf
-   rund 16 GB, beim ersten Start entsprechend Vorlaufzeit einplanen. Auf ws
-   liegt der Cache unter `$HOME/data_cache` (dort existiert `/mnt/nvme2` nicht),
-   auf l1 ist `DATA_ROOT=/mnt/nvme1` statt `/mnt/lambda1/nvme1`, was in den
-   Cache-Schlüssel eingeht: **Einträge sind zwischen l1 und l2/ws nicht
-   austauschbar**, ohne den Schlüssel neu zu rechnen.
-
-8. **Mehrere Läufe gleichzeitig auf einem Host mit leerem Cache vermeiden.**
-   `DataCache.save_preprocessed_data` schreibt ohne Lock und ohne atomares
-   `os.replace` (den flock hat nur `GNNCache`). Gleichzeitig startende Prozesse
-   bauen denselben Eintrag mehrfach parallel, und ein Leser kann eine halb
-   geschriebene `prepared.pkl` sehen. Erst einen Lauf durchlassen, dann die
-   übrigen.
-
-9. **Datenlage im Testjahr prüfen, bevor Zahlen interpretiert werden.** Der
-   mittlere Anteil echter Messwerte liegt dort bei 0.85, im Minimum bei 0.12.
-   Mit `eval.exclude_imputed: true` (in allen Configs gesetzt) bleibt
-   entsprechend weniger Auswertungsmasse übrig — je Station nachzählen.
-
-10. **Station 05792 fällt im CL-Pfad aus** (siehe unten in §5.1.1), die Läufe
-   arbeiten deshalb auf 61 statt 62 Poolstationen. Für alle Arme gleich, aber
-   beim Vergleich gegen die DCRNN-Arme (21 Zielstationen) zu berücksichtigen.
-
-11. **GPU-Wahl.** GPU 0 auf l2 ist oft fremdbelegt; auf l1 tragen die GPUs 3 und
-    5–7 dauerhaft Fremdlast eines anderen Nutzers. Vor dem Start mit
-    `nvidia-smi` prüfen. Ein Trainingslauf dieser Größe belegt 4–15 GB.
+1. **`--test-mode` hier NICHT verwenden.** Das Flag mischt `val_files` in den
+   Trainingspool; in `config_solar_tft_testyear.yaml` sind `val_files` und
+   `test_files` **dieselben** 21 Teststationen, die Messung wäre wertlos. Seit der
+   `val_split`-Entfernung bricht der Lauf in diesem Fall ohnehin ab.
+2. **Dass `val_files == test_files` ist, ist Absicht** — die 21 Stationen sind im
+   Trainingszeitraum Validierungsset, gemessen wird erst im Testjahr
+   (`station_splits_solar.md` §6, Entscheidung Viktor 18.08.2026: rund ein Prozent
+   Optimismus, bewusst akzeptiert).
+3. **`--hpo-study` immer explizit angeben**, sonst leiten beide Skripte den
+   Studiennamen aus dem Config-Dateinamen ab und landen auf `…_solar_tft` statt
+   `…_solar_tft_hpo`.
+4. **Cache.** Die Retrain-Läufe haben eigene Einträge (~12–20 GB je Lauf, l2
+   `/mnt/nvme2/data_cache`). Zwischen l1 und l2/ws sind sie nicht austauschbar,
+   weil `DATA_ROOT` in den Schlüssel eingeht. Mehrere Läufe mit **leerem** Cache
+   gleichzeitig auf einem Host vermeiden, solange sie denselben Eintrag bauen —
+   `DataCache.save_preprocessed_data` schreibt ohne Lock; verschiedene Configs
+   sind unproblematisch (die vier Läufe am 17.09. liefen parallel).
+5. **Datenlage im Testjahr prüfen, bevor Zahlen interpretiert werden**: mittlerer
+   Anteil echter Messwerte 0.85, Minimum 0.12, und `eval.exclude_imputed` nimmt
+   den Rest heraus — je Station nachzählen (`n_values` in der CSV).
+6. **Station 05792 fällt im CL-Pfad aus** (s. §5.1.1), die Läufe arbeiten auf 61
+   statt 62 Poolstationen. Beim Vergleich gegen die DCRNN-Arme (21 Zielstationen)
+   zu berücksichtigen; `eval_solar_arch.py` fängt es über die gemeinsame Menge ab.
+7. **GPU-Wahl.** GPU 0 auf l2 ist oft fremdbelegt, auf l1 tragen 3 und 5–7
+   dauerhaft Fremdlast. Vor dem Start `nvidia-smi`.
 
 ### 5.2 Lead-0-Fehler in weiteren Solar-Pfaden
 
@@ -644,6 +631,7 @@ dürfen so bleiben.
 | `utils/preprocessing.py:3853`, `utils/data_cache.py:519` | `Timedelta(hours=history_length)`, wobei `history_length` Schritte zählt. Vorbestehend; beide Stellen spiegeln einander, die Grenze wandert nur konservativ. |
 | `geostatistics/solar_preprocessing.py:16-21` | Docstring behauptet, SL-Dateinamen seien lon-first und die Spalten vertauscht. Nachgemessen ist es lat-first ohne Vertauschung — der **Code ist richtig, der Docstring falsch**. |
 | `scripts/eval_testyear.py` | Abbildungen 04/05/06 behalten Wind-Beschriftungen („m/s", „Windklasse"), laufen bei Multi-Target aber je Zielgröße. |
+| ~~`get_test_results_tft_bc.py`, `pers_ref`~~ | **erledigt 17.09.2026** — war durchgängig NaN (auch beim Wind), `reindex` traf den MultiIndex nicht. Alte Wind-Parquets tragen die Lücke weiterhin, `skill` ist dort leer. |
 | DCRNN-Featuresatz | `kt_nwp` fehlt als einziges der 13 TFT-Features. Aus `ghi_nwp` und `ghi_clearsky` ableitbar, beide im Modell. |
 
 ## 6. Vergleichbarkeit DCRNN ↔ TFT
