@@ -34,6 +34,7 @@ die drei Folds sind für die HPO vorgesehen.
 | TFT Static-Ablation (6 statt 3 statische Features) | Null-Ergebnis, p = 0.66 / 0.56 |
 | DCRNN v5, sechs Arme, Fold 1 | s. §2.1 — gegen den TFT gehalten |
 | TFT HPO-Retrain, Fold 1–3 (17.09.) | GHI RMSE **64.16**, Skill_NWP 0.105 / DHI **36.69**, 0.110 — s. §5.1.2 |
+| **TFT Schlussmessung, Testjahr (17.09.)** | GHI RMSE **61.53**, Skill_NWP **0.119** / DHI **33.89**, **0.141** — 21 Teststationen, s. §5.1.3 |
 
 Dateien unter `results/solar/` (TFT Arm A/B), `results/solar_dcrnn_*_v5_*.pkl`
 (DCRNN) und `data/{test_results,raw_preds}/tft_solar_tft_fold<N>*` (HPO-Retrain).
@@ -562,7 +563,7 @@ frcst/bin/python get_test_results_tft_bc.py -c configs/solar_tft/config_solar_tf
     --cache-dir /mnt/nvme2/data_cache --gpu <G>
 ```
 
-#### Schritt 2 — Schlussmessung auf dem Testjahr (läuft)
+#### Schritt 2 — Schlussmessung auf dem Testjahr (erledigt, s. §5.1.3)
 
 Training auf den 62 Poolstationen über beide bisherigen Jahre (alles vor
 `val_start` 2025-08-01), gemessen auf den 21 zurückgehaltenen Teststationen im
@@ -614,6 +615,74 @@ test_start)`, also das Testjahr. Ohne das Flag misst die Auswertung im Fenster
    zu berücksichtigen; `eval_solar_arch.py` fängt es über die gemeinsame Menge ab.
 7. **GPU-Wahl.** GPU 0 auf l2 ist oft fremdbelegt, auf l1 tragen 3 und 5–7
    dauerhaft Fremdlast. Vor dem Start `nvidia-smi`.
+
+### 5.1.3 Schlussmessung auf dem Testjahr — erledigt am 17.09.2026, 18:39
+
+Ein Modell mit den Hyperparametern aus Trial 111, trainiert auf allen 62
+Poolstationen über beide vorangegangenen Jahre (alles vor `val_start`
+2025-08-01, 171 807 Fenster), Early Stopping auf den 21 Teststationen im Testjahr
+— 21 Epochen, bestes `val_rmse` 49.603. Gemessen wurde auf denselben 21
+Stationen im Fenster 2025-08-01 … 2026-07-31, 2 156 607 bewertete Tagesschritte.
+
+| | GHI RMSE | Skill_NWP | DHI RMSE | Skill_NWP |
+|---|---|---|---|---|
+| Folds, Validierungsjahr, 62 Stationen | 64.16 | 0.105 | 36.69 | 0.110 |
+| **Testjahr, 21 Teststationen** | **61.53** | **0.119** | **33.89** | **0.141** |
+
+**Die Schlussmessung fällt besser aus als die Fold-Läufe** — und zwar im Skill,
+also unabhängig davon, dass das Testjahr andere absolute Fehlerniveaus hat. Das
+passt zum Wind-Befund, dass von einem erweiterten Trainingsfenster nur die Arme
+mit eigener Messhistorie profitieren: dieser hier ist einer.
+
+**Alle Befunde des Validierungsjahres übertragen sich**, was die Kampagne
+insgesamt trägt:
+
+| GHI, Skill je Regime | Testjahr | Folds |
+|---|---|---|
+| bedeckt (kt < 0.3) | 0.041 | 0.006 |
+| trüb (0.3–0.6) | 0.149 | 0.132 |
+| heiter (0.6–0.85) | 0.206 | 0.206 |
+| klar (kt > 0.85) | 0.105 | 0.101 |
+
+21 von 21 Stationen liegen unter der ICON-D2-Referenz (Skill 0.085 … 0.181,
+Median 0.119), und die Dreiteilung über die Vorlaufzeit ist dieselbe: 0.176 bei
+Lead 0, 0.099 zwischen 1 und 6 h, 0.122 ab 36 h.
+
+Dateien: `models/train_tft_bc_m-tft_c-solar_tft_testyear.pt`,
+`data/test_results/tft_solar_tft_testyear.csv`,
+`data/raw_preds/tft_solar_tft_testyear_raw.parquet`. Bericht:
+`frcst/bin/python scripts/report_solar_folds.py --folds 0 --stem tft_solar_tft_testyear`.
+
+### 5.1.4 Was die eigene Messhistorie beiträgt — und der Arm ohne sie
+
+Die Solar-Configs führen beide Zielgrößen als `observed_features`, das Modell
+sieht also 48 h eigene Vergangenheit; wegen `target_transform: nwp_residual`
+genauer: 48 h NWP-Fehlerhistorie der Zielstation. Im Wind-Sprachgebrauch ist das
+die **`hist`-Variante**. Gemessen am fertigen Modell
+(`scripts/ablate_solar_observed.py`, 12 Stationen über alle drei Folds,
+observed-Fenster über die Läufe permutiert):
+
+| Lead | 0.0 h | 0.5 h | 1 h | 1.5–3 h | 3–6 h | 24–48 h |
+|---|---|---|---|---|---|---|
+| GHI, RMSE-Anstieg ohne Historie | **+29 %** | +9 % | +5 % | +2 % | +1 % | +0.3 % |
+| DHI | **+28 %** | +12 % | +8 % | +4 % | +3 % | +1.0 % |
+
+Die Gegenprobe stimmt: die Autokorrelation des Residuums zwischen dem letzten
+Messzeitpunkt vor dem Lauf und dem Lead beträgt 0.55 (Lead 0), 0.33 (1 h),
+0.12 (3 h) und ist ab 6 h weg. Über alle 96 Leads gewichtet bleiben +0.65 W/m²
+(GHI) und +0.75 (DHI).
+
+**Daraus läuft seit 17.09., 16:46 ein zweiter Arm:** `configs/solar_tft_nohist/`
+mit `observed_features: []`. Da `next_n_stations` 0 ist, sieht das Modell dort
+überhaupt keine Messung mehr, auch keine fremde — eine reine Nachbearbeitung der
+NWP-Prognose. Studie `cl_m-tft-bc_out-96_freq-30min_solar_tft_nohist_hpo`,
+gestartet über `CFG=… scripts/run_solar_hpo.sh`, 17 Worker.
+
+Zwischenstand nach 17 abgeschlossenen Trials: bester Wert 52.298 gegen 51.719 des
+Arms mit Historie (+0.579), Median 52.361 gegen 51.955 (+0.406) — in der
+Größenordnung, die die Ablation vorhersagt. Die eigentliche Aussage kommt aber
+aus der Fold-Auswertung **nach Lead**: bei Lead 0 stehen 0.155 gegen erwartete
+~0.08, im gepoolten Mittel ist der Unterschied klein.
 
 ### 5.2 Lead-0-Fehler in weiteren Solar-Pfaden
 

@@ -64,9 +64,13 @@ GHI_LABELS = ["0–50", "50–150", "150–300", "300–500", "500–700", ">700
 TAG_CLEARSKY_MIN = 50.0
 
 
-def lade_fold(fold: int, stem: str = "tft_solar_tft_fold") -> pd.DataFrame:
-    """Rohvorhersagen eines Folds, Stations-ID normalisiert."""
-    pfad = RAW / f"{stem}{fold}_raw.parquet"
+def lade_fold(fold, stem: str = "tft_solar_tft_fold") -> pd.DataFrame:
+    """Rohvorhersagen eines Folds, Stations-ID normalisiert.
+
+    ``fold=0`` laedt ``<stem>_raw.parquet`` ohne Nummer — fuer Laeufe, die keine
+    Foldstruktur haben (die Schlussmessung auf dem Testjahr).
+    """
+    pfad = RAW / (f"{stem}_raw.parquet" if not fold else f"{stem}{fold}_raw.parquet")
     df = pd.read_parquet(pfad)
     df["station_id"] = df["station_id"].map(norm_station)
     df["fold"] = fold

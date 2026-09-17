@@ -501,12 +501,16 @@ def kachel(k: str, v: str, s: str = "") -> str:
 
 
 def baue_bericht(df: pd.DataFrame, folds, pfad: Path) -> None:
+    #: Ein Lauf ohne Foldnummer ist die Schlussmessung auf dem Testjahr — sie
+    #: bekommt einen eigenen Vorspann, eigene Aggregatdateien, und der
+    #: Ablationsabschnitt entfaellt (der ist an den Fold-Modellen gemessen).
+    schlussmessung = list(folds) == [0]
     meta = stationsmeta()
     gesamt = nach(df, "target")
     je_station = nach(df, ["target", "station_id"])
-    je_station.to_csv(OUT_CSV / "solar_tft_folds_je_station.csv", index=False)
-    nach(df, ["target", "kt_klasse"]).to_csv(OUT_CSV / "solar_tft_folds_regime.csv", index=False)
-    nach(df, ["target", "lead_h"]).to_csv(OUT_CSV / "solar_tft_folds_lead.csv", index=False)
+    je_station.to_csv(OUT_CSV / f"solar_tft_{'testyear' if schlussmessung else 'folds'}_je_station.csv", index=False)
+    nach(df, ["target", "kt_klasse"]).to_csv(OUT_CSV / f"solar_tft_{'testyear' if schlussmessung else 'folds'}_regime.csv", index=False)
+    nach(df, ["target", "lead_h"]).to_csv(OUT_CSV / f"solar_tft_{'testyear' if schlussmessung else 'folds'}_lead.csv", index=False)
 
     g = gesamt[gesamt["target"] == "ghi"].iloc[0]
     d = gesamt[gesamt["target"] == "dhi"].iloc[0]
@@ -560,15 +564,22 @@ def baue_bericht(df: pd.DataFrame, folds, pfad: Path) -> None:
     r_bed, r_heit, r_klar = reg.loc[bedeckt], reg.loc[heiter], reg.loc[klar]
     n_bed, n_heit = regn.loc[bedeckt], regn.loc[heiter]
 
+    vorspann = ("Schlussmessung auf dem zurückgehaltenen Testjahr 2025-08 bis 2026-07: ein Modell "
+                "mit den Hyperparametern der abgeschlossenen HPO, trainiert auf allen 62 "
+                "Poolstationen über beide vorangegangenen Jahre, gemessen auf den 21 Teststationen, "
+                "die in keinem Training vorkamen."
+                if schlussmessung else
+                "Drei Fold-Modelle mit den Hyperparametern der abgeschlossenen HPO, ausgewertet auf "
+                "ihren jeweils zurückgehaltenen Zielstationen im Validierungsjahr 2024-08 bis "
+                "2025-07. Die drei Zielmengen sind disjunkt, zusammen decken sie alle 62 "
+                "Poolstationen ab — jede bewertet von einem Modell, das sie nie im Training gesehen hat.")
+
     teile = [f"""<!doctype html>
 <html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Solar-TFT — Fold-Auswertung</title><style>{KOPF_CSS}</style></head><body><main>
 <h1>Solar-TFT: was die Nachbearbeitung von ICON-D2 gewinnt — und wo nicht</h1>
-<p class="lead">Drei Fold-Modelle mit den Hyperparametern der abgeschlossenen HPO,
-ausgewertet auf ihren jeweils zurückgehaltenen Zielstationen im Validierungsjahr
-2024-08 bis 2025-07. Die drei Zielmengen sind disjunkt, zusammen decken sie alle
-62 Poolstationen ab — jede bewertet von einem Modell, das sie nie im Training gesehen hat.</p>
+<p class="lead">{vorspann}</p>
 <p class="meta">Erzeugt {datetime.now():%d.%m.%Y %H:%M} aus
 <code>data/raw_preds/tft_solar_tft_fold{{{','.join(str(f) for f in folds)}}}_raw.parquet</code> ·
 {len(df):,} bewertete Tagesschritte · Nachtschritte und Dämmerung
@@ -694,7 +705,7 @@ ein bis zwei Zeitschritte.</p>
     stark = st_ghi.nlargest(1, "skill_nwp").iloc[0]
 
     abl_pfad = OUT_CSV / "solar_tft_ablation_observed.csv"
-    if abl_pfad.exists():
+    if abl_pfad.exists() and not schlussmessung:
         abl = pd.read_csv(abl_pfad)
         _g = abl[abl["target"] == "ghi"].groupby("block", sort=False)[["rmse_echt", "rmse_perm"]].mean()
         _p = lambda b: 100 * (_g.loc[b, "rmse_perm"] - _g.loc[b, "rmse_echt"]) / _g.loc[b, "rmse_echt"]
@@ -770,7 +781,8 @@ Erzeugt von <code>scripts/report_solar_folds.py</code>, Kennzahlen aus
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3])
+    ap.add_argument("--folds", type=int, nargs="+", default=[1, 2, 3],
+                    help="0 = ein Lauf ohne Foldnummer (Schlussmessung)")
     ap.add_argument("--stem", default="tft_solar_tft_fold")
     ap.add_argument("--out", default="reports/solar_tft_folds.html")
     args = ap.parse_args()
