@@ -4,8 +4,24 @@ get_test_results_tft_bc.py — Evaluate a trained tft_bc model (from train_cl_tf
 on held-out test_files, in PHYSICAL units, analogous to
 geostatistics/get_test_results_dcrnn.py and train_mtgnn.py::_metrics (RMSE_phys).
 
-The target ('wind_speed', scale_target=False) is never scaled, so scaler_y is always
-None and tools.get_y() skips inverse-transforming y — no scaler_y handling needed here.
+The target (scale_target=False) is never scaled, so scaler_y is always None and
+tools.get_y() skips inverse-transforming y — no scaler_y handling needed here.
+
+Mehrere Zielgroessen (Solar: data.target_cols: [ghi, dhi]) werden je Zielgroesse
+getrennt ausgewertet; die Ergebniszeilen und das Roh-Parquet tragen dann eine
+Spalte 'target', genau wie bei den Graphmodellen. Drei Solar-Eigenheiten sind
+dabei beruecksichtigt, alle drei still, wenn man sie uebersieht:
+
+* ``params.target_transform: nwp_residual`` — die Zielspalte ist 'Messung - NWP'.
+  tools.get_y darf dann NICHT bei 0 clippen (rund die Haelfte der Zielwerte ist
+  negativ), RMSE und MAE sind in beiden Raeumen identisch, die NWP-Baseline ist
+  die Nullreihe, und fuer pred/gt im Parquet wird die physikalische Skala ueber
+  die abgezogene Basisspalte zurueckgerechnet (solar.resolve_residual_baseline_col).
+* ``eval.exclude_imputed`` — gefuellte Zielpositionen fliegen elementweise ueber
+  '<target>_observed' aus Metriken und Parquet.
+* Lead-0-Label — ICON-D2 SL labelt linksbuendig auf die Laufzeit, ML erst eine
+  Stunde danach (shared.resolution.lead0_offset). Das bestimmt valid_time und
+  den Bezugspunkt der Persistenz.
 
 Feature scaling (scaler_x) is a different story: since the v3 preprocessing change
 (utils/data_cache.py::_fit_global_scaler_x), training uses ONE StandardScaler fitted
@@ -47,6 +63,60 @@ import optuna
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from utils import preprocessing, tools, models, data_cache
+from utils.eval import _column_by_run
+from utils.solar import resolve_residual_baseline_col
+from geostatistics.shared.resolution import lead0_offset
+
+#: Einheit je Zielgroesse, nur fuer die Log-Ausgabe. Gleiche Zuordnung wie
+#: geostatistics/get_test_results_dcrnn.py.
+EINHEIT = {'wind_speed': 'm/s', 'power': 'kW',
+           'ghi': 'W/m²', 'dhi': 'W/m²', 'bhi': 'W/m²', 'dni': 'W/m²'}
+
+
+def _spalte_je_lauf(df: pd.DataFrame, col: str, run_times, horizon: int):
+    """Spalte ``col`` als (n_runs, horizon)-Array, laufweise auf ``run_times`` gelegt.
+
+    Nutzt eval._column_by_run: bei NWP-Daten baut create_tft_sequences genau EIN
+    Fenster je Vorhersagelauf, Lead j ist also 'forecasttime j' desselben
+    starttime. Ein Pivot auf (starttime x forecasttime) trifft diese Zuordnung —
+    ein groupby('timestamp') wuerde ueber ueberlappende Laeufe mitteln und die
+    Baseline glaetten, die die Vorhersage nicht bekommt (eval.py:620).
+    """
+    if col is None or col not in df.columns:
+        return None
+    vorlage = pd.DataFrame(index=pd.Index(run_times),
+                           columns=[f't+{i + 1}' for i in range(horizon)])
+    piv = _column_by_run(df, col, vorlage)
+    return None if piv is None else piv.to_numpy(dtype=float)
+
+
+def _persistenz(df: pd.DataFrame, target_col: str, basis_col, run_times,
+                freq_delta, lead0_off: int, nwp_residual: bool):
+    """Letzter Messwert vor Prognosestart, in physikalischen Einheiten.
+
+    Der Prognosestart liegt bei ``run_time + lead0_off * freq`` (Wind: eine
+    Stunde nach dem Lauf, Solar: der Lauf selbst — shared.resolution.lead0_offset),
+    der Referenzwert also einen Schritt davor. Dieselbe Definition wie
+    homo_sampler.evaluate_homo_model (``meas_raw[t_run_abs - 1]``) fuer die
+    Graphmodelle.
+
+    Bei ``target_transform: nwp_residual`` steht in der Zielspalte bereits das
+    Residuum; die Messreihe ist daraus nur mit der Basisspalte zurueckzugewinnen.
+    """
+    if target_col not in df.columns:
+        return None
+    reihe = df[target_col]
+    if nwp_residual:
+        if basis_col is None or basis_col not in df.columns:
+            return None
+        reihe = reihe + df[basis_col]
+    if isinstance(reihe.index, pd.MultiIndex):
+        if 'timestamp' not in (reihe.index.names or []):
+            return None
+        reihe = reihe.droplevel([n for n in reihe.index.names if n != 'timestamp'])
+    reihe = reihe[~reihe.index.duplicated(keep='first')].sort_index()
+    zeitpunkte = pd.DatetimeIndex(run_times) + freq_delta * (lead0_off - 1)
+    return reihe.reindex(zeitpunkte).to_numpy(dtype=float)
 
 
 def main() -> None:
@@ -249,23 +319,43 @@ def main() -> None:
         logger.info(f"Neighbour pool for test stations: "
                     f"{len(config['data']['neighbor_pool'])} stations (files + val_files + test_files)")
 
+    # target_col ist hier nur der Default fuer get_data: data.target_col hat drin
+    # ohnehin Vorrang, und bei Solar steht dort None, weil die Ziele in
+    # data.target_cols stehen. get_target_cols loest beides einheitlich auf.
     test_dfs = preprocessing.get_data(
         data_dir=config['data']['path'],
         config=config,
         freq=freq,
         features=features,
-        target_col=config['data']['target_col'],
+        target_col=preprocessing.get_target_cols(config)[0],
         files_key='test_files',
     )
     logger.info(f"Loaded {len(test_dfs)} test stations from {config['data']['path']} "
                 f"(test window {config['data']['test_start']} .. {config['data']['test_end']})")
 
     freq_delta = pd.Timedelta(freq)
-    target_col = config['data']['target_col']
+    # Mehrere Zielgroessen (Solar: ghi + dhi) stehen in data.target_cols; data.target_col
+    # ist dort None. get_target_cols bevorzugt target_cols und liefert fuer Wind
+    # unveraendert ['wind_speed'], der Single-Target-Pfad bleibt also wie er war.
+    target_cols = preprocessing.get_target_cols(config)
+    multi_target = len(target_cols) > 1
+    target_col = target_cols[0]
+
+    params_cfg = config.get('params', {})
+    nwp_residual = str(params_cfg.get('target_transform', 'none')) == 'nwp_residual'
+    exclude_imputed = bool(config.get('eval', {}).get('exclude_imputed', False))
+    # Versatz zwischen Laufzeit und erstem Lead: ML (wind) laesst forecasttime=0 weg
+    # und beginnt bei t_run+1h, SL (solar) labelt linksbuendig auf t_run. Derselbe
+    # Parameter, mit dem der GNN-Pfad am 15.09.2026 repariert wurde (handoff §3/§4.1).
+    lead0_off = lead0_offset(config['data'].get('use_case', 'wind'))
+    logger.info(f"Zielgroessen: {target_cols}; target_transform="
+                f"{params_cfg.get('target_transform', 'none')}, exclude_imputed="
+                f"{exclude_imputed}, lead0_offset={lead0_off}")
 
     per_station = []
     raw_records = []
-    all_y_true, all_y_pred, all_y_nwp = [], [], []
+    # Rohwerte je Zielgroesse sammeln (Schluessel = Zielspalte), fuer die gepoolten Zahlen.
+    pool = {tgt: {'true': [], 'pred': [], 'nwp': []} for tgt in target_cols}
 
     for station_id, df in test_dfs.items():
         prepared, _ = preprocessing.pipeline(
@@ -282,95 +372,196 @@ def main() -> None:
             logger.warning(f"Station {station_id}: no test samples in window, skipping.")
             continue
 
+        # Beim Residuum-Ziel darf NICHT bei 0 abgeschnitten werden — rund die Haelfte
+        # der Zielwerte ist dort negativ (utils/solar._to_nwp_residual, tools.get_y).
         y_true, y_pred = tools.get_y(X_test=X_test, y_test=y_test, model=model,
-                                      scaler_y=scaler_y, device=device)
-        rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
-        mae = float(np.mean(np.abs(y_pred - y_true)))
-        r2 = float(r2_score(y_true.ravel(), y_pred.ravel()))
-
-        nwp_raw = prepared.get('nwp_raw_test')
-        rmse_nwp = None
-        if nwp_raw is not None and len(nwp_raw) == len(y_true):
-            rmse_nwp = float(np.sqrt(np.mean((nwp_raw - y_true) ** 2)))
-            all_y_nwp.append(nwp_raw)
-        else:
-            nwp_raw = None
-
-        # --- Persistence baseline: last actual measurement before forecast start (run_time - 1 step) ---
-        # (Same definition as geostatistics/homo_sampler.py::evaluate_homo_model for DCRNN/MTGNN/WaveNet.)
+                                      scaler_y=scaler_y, device=device,
+                                      clip_negative=not nwp_residual)
         run_times = prepared.get('index_test')
-        pers_ref = None
-        skill = None
-        if run_times is not None and len(run_times) == len(y_true):
-            target_series = df[target_col]
-            pers_vals = target_series.reindex(pd.DatetimeIndex(run_times) - freq_delta).to_numpy()
-            pers_ref = np.repeat(pers_vals[:, None], y_true.shape[1], axis=1)
-            valid_p = ~(np.isnan(pers_ref) | np.isnan(y_true))
-            if valid_p.sum() >= 2:
-                rmse_pers = float(math.sqrt(mean_squared_error(y_true[valid_p], pers_ref[valid_p])))
-                skill = (1.0 - rmse / rmse_pers) if rmse_pers > 0 else None
+        if run_times is None or len(run_times) != len(y_true):
+            logger.warning(f"Station {station_id}: index_test fehlt oder passt nicht zu "
+                           f"y_test — Station uebersprungen.")
+            continue
+        horizon_len = y_true.shape[1]
 
-            for i, run_ts in enumerate(run_times):
-                for h in range(y_true.shape[1]):
-                    raw_records.append({
+        for j, tgt in enumerate(target_cols):
+            y_t = y_true[:, :, j] if y_true.ndim == 3 else y_true
+            y_p = y_pred[:, :, j] if y_pred.ndim == 3 else y_pred
+
+            # --- NWP-Baseline und Rueckrechnung in physikalische Einheiten ---
+            # Im Residuumsraum ist die Zielspalte 'Messung - NWP'; die Umkehrung
+            # braucht genau die Spalte, die abgezogen wurde (resolve_residual_
+            # baseline_col liefert sie, inklusive params.nwp_baseline_col und der
+            # _1-Vorzugsregel). RMSE und MAE sind in beiden Raeumen identisch,
+            # R2 und die Rohwerte im Parquet sind es nicht — letztere muessen
+            # physikalisch sein, damit sie neben den DCRNN-Parquets stehen koennen.
+            basis_col = (resolve_residual_baseline_col(df.columns, tgt, params_cfg)
+                         if nwp_residual else None)
+            if nwp_residual:
+                nwp = _spalte_je_lauf(df, basis_col, run_times, horizon_len)
+                if nwp is None:
+                    raise RuntimeError(
+                        f"Station {station_id}, Ziel '{tgt}': target_transform="
+                        f"'nwp_residual', aber die Basisspalte "
+                        f"{basis_col!r} laesst sich nicht laufweise ausrichten. "
+                        f"Ohne sie liesse sich weder die physikalische Skala "
+                        f"rekonstruieren noch Skill_NWP bilden — Abbruch statt "
+                        f"stillschweigend falscher Zahlen.")
+                gt_abs = y_t + nwp
+                pred_abs = y_p + nwp
+                # Im Residuumsraum IST die rohe NWP-Prognose die Nullreihe (eval.py:607).
+                nwp_err = np.zeros_like(y_t) - y_t
+            else:
+                nwp_raw = prepared.get('nwp_raw_test') if j == 0 else None
+                if nwp_raw is None or len(nwp_raw) != len(y_t):
+                    nwp_raw = _spalte_je_lauf(
+                        df, preprocessing.nwp_baseline_prefixes(
+                            params_cfg.get('nwp_baseline_col'), 'wind_speed_h10')[0],
+                        run_times, horizon_len)
+                nwp = nwp_raw
+                gt_abs, pred_abs = y_t, y_p
+                nwp_err = None if nwp is None else (nwp - y_t)
+
+            # --- Maske: imputierte Zielpositionen und Fehlwerte heraus ---
+            # '<target>_observed' legt utils/solar.preprocess_solar_icond2 an
+            # (True = echter Messwert). Elementweise, nicht laufweise — dieselbe
+            # Regel wie eval._evaluate_single_target.
+            maske = np.isfinite(y_t) & np.isfinite(y_p)
+            if exclude_imputed:
+                beobachtet = _spalte_je_lauf(df, f'{tgt}_observed', run_times, horizon_len)
+                if beobachtet is None:
+                    raise RuntimeError(
+                        f"Station {station_id}, Ziel '{tgt}': eval.exclude_imputed ist "
+                        f"gesetzt, aber '{tgt}_observed' laesst sich nicht laufweise "
+                        f"ausrichten. Ungefiltert weiterzurechnen waere die falsche Zahl.")
+                maske &= beobachtet > 0.5
+            if maske.sum() < 2:
+                logger.warning(f"Station {station_id}, Ziel '{tgt}': nach Maske nur "
+                               f"{int(maske.sum())} Werte — uebersprungen.")
+                continue
+
+            rmse = float(np.sqrt(np.mean((y_p[maske] - y_t[maske]) ** 2)))
+            mae = float(np.mean(np.abs(y_p[maske] - y_t[maske])))
+            r2 = float(r2_score(gt_abs[maske], pred_abs[maske]))
+            rmse_nwp = (float(np.sqrt(np.mean(nwp_err[maske] ** 2)))
+                        if nwp_err is not None else None)
+
+            # --- Persistenz: letzter Messwert vor Prognosestart ---
+            pers_vals = _persistenz(df, tgt, basis_col, run_times, freq_delta,
+                                    lead0_off, nwp_residual)
+            pers_ref = None
+            skill = None
+            if pers_vals is not None:
+                pers_ref = np.repeat(pers_vals[:, None], horizon_len, axis=1)
+                gueltig = maske & np.isfinite(pers_ref)
+                if gueltig.sum() >= 2:
+                    rmse_pers = float(math.sqrt(mean_squared_error(
+                        gt_abs[gueltig], pers_ref[gueltig])))
+                    skill = (1.0 - rmse / rmse_pers) if rmse_pers > 0 else None
+
+            for i in range(len(run_times)):
+                run_ts = run_times[i]
+                for h in range(horizon_len):
+                    if not maske[i, h]:
+                        continue
+                    satz = {
                         'station_id': station_id,
                         'run_time':   run_ts,
-                        'valid_time': run_ts + freq_delta * (h + 1),
+                        # Lead 0 haengt an run_time + lead0_off Schritten, horizon zaehlt ab 1.
+                        'valid_time': run_ts + freq_delta * (h + lead0_off),
                         'horizon':    h + 1,
-                        'pred':       float(y_pred[i, h]),
-                        'gt':         float(y_true[i, h]),
-                        'nwp_ref':    float(nwp_raw[i, h]) if nwp_raw is not None else np.nan,
+                        'pred':       float(pred_abs[i, h]),
+                        'gt':         float(gt_abs[i, h]),
+                        'nwp_ref':    float(nwp[i, h]) if nwp is not None else np.nan,
                         'pers_ref':   float(pers_ref[i, h]) if pers_ref is not None else np.nan,
-                    })
+                    }
+                    if multi_target:
+                        satz['target'] = tgt
+                    raw_records.append(satz)
 
-        per_station.append({
-            'station_id': station_id,
-            'n_samples': int(len(y_true)),
-            'rmse': rmse,
-            'mae': mae,
-            'r2': r2,
-            'rmse_nwp': rmse_nwp,
-            'skill_nwp': (1 - rmse / rmse_nwp) if rmse_nwp else None,
-            'skill': skill,
-        })
-        all_y_true.append(y_true)
-        all_y_pred.append(y_pred)
-        logger.info(f"Station {station_id}: n={len(y_true)}, RMSE={rmse:.4f} m/s, R2={r2:.4f}"
-                    + (f", RMSE_NWP={rmse_nwp:.4f}, Skill_NWP={1 - rmse / rmse_nwp:.4f}" if rmse_nwp else "")
-                    + (f", Skill={skill:.4f}" if skill is not None else ""))
+            eintrag = {
+                'station_id': station_id,
+                # n_samples zaehlt wie bisher die Vorhersagefenster (Laeufe mit
+                # mindestens einer bewerteten Zelle), n_values die tatsaechlich
+                # bewerteten Einzelwerte — letzteres ist das, was
+                # get_test_results_dcrnn.py 'n_samples' nennt.
+                'n_samples': int(maske.any(axis=1).sum()),
+                'n_values': int(maske.sum()),
+                'rmse': rmse,
+                'mae': mae,
+                'r2': r2,
+                'rmse_nwp': rmse_nwp,
+                'skill_nwp': (1 - rmse / rmse_nwp) if rmse_nwp else None,
+                'skill': skill,
+            }
+            if multi_target:
+                eintrag['target'] = tgt
+            per_station.append(eintrag)
+
+            pool[tgt]['true'].append(gt_abs[maske])
+            pool[tgt]['pred'].append(pred_abs[maske])
+            if nwp_err is not None:
+                pool[tgt]['nwp'].append(nwp_err[maske])
+
+            einheit = EINHEIT.get(tgt, '')
+            logger.info(f"Station {station_id} [{tgt}]: Laeufe={int(maske.any(axis=1).sum())}, "
+                        f"Werte={int(maske.sum())}, "
+                        f"RMSE={rmse:.4f} {einheit}, R2={r2:.4f}"
+                        + (f", RMSE_NWP={rmse_nwp:.4f}, Skill_NWP={1 - rmse / rmse_nwp:.4f}"
+                           if rmse_nwp else "")
+                        + (f", Skill={skill:.4f}" if skill is not None else ""))
 
     if not per_station:
         raise RuntimeError("No test stations produced samples — check test_start/test_end vs. data coverage.")
 
-    y_true_all = np.concatenate(all_y_true, axis=0)
-    y_pred_all = np.concatenate(all_y_pred, axis=0)
-    pooled_rmse = float(np.sqrt(np.mean((y_pred_all - y_true_all) ** 2)))
-    pooled_mae = float(np.mean(np.abs(y_pred_all - y_true_all)))
-    mean_station_rmse = float(np.mean([s['rmse'] for s in per_station]))
+    # Gepoolte Zahlen je Zielgroesse. Ueber ghi und dhi gemittelt beschriebe eine
+    # einzelne Zahl keine der beiden Groessen — dieselbe Trennung wie in
+    # geostatistics/get_test_results_dcrnn.py.
+    je_ziel = {}
+    for tgt in target_cols:
+        if not pool[tgt]['true']:
+            continue
+        y_true_all = np.concatenate(pool[tgt]['true'])
+        y_pred_all = np.concatenate(pool[tgt]['pred'])
+        zeilen = [r for r in per_station if not multi_target or r.get('target') == tgt]
+        block = {
+            'n_stations': len(zeilen),
+            'pooled_rmse': float(np.sqrt(np.mean((y_pred_all - y_true_all) ** 2))),
+            'pooled_mae': float(np.mean(np.abs(y_pred_all - y_true_all))),
+            'mean_station_rmse': float(np.mean([r['rmse'] for r in zeilen])),
+        }
+        if pool[tgt]['nwp']:
+            nwp_err_all = np.concatenate(pool[tgt]['nwp'])
+            block['pooled_rmse_nwp'] = float(np.sqrt(np.mean(nwp_err_all ** 2)))
+            block['pooled_skill_nwp'] = 1 - block['pooled_rmse'] / block['pooled_rmse_nwp']
+        je_ziel[tgt] = block
 
     result = {
         'model_tag': args.model_tag,
         'config_path': f'{args.config}.yaml',
         'eval_split': args.eval_split,
         'hpo_study': args.hpo_study,
+        'target_cols': target_cols,
+        'target_transform': params_cfg.get('target_transform', 'none'),
+        'exclude_imputed': exclude_imputed,
+        'lead0_offset': lead0_off,
         'test_start': str(config['data']['test_start']),
         'test_end': str(config['data']['test_end']),
-        'n_stations': len(per_station),
-        'pooled_rmse': pooled_rmse,
-        'pooled_mae': pooled_mae,
-        'mean_station_rmse': mean_station_rmse,
+        'per_target': je_ziel,
         'per_station': per_station,
     }
-    if all_y_nwp:
-        y_nwp_all = np.concatenate(all_y_nwp, axis=0)
-        pooled_rmse_nwp = float(np.sqrt(np.mean((y_nwp_all - y_true_all) ** 2)))
-        result['pooled_rmse_nwp'] = pooled_rmse_nwp
-        result['pooled_skill_nwp'] = 1 - pooled_rmse / pooled_rmse_nwp
+    # Single-Target behaelt die bisherigen Schluessel auf oberster Ebene, damit
+    # bestehende Wind-Auswertungen unveraendert weiterlesen koennen.
+    if not multi_target:
+        result.update({k: v for k, v in je_ziel.get(target_cols[0], {}).items()})
 
-    logger.info(f"Pooled test RMSE (physical units, m/s): {pooled_rmse:.4f} "
-                f"(mean-of-station: {mean_station_rmse:.4f}) over {len(per_station)} stations")
-    if 'pooled_skill_nwp' in result:
-        logger.info(f"Pooled Skill_NWP: {result['pooled_skill_nwp']:.4f}")
+    for tgt, block in je_ziel.items():
+        einheit = EINHEIT.get(tgt, '')
+        logger.info(f"[{tgt}] Pooled RMSE ({einheit}): {block['pooled_rmse']:.4f} "
+                    f"(mean-of-station: {block['mean_station_rmse']:.4f}) ueber "
+                    f"{block['n_stations']} Stationen"
+                    + (f", Skill_NWP: {block['pooled_skill_nwp']:.4f}"
+                       if 'pooled_skill_nwp' in block else ""))
 
     results_dir = os.path.join('results', 'tft_bc')
     os.makedirs(results_dir, exist_ok=True)

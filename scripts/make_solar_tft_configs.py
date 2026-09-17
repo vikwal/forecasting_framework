@@ -60,6 +60,16 @@ NEU_IM_TRAINING = ['00427', '01078', '01605', '01766', '02907',
 #: fuer diesen Aufbau nicht.
 FENSTER_CV = dict(train_start='2023-08-01', train_end='2024-07-31',
                   test_start='2024-08-01', test_end='2025-08-01')
+#: Retrain je Fold: dieselbe Zeitachse wie die gefahrene HPO
+#: (configs/solar_tft/config_solar_tft_hpo.yaml). cv_mode='spatial' schneidet
+#: das Trainingsfenster bei val_start und das Val-Fenster bei test_start —
+#: beides aus X_train, weshalb hier KEIN train_end stehen darf: es begrenzt
+#: df_train (utils/preprocessing.py:412) und liesse das Val-Fenster leer.
+#: test_end ist nur die obere Ladeschranke der Rohdaten; das Testjahr landet
+#: in X_test und wird vom spatial-Pfad nie angefasst (Training < val_start,
+#: Scaler _fit_global_scaler_x(fit_until=val_start)).
+FENSTER_FOLD = dict(train_start='2023-08-01', val_start='2024-08-01',
+                    test_start='2025-08-01', test_end='2026-07-31')
 #: Schlussmessung: Training ueber beide bisherigen Jahre, Test auf dem
 #: zurueckgehaltenen dritten. NICHT starten, solange die Modellwahl laeuft.
 FENSTER_TEST = dict(train_start='2023-08-01', train_end='2025-07-31',
@@ -196,22 +206,48 @@ def main() -> int:
         # --- Retrain je Fold --------------------------------------------
         for i, (_, train_ids, val_ids) in enumerate(folds, start=1):
             cfg = _grundgeruest(vorlage, arm, extra)
-            cfg['data'].update(FENSTER_CV)
+            cfg['data'].update(FENSTER_FOLD)
+            # train_end der Vorlage MUSS weg: es begrenzt df_train
+            # (utils/preprocessing.py:412), und cv_mode='spatial' schneidet sein
+            # Val-Fenster [val_start, test_start) genau aus X_train heraus —
+            # mit train_end 2024-07-31 bliebe es leer und der Lauf braeche in
+            # _build_spatial_fold_data ab ("empty train or val split").
+            cfg['data'].pop('train_end', None)
             cfg['data']['files'] = sorted(train_ids + extra)
             cfg['data']['val_files'] = list(val_ids)
-            # test_files = val_files, wie bei der Schlussmessung unten: die
-            # Zielstationen des Folds sind zugleich die Auswertungsstationen.
-            # get_test_results_tft_bc.py liest per Default files_key='test_files'
-            # im Fenster [test_start, test_end] — ohne diesen Schluessel faende es
-            # keine Station und die Fold-Auswertung liefe ins Leere. Das Fenster
-            # ist FENSTER_CV, also das Validierungsjahr; der zurueckgehaltene
-            # Testsatz bleibt unberuehrt.
+            # test_files = val_files: die Zielstationen des Folds sind zugleich
+            # die Auswertungsstationen. Ausgewertet wird mit
+            # `get_test_results_tft_bc.py --eval-split val`, das test_files auf
+            # val_files und das Fenster auf [val_start, test_start) setzt — also
+            # auf das Validierungsjahr, in dem auch das Early Stopping misst.
+            # Der zurueckgehaltene Testsatz bleibt unberuehrt; OHNE --eval-split
+            # val liefe die Auswertung dagegen im Testjahr.
             cfg['data']['test_files'] = list(val_ids)
+            # Dieselbe CV-Achse wie die gefahrene HPO: feste Zeitgrenze
+            # val_start, rotierende Stationsrollen. train_cl_tft_bc.py waehlt
+            # ueber hpo.cv_mode zwischen create_or_load_preprocessed_data
+            # (temporal) und ..._spatial und verlangt genau einen Fold — mit dem
+            # kfolds 12 der Vorlage braeche es nach dem kompletten Preprocessing ab.
+            cfg['hpo']['cv_mode'] = 'spatial'
+            cfg['hpo']['kfolds'] = 1
+            cfg['hpo']['min_train_date'] = None
             _schreibe(cfg, ziel / f'config_{arm}_fold{i}.yaml', f"""# {arm}, Fold {i} — {len(train_ids)}+{len(extra)} Trainings-, {len(val_ids)} Zielstationen
 #
 # Trainingspool: {spez['label']}.
 # Zielstationen identisch zum jeweils anderen Arm — nur so ist der Vergleich
 # der beiden Arme gepaart.
+#
+# cv_mode: spatial, Zeitachse wie in der HPO-Studie
+# cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo: Training < val_start
+# (2024-08-01), Early Stopping auf den Zielstationen des Folds im
+# Validierungsjahr [val_start, test_start). Kein train_end — siehe
+# FENSTER_FOLD im Generator.
+#
+# Auswertung ZWINGEND mit --eval-split val:
+#   get_test_results_tft_bc.py -c <diese Datei> \\
+#       --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \\
+#       --model-tag train_tft_bc_m-tft_c-{arm}_fold{i} --eval-split val
+# Ohne das Flag misst die Auswertung im Testjahr (test_start 2025-08-01).
 #
 # Erzeugt von scripts/make_solar_tft_configs.py — nicht von Hand pflegen.""", args.force)
 
@@ -221,11 +257,27 @@ def main() -> int:
         cfg['data']['files'] = sorted(pool + extra)
         cfg['data']['val_files'] = list(test_ids)
         cfg['data']['test_files'] = list(test_ids)
+        # Temporal (kein cv_mode): EIN Fold, und die Validierung wird nach DATUM
+        # abgetrennt — _replace_val_with_val_files zerlegt die val_files-Stationen
+        # (hier die 21 Teststationen) ab hpo.min_train_date in n_splits+1
+        # Zeitabschnitte und gibt dem Fold den zweiten. Sie liegt damit im
+        # TRAININGSZEITRAUM und ist vom Testjahr zeitlich getrennt. Der
+        # Trainingsblock bleibt vollstaendig; kfolds 12 aus der Vorlage lehnt
+        # train_cl_tft_bc.py ab.
+        # --test-mode ist hier verboten (val_files == test_files), s. Kopf.
+        cfg['hpo']['kfolds'] = 1
         _schreibe(cfg, ziel / f'config_{arm}_testyear.yaml', f"""# {arm}, Schlussmessung — {len(pool)}+{len(extra)} Trainings-, {len(test_ids)} Teststationen
 #
 # Training ueber beide bisherigen Jahre, Test auf dem zurueckgehaltenen dritten
 # (2025-08..2026-07). NICHT starten, solange die Modellwahl laeuft — der
 # Testsatz darf in keine Auswahl einfliessen.
+#
+# NIEMALS mit --test-mode fahren: das Flag zieht val_files in den Trainingspool,
+# und val_files sind hier DIESELBEN 21 Teststationen wie test_files (Absicht,
+# docs/station_splits_solar.md §6) — die Schlussmessung waere wertlos. Ohne das
+# Flag trainiert die Config auf den Poolstationen und misst auf den 21
+# Teststationen im Testjahr; Early Stopping laeuft auf denselben 21 Stationen,
+# aber im Trainingszeitraum ab hpo.min_train_date.
 #
 # Achtung Datenlage: im Testjahr faellt auch der Pool ab (mittlerer Anteil
 # echter Messwerte 0.85, Minimum 0.12). Mit eval.exclude_imputed bleibt davon

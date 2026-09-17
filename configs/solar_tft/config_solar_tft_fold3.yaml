@@ -4,6 +4,18 @@
 # Zielstationen identisch zum jeweils anderen Arm — nur so ist der Vergleich
 # der beiden Arme gepaart.
 #
+# cv_mode: spatial, Zeitachse wie in der HPO-Studie
+# cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo: Training < val_start
+# (2024-08-01), Early Stopping auf den Zielstationen des Folds im
+# Validierungsjahr [val_start, test_start). Kein train_end — siehe
+# FENSTER_FOLD im Generator.
+#
+# Auswertung ZWINGEND mit --eval-split val:
+#   get_test_results_tft_bc.py -c <diese Datei> \
+#       --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+#       --model-tag train_tft_bc_m-tft_c-solar_tft_fold3 --eval-split val
+# Ohne das Flag misst die Auswertung im Testjahr (test_start 2025-08-01).
+#
 # Erzeugt von scripts/make_solar_tft_configs.py — nicht von Hand pflegen.
 
 data:
@@ -106,9 +118,8 @@ data:
   - '05426'
   - '15444'
   train_start: '2023-08-01'
-  train_end: '2024-07-31'
-  test_start: '2024-08-01'
-  test_end: '2025-08-01'
+  test_start: '2025-08-01'
+  test_end: '2026-07-31'
   train_frac: 1
   scale_x: true
   scale_y: false
@@ -120,6 +131,7 @@ data:
   eval_interval: 1
   ecmwf_solar_path: !ENV '${DATA_ROOT}/ecmwf/parquet/solar'
   interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/solar'
+  val_start: '2024-08-01'
 params:
   icond2_features:
   - ghi_nwp
@@ -255,9 +267,8 @@ hpo:
     direction: minimize
   objective_reduction: best
   trials: 150
-  kfolds: 12
-  min_train_date: '2024-06-30'
-  val_split: 1
+  kfolds: 1
+  min_train_date: null
   pruning:
     use_median_pruner: true
     n_startup_trials: 10
@@ -343,6 +354,7 @@ hpo:
     tau:
     - 0.0001
     - 0.1
+  cv_mode: spatial
 eval:
   results_path: results/solar_tft
   eval_on_all_test_data: true
