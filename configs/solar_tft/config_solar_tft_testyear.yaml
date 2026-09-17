@@ -5,11 +5,17 @@
 # Testsatz darf in keine Auswahl einfliessen.
 #
 # NIEMALS mit --test-mode fahren: das Flag zieht val_files in den Trainingspool,
-# und val_files sind hier DIESELBEN 21 Teststationen wie test_files (Absicht,
-# docs/station_splits_solar.md §6) — die Schlussmessung waere wertlos. Ohne das
-# Flag trainiert die Config auf den Poolstationen und misst auf den 21
-# Teststationen im Testjahr; Early Stopping laeuft auf denselben 21 Stationen,
-# aber im Trainingszeitraum ab hpo.min_train_date.
+# und val_files sind hier DIESELBEN 21 Teststationen wie test_files — die
+# Schlussmessung waere wertlos. (Seit dem Wegfall von hpo.val_split bricht der
+# Lauf in diesem Fall ohnehin ab.) Ohne das Flag trainiert die Config auf den
+# Poolstationen bis val_start 2025-08-01 und misst auf den 21 Teststationen im
+# Testjahr; Early Stopping laeuft auf genau diesen Auswertungsdaten — so
+# festgelegt in docs/station_splits_solar.md §6, Optimismus rund ein Prozent.
+#
+# Auswertung deshalb mit --eval-split val (Fenster [val_start, test_start)):
+#   get_test_results_tft_bc.py -c <diese Datei> \
+#       --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+#       --model-tag train_tft_bc_m-tft_c-<arm>_testyear --eval-split val
 #
 # Achtung Datenlage: im Testjahr faellt auch der Pool ab (mittlerer Anteil
 # echter Messwerte 0.85, Minimum 0.12). Mit eval.exclude_imputed bleibt davon
@@ -139,8 +145,7 @@ data:
   - '07370'
   - '15000'
   train_start: '2023-08-01'
-  train_end: '2025-07-31'
-  test_start: '2025-08-01'
+  test_start: '2026-08-01'
   test_end: '2026-08-01'
   train_frac: 1
   scale_x: true
@@ -153,6 +158,7 @@ data:
   eval_interval: 1
   ecmwf_solar_path: !ENV '${DATA_ROOT}/ecmwf/parquet/solar'
   interpol_path: !ENV '${DATA_ROOT}/synthetic/interpol/solar'
+  val_start: '2025-08-01'
 params:
   icond2_features:
   - ghi_nwp
@@ -289,7 +295,7 @@ hpo:
   objective_reduction: best
   trials: 150
   kfolds: 1
-  min_train_date: '2024-06-30'
+  min_train_date: null
   pruning:
     use_median_pruner: true
     n_startup_trials: 10
@@ -375,6 +381,7 @@ hpo:
     tau:
     - 0.0001
     - 0.1
+  cv_mode: spatial
 eval:
   results_path: results/solar_tft
   eval_on_all_test_data: true

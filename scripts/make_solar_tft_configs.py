@@ -72,8 +72,19 @@ FENSTER_FOLD = dict(train_start='2023-08-01', val_start='2024-08-01',
                     test_start='2025-08-01', test_end='2026-07-31')
 #: Schlussmessung: Training ueber beide bisherigen Jahre, Test auf dem
 #: zurueckgehaltenen dritten. NICHT starten, solange die Modellwahl laeuft.
-FENSTER_TEST = dict(train_start='2023-08-01', train_end='2025-07-31',
-                    test_start='2025-08-01', test_end='2026-08-01')
+#:
+#: Gleiche Bauart wie FENSTER_FOLD, nur ein Jahr weiter: val_start trennt
+#: Training (< 2025-08-01, also beide bisherigen Jahre) vom Val-Fenster
+#: [val_start, test_start) — und das IST das Testjahr. Early Stopping laeuft
+#: damit auf denselben 21 Stationen und demselben Zeitraum, auf denen
+#: anschliessend berichtet wird. Das ist die festgelegte Konvention, nicht
+#: ein Versehen: docs/station_splits_solar.md §6 misst den Optimismus auf rund
+#: ein Prozent und haelt ihn fuer vernachlaessigbar (Entscheidung Viktor,
+#: 18.08.2026). Ein Val-Chunk im Trainingszeitraum waere die strengere
+#: Variante, wich aber von Arm A und den Fold-Laeufen ab und machte die Zahlen
+#: untereinander unvergleichbar.
+FENSTER_TEST = dict(train_start='2023-08-01', val_start='2025-08-01',
+                    test_start='2026-08-01', test_end='2026-08-01')
 
 ARME = {
     'solar_tft':      {'extra': [],              'label': '62 Poolstationen'},
@@ -254,18 +265,18 @@ def main() -> int:
         # --- Schlussmessung ---------------------------------------------
         cfg = _grundgeruest(vorlage, arm, extra)
         cfg['data'].update(FENSTER_TEST)
+        cfg['data'].pop('train_end', None)   # begrenzt df_train, s. FENSTER_FOLD
         cfg['data']['files'] = sorted(pool + extra)
         cfg['data']['val_files'] = list(test_ids)
         cfg['data']['test_files'] = list(test_ids)
-        # Temporal (kein cv_mode): EIN Fold, und die Validierung wird nach DATUM
-        # abgetrennt — _replace_val_with_val_files zerlegt die val_files-Stationen
-        # (hier die 21 Teststationen) ab hpo.min_train_date in n_splits+1
-        # Zeitabschnitte und gibt dem Fold den zweiten. Sie liegt damit im
-        # TRAININGSZEITRAUM und ist vom Testjahr zeitlich getrennt. Der
-        # Trainingsblock bleibt vollstaendig; kfolds 12 aus der Vorlage lehnt
-        # train_cl_tft_bc.py ab.
+        # Wie die Fold-Configs: cv_mode spatial, Schnitt auf val_start. Training
+        # sind die Poolstationen vor 2025-08-01, Validierung die 21 Teststationen
+        # im Testjahr — also die Auswertungsdaten selbst (station_splits_solar.md
+        # §6). Ausgewertet wird deshalb ebenfalls mit --eval-split val.
         # --test-mode ist hier verboten (val_files == test_files), s. Kopf.
+        cfg['hpo']['cv_mode'] = 'spatial'
         cfg['hpo']['kfolds'] = 1
+        cfg['hpo']['min_train_date'] = None
         _schreibe(cfg, ziel / f'config_{arm}_testyear.yaml', f"""# {arm}, Schlussmessung — {len(pool)}+{len(extra)} Trainings-, {len(test_ids)} Teststationen
 #
 # Training ueber beide bisherigen Jahre, Test auf dem zurueckgehaltenen dritten
@@ -273,11 +284,17 @@ def main() -> int:
 # Testsatz darf in keine Auswahl einfliessen.
 #
 # NIEMALS mit --test-mode fahren: das Flag zieht val_files in den Trainingspool,
-# und val_files sind hier DIESELBEN 21 Teststationen wie test_files (Absicht,
-# docs/station_splits_solar.md §6) — die Schlussmessung waere wertlos. Ohne das
-# Flag trainiert die Config auf den Poolstationen und misst auf den 21
-# Teststationen im Testjahr; Early Stopping laeuft auf denselben 21 Stationen,
-# aber im Trainingszeitraum ab hpo.min_train_date.
+# und val_files sind hier DIESELBEN 21 Teststationen wie test_files — die
+# Schlussmessung waere wertlos. (Seit dem Wegfall von hpo.val_split bricht der
+# Lauf in diesem Fall ohnehin ab.) Ohne das Flag trainiert die Config auf den
+# Poolstationen bis val_start 2025-08-01 und misst auf den 21 Teststationen im
+# Testjahr; Early Stopping laeuft auf genau diesen Auswertungsdaten — so
+# festgelegt in docs/station_splits_solar.md §6, Optimismus rund ein Prozent.
+#
+# Auswertung deshalb mit --eval-split val (Fenster [val_start, test_start)):
+#   get_test_results_tft_bc.py -c <diese Datei> \\
+#       --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \\
+#       --model-tag train_tft_bc_m-tft_c-<arm>_testyear --eval-split val
 #
 # Achtung Datenlage: im Testjahr faellt auch der Pool ab (mittlerer Anteil
 # echter Messwerte 0.85, Minimum 0.12). Mit eval.exclude_imputed bleibt davon

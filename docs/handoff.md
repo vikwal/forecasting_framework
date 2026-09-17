@@ -486,16 +486,31 @@ Generator nur für die HPO-Config. Behoben in `scripts/make_solar_tft_configs.py
   (`val_start` 2024-08-01, `test_start` 2025-08-01). **`train_end` muss fehlen** —
   es begrenzt `df_train` (`preprocessing.py:412`), und der spatial-Pfad schneidet
   sein Val-Fenster genau daraus heraus; mit `train_end` bliebe es leer.
-* `testyear`: temporal, `kfolds: 1`. Validierung sind die 21 Teststationen im
-  Trainingszeitraum ab `min_train_date`, zeitlich getrennt vom Testjahr.
+* `testyear`: gleiche Bauart, ein Jahr weiter — `val_start` 2025-08-01,
+  `test_start` 2026-08-01. Training sind die Poolstationen davor (beide bisherigen
+  Jahre), Validierung die 21 Teststationen **im Testjahr**, also die
+  Auswertungsdaten selbst. Ausgewertet wird deshalb ebenfalls mit
+  `--eval-split val`.
+
+  **Achtung, hier lag der alte Handoff falsch.** Die frühere Stolperfalle 3
+  behauptete, die 21 Stationen dienten „im Trainingszeitraum als Validierungsset
+  … zeitlich getrennt". Das widerspricht
+  [station_splits_solar.md](station_splits_solar.md) §6: dort wird das
+  Auswertungsset ausdrücklich als Validierungsset übergeben, die Epoche also auf
+  denselben Stationen **und demselben Zeitraum** gewählt, auf denen berichtet
+  wird — Optimismus rund ein Prozent, am 18.08.2026 als vernachlässigbar
+  entschieden. Die erste Fassung der Config folgte dem falschen Text, der Lauf
+  vom 17.09. 15:07 wurde deshalb verworfen und neu gestartet. Ein Val-Chunk im
+  Trainingszeitraum wäre die strengere Variante, wiche aber von Arm A und den
+  Fold-Läufen ab und machte die Zahlen untereinander unvergleichbar.
 
 **`hpo.val_split` ist ersatzlos entfallen** (Commit `fefd8f6`, 489 Configs und
 `utils/hpo.py`/`utils/data_cache.py`/`hpo_fl.py`). Getrennt wird nach Datum: im
 temporalen Pfad schneidet `_replace_val_with_val_files` die `val_files`-Stationen
 zeitlich zu, im räumlichen trennt `val_start`. `val_split` schnitt daneben nur
-noch Trainingsdaten ab, die anschließend verworfen wurden — die Schlussmessung
-lief damit zunächst auf 162 993 statt 171 572 Fenstern, also ohne die letzten
-fünf Wochen vor dem Testjahr. **`kfolds: 1` ohne `val_files` bricht jetzt ab**,
+noch Trainingsdaten ab, die anschließend verworfen wurden — die (damals noch
+temporal aufgesetzte) Schlussmessung lief damit auf 162 993 statt 171 572
+Fenstern, also ohne die letzten fünf Wochen vor dem Testjahr. **`kfolds: 1` ohne `val_files` bricht jetzt ab**,
 das trifft `train_cl_tft_bc.py --test-mode` (leert `val_files`) und damit die
 beiden Wind-Testyear-Configs; sie vermerken es in ihrem Kopf.
 
@@ -549,9 +564,11 @@ frcst/bin/python get_test_results_tft_bc.py -c configs/solar_tft/config_solar_tf
 
 #### Schritt 2 — Schlussmessung auf dem Testjahr (läuft)
 
-Training auf allen 62 Poolstationen über beide Jahre, Test auf den 21
-zurückgehaltenen Teststationen im dritten. Seit 17.09.2026, 15:07 auf l2, GPU 0;
-171 572 Trainingsfenster, 16 133 Validierungsfenster.
+Training auf den 62 Poolstationen über beide bisherigen Jahre (alles vor
+`val_start` 2025-08-01), gemessen auf den 21 zurückgehaltenen Teststationen im
+dritten. Seit 17.09.2026, 15:55 auf l2, GPU 0 — der Lauf von 15:07 trug noch die
+falsche Early-Stopping-Konstruktion (s. oben) und wurde samt Cache-Eintrag
+verworfen.
 
 ```bash
 frcst/bin/python train_cl_tft_bc.py -c configs/solar_tft/config_solar_tft_testyear.yaml \
@@ -561,10 +578,12 @@ frcst/bin/python train_cl_tft_bc.py -c configs/solar_tft/config_solar_tft_testye
 frcst/bin/python get_test_results_tft_bc.py -c configs/solar_tft/config_solar_tft_testyear.yaml \
     --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
     --model-tag train_tft_bc_m-tft_c-solar_tft_testyear \
-    --raw-out-name tft_solar_tft_testyear --gpu <G>
+    --raw-out-name tft_solar_tft_testyear --eval-split val --gpu <G>
 ```
 
-Hier **ohne** `--eval-split val`: die Schlussmessung soll im Testfenster messen.
+Auch hier `--eval-split val`: das Auswertungsfenster ist `[val_start,
+test_start)`, also das Testjahr. Ohne das Flag misst die Auswertung im Fenster
+`[test_start, test_end]` — und das ist hier leer.
 
 #### Stolperfallen, die weiter gelten
 
@@ -572,10 +591,12 @@ Hier **ohne** `--eval-split val`: die Schlussmessung soll im Testfenster messen.
    Trainingspool; in `config_solar_tft_testyear.yaml` sind `val_files` und
    `test_files` **dieselben** 21 Teststationen, die Messung wäre wertlos. Seit der
    `val_split`-Entfernung bricht der Lauf in diesem Fall ohnehin ab.
-2. **Dass `val_files == test_files` ist, ist Absicht** — die 21 Stationen sind im
-   Trainingszeitraum Validierungsset, gemessen wird erst im Testjahr
+2. **Dass `val_files == test_files` ist, ist Absicht** — und zwar im selben
+   Zeitraum: Early Stopping läuft auf den Auswertungsdaten
    (`station_splits_solar.md` §6, Entscheidung Viktor 18.08.2026: rund ein Prozent
-   Optimismus, bewusst akzeptiert).
+   Optimismus, bewusst akzeptiert). Dieselbe Konstruktion tragen die Fold-Läufe
+   und Arm A; wer sie für einen Lauf ändert, macht dessen Zahlen mit allen
+   übrigen unvergleichbar.
 3. **`--hpo-study` immer explizit angeben**, sonst leiten beide Skripte den
    Studiennamen aus dem Config-Dateinamen ab und landen auf `…_solar_tft` statt
    `…_solar_tft_hpo`.
