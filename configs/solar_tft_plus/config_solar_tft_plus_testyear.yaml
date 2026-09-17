@@ -166,6 +166,7 @@ params:
   - h_snow
   - rho_snow
   - prr_gsp
+  - u_10m
   known_features:
   - ghi_nwp
   - dhi_nwp
@@ -196,6 +197,7 @@ params:
   - ecmwf_t_2m
   - ecmwf_tp
   - ecmwf_fal
+  - u_10m
   observed_features:
   - ghi
   - dhi
@@ -230,6 +232,7 @@ params:
   - ecmwf_fal
   random_seed: 42
   impute_night_zero: true
+  next_n_grid_ecmwf: 0
 model:
   name: tft
   num_workers: 4

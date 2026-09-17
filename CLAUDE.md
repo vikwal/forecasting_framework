@@ -39,8 +39,9 @@ blockiert und braucht zuerst die Solar-Imputation.
 
 ## Wo nachschlagen (`docs/`, bei Bedarf lesen)
 
-**Stand & Übergaben** — [handoff.md](docs/handoff.md) (**AKTUELL, Sep 2026**: neun
-finale Testläufe auf l1/l2/ws, beobachten/stoppen, Imputationskette, offene
+**Stand & Übergaben** — [handoff.md](docs/handoff.md) (**AKTUELL, 17.09.2026**:
+Solar-TFT-HPO abgeschlossen §5.1.1, **Arbeitsauftrag Retrain + Schlussmessung in
+§5.1.2**; dazu die neun finalen Testläufe auf l1/l2/ws, Imputationskette, offene
 Stolperfallen), [handoff_testmode.md](docs/handoff_testmode.md),
 [expanding_window_retrain_handoff.md](docs/expanding_window_retrain_handoff.md)
 

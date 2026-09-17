@@ -121,6 +121,22 @@ def _grundgeruest(vorlage: dict, arm: str, extra: list[str]) -> dict:
     # wieder heraus.
     d['interpol_path'] = EnvTag('${DATA_ROOT}/synthetic/interpol/solar')
     p['impute_night_zero'] = True
+
+    # Featuresatz der HPO nachziehen (Suche vom 16./17.09.2026, Studie
+    # cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo). Ohne das trainiert der
+    # Retrain ein anderes Modell als das, dessen Hyperparameter gesucht wurden.
+    #   u_10m  staerkster Screening-Kandidat (DHI 0.161 %), ans ENDE der Listen,
+    #          genau dort haengt hpo_tft_bc.py optionale Features an — so bleibt
+    #          der Cache-Schluessel identisch und der Eintrag wiederverwendbar.
+    #   next_n_grid_ecmwf  explizit 0 statt weggelassen: hpo_tft_bc._range faellt
+    #          ohne hpo-Range auf params zurueck und der Trial schreibt den Wert
+    #          nach config['params'], wo data_cache._get_config_hash ihn liest.
+    #          Fehlt der Schluessel, hasht die Config None und der Trial 0 —
+    #          zwei Cache-Schluessel fuer dieselben Daten.
+    for schluessel in ('icond2_features', 'known_features'):
+        if 'u_10m' not in p[schluessel]:
+            p[schluessel] = list(p[schluessel]) + ['u_10m']
+    p['next_n_grid_ecmwf'] = 0
     e['exclude_imputed'] = True
     e['results_path'] = f'results/{arm}'
     cfg['_arm'] = {'name': arm, 'zusatzstationen': list(extra)}
@@ -183,7 +199,14 @@ def main() -> int:
             cfg['data'].update(FENSTER_CV)
             cfg['data']['files'] = sorted(train_ids + extra)
             cfg['data']['val_files'] = list(val_ids)
-            cfg['data'].pop('test_files', None)
+            # test_files = val_files, wie bei der Schlussmessung unten: die
+            # Zielstationen des Folds sind zugleich die Auswertungsstationen.
+            # get_test_results_tft_bc.py liest per Default files_key='test_files'
+            # im Fenster [test_start, test_end] — ohne diesen Schluessel faende es
+            # keine Station und die Fold-Auswertung liefe ins Leere. Das Fenster
+            # ist FENSTER_CV, also das Validierungsjahr; der zurueckgehaltene
+            # Testsatz bleibt unberuehrt.
+            cfg['data']['test_files'] = list(val_ids)
             _schreibe(cfg, ziel / f'config_{arm}_fold{i}.yaml', f"""# {arm}, Fold {i} — {len(train_ids)}+{len(extra)} Trainings-, {len(val_ids)} Zielstationen
 #
 # Trainingspool: {spez['label']}.

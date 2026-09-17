@@ -84,6 +84,28 @@ data:
   - '04466'
   - 05856
   - '07374'
+  test_files:
+  - '00232'
+  - '00460'
+  - 00596
+  - '00662'
+  - 00691
+  - '00704'
+  - '01303'
+  - 01468
+  - '01612'
+  - 01684
+  - '02171'
+  - '02261'
+  - 02290
+  - 02559
+  - '02601'
+  - 03287
+  - '03660'
+  - '04271'
+  - '04466'
+  - 05856
+  - '07374'
   train_start: '2023-08-01'
   train_end: '2024-07-31'
   test_start: '2024-08-01'
@@ -110,6 +132,7 @@ params:
   - h_snow
   - rho_snow
   - prr_gsp
+  - u_10m
   known_features:
   - ghi_nwp
   - dhi_nwp
@@ -140,6 +163,7 @@ params:
   - ecmwf_t_2m
   - ecmwf_tp
   - ecmwf_fal
+  - u_10m
   observed_features:
   - ghi
   - dhi
@@ -174,6 +198,7 @@ params:
   - ecmwf_fal
   random_seed: 42
   impute_night_zero: true
+  next_n_grid_ecmwf: 0
 model:
   name: tft
   num_workers: 4

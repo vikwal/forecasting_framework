@@ -246,13 +246,62 @@ Was dabei über die Aufgabe hinaus anfiel und ebenfalls behoben ist: der
 `run_time`-Folgefehler (§4.1) und der ECMWF-9999-Bug in der Ingest-Pipeline
 (§4.2).
 
-### 5.1.1 Solar-HPO für den TFT — neu aufgesetzt am 16.09.2026, 16:19
+### 5.1.1 Solar-HPO für den TFT — ABGESCHLOSSEN am 17.09.2026, 12:47
+
+**Status: beendet bei 98 abgeschlossenen Trials (Ziel waren 150), bewusst
+abgebrochen wegen Konvergenz.** Ergebnis und Arbeitsauftrag stehen in §5.1.2.
 
 `configs/solar_tft/config_solar_tft_hpo.yaml`, Studie
-`cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo`, zehn Worker über l2/l1/ws
+`cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo`, zuletzt 18 Worker über l2/l1/ws
 (`scripts/run_solar_hpo.sh`). Räumliche 3-Fold-CV über `configs/solar_folds.yaml`,
-150 Trials à drei Trainings, Training bis `val_start` 2024-08-01, Validierung
-bis `test_start` 2025-08-01 — das Testjahr bleibt unberührt.
+Training bis `val_start` 2024-08-01, Validierung bis `test_start` 2025-08-01 —
+das Testjahr blieb unberührt.
+
+Endstand: 98 COMPLETE, 198 PRUNED, 52 FAIL (ausschließlich beim Umkonfigurieren
+abgeräumte Trials, kein einziger inhaltlicher Fehlschlag). Volle Trial-Tabelle in
+`archiv/solar_tft_hpo_trials_final.csv`, bester Trial zusätzlich als
+`archiv/solar_tft_hpo_bester_trial.json`.
+
+**Warum abgebrochen — die Suche war austrainiert.** Der beste Wert stand seit
+Trial 111 (16.09., 23:59) unverändert bei 51.7188; 56 weitere abgeschlossene
+Trials brachten keine Verbesserung. Die Größenordnungen erklären, warum:
+
+| Größe | Wert |
+|---|---|
+| bester Trial | 51.719 W/m² |
+| Median aller 97 ausgewerteten Trials | 51.955 W/m² |
+| Abstand bester ↔ Median | **0.236 W/m²** (0.45 % des RMSE) |
+| Spannweite über alle Trials | 1.049 W/m² |
+| Vorsprung Top-10 vor dem Rest | 0.212 W/m² |
+| Lauf-zu-Lauf-Streuung derselben Konfiguration (IDW-Test, §5.1.1 unten) | ±0.13 … ±0.21 W/m² |
+
+Der Vorsprung der besten Trials entspricht damit etwa **einer Standardabweichung
+der bloßen Wiederholung** — der „beste" Trial ist vom soliden Mittelfeld
+statistisch kaum zu unterscheiden. Das Modell ist an dieser Stelle
+datenlimitiert, nicht hyperparameterlimitiert.
+
+**Keine Obergrenze des Suchraums bindet.** Geprüft über die zehn besten Trials:
+
+* `hidden_dim` — Optimum bei 16–46, Median 27.5 bei einer Obergrenze von 128.
+  Größere Werte sind sogar systematisch schlechter (Median 51.92 im Bereich
+  8–32 gegen 52.15 im Bereich 96–128, Korrelation +0.39). Die Senkung von 256
+  auf 128 am 16.09. hat also nichts abgeschnitten, sondern eine bereits
+  schlechte Region gekappt.
+* `batch_size` — **drückt gegen die UNTERE Schranke**: alle zehn besten liegen
+  zwischen 33 und 75 bei einer unteren Grenze von 32, und der Effekt ist monoton
+  (Median 51.94 bei 32–64 gegen 52.19 bei 256–512, Korrelation +0.62).
+  Ausgerechnet der wichtigste Parameter (39 % der erklärten Varianz laut fANOVA,
+  vor `lr` mit 27 % und `dropout` mit 17 %). Eine Öffnung nach unten (16 oder 8)
+  wäre der einzige sachlich begründete Eingriff — der erwartbare Gewinn liegt
+  aber unter der Wiederholungsstreuung und kostet Trainingszeit. **Bewusst
+  nicht gemacht.**
+* `num_lstm_layers` — alle zehn besten haben 1, also den kleinstmöglichen Wert.
+  Nicht erweiterbar; die Aussage lautet schlicht: mehr LSTM-Schichten schaden.
+
+Zur Vorsicht bei der Fold-Streuung: die beträgt 1.02 W/m², ist aber
+**systematisch**, nicht zufällig (Fold 1 bei 53.14, Fold 2 bei 51.21, Fold 3 bei
+51.65 — verschiedene Zielstationen). Da jeder Trial dieselben drei Folds sieht,
+hebt sie sich im Vergleich zwischen Trials auf und taugt nicht als Rauschmaß.
 
 **Der erste Anlauf vom Vormittag wurde verworfen und die Studie neu angelegt**
 (23 Trials gesichert in `archiv/optuna_…_vor_reset_20260916.csv`). Drei Ursachen,
@@ -380,6 +429,183 @@ das über die gemeinsame Menge ab, es sollte aber bewusst entschieden werden.
   DCRNN-Featuresatz.
 * **Wiederholungsläufe je Arm** — bisher ein Seed je Arm, s. den Vorbehalt am
   Ende von §2.1.
+
+### 5.1.2 ARBEITSAUFTRAG: Retrain und Schlussmessung des Solar-TFT
+
+**Ausgangslage.** Die HPO ist beendet (§5.1.1), die Hyperparameter stehen fest.
+Was fehlt, ist die Modellkette wie beim Wind-Pfad: erst je Fold ein Modell mit
+den besten Parametern nachtrainieren, speichern und auswerten, danach die
+Schlussmessung auf dem zurückgehaltenen Testjahr. Nichts davon ist begonnen —
+`results/solar_tft/` und `models/` enthalten noch keine Solar-TFT-Artefakte.
+
+**Die besten Hyperparameter** (Trial 111, `val_rmse` 51.7188, gefunden auf `ws`,
+Commit `3a0a6c8`). Sie müssen nicht abgetippt werden — beide Skripte lesen sie
+über `--hpo-study` direkt aus der Optuna-Studie:
+
+```
+batch_size            59        num_lstm_layers        1
+lr                    0.005740  static_embedding_dim  36
+hidden_dim            33        clipnorm               2.1235
+n_heads                3        dropout                0.52135
+next_n_grid_points     1        next_n_grid_ecmwf      0      next_n_stations  0
+```
+
+#### Schritt 1 — drei Fold-Modelle auf dem Validierungsjahr
+
+Je Fold ein Modell: Training auf den 41 bzw. 42 Trainingsstationen des Folds
+(Zeitraum 2023-08-01 … 2024-07-31), ausgewertet auf den 21 bzw. 20 Zielstationen
+desselben Folds im Validierungsjahr 2024-08-01 … 2025-07-31. Die Configs sind
+fertig und liegen in `configs/solar_tft/`.
+
+```bash
+for N in 1 2 3; do
+  frcst/bin/python train_cl_tft_bc.py \
+      -c configs/solar_tft/config_solar_tft_fold${N}.yaml \
+      --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+      --gpu <G> --cache-dir /mnt/nvme2/data_cache --max-cache-gb 150
+done
+```
+
+Erzeugt je Fold `models/train_tft_bc_m-tft_c-solar_tft_fold<N>.pt` (state_dict),
+`…_meta.pkl` und `…_history.pkl`. Danach die Auswertung:
+
+```bash
+for N in 1 2 3; do
+  frcst/bin/python get_test_results_tft_bc.py \
+      -c configs/solar_tft/config_solar_tft_fold${N}.yaml \
+      --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+      --model-tag train_tft_bc_m-tft_c-solar_tft_fold${N} \
+      --raw-out-name tft_solar_tft_fold${N} --gpu <G>
+done
+```
+
+Erzeugt `data/test_results/tft_solar_tft_fold<N>.csv` (Metriken je Station) und
+`data/raw_preds/tft_solar_tft_fold<N>_raw.parquet` (Rohprognosen) — dasselbe
+Schema wie bei DCRNN/MTGNN/WaveNet, damit die Arme vergleichbar bleiben.
+
+#### Schritt 2 — Schlussmessung auf dem Testjahr
+
+**Erst starten, wenn Schritt 1 steht und geprüft ist.** Training auf allen 62
+Poolstationen über **beide** Jahre (2023-08-01 … 2025-07-31, `train_end` ist in
+der Config gesetzt), Test auf den 21 zurückgehaltenen Teststationen im dritten
+Jahr 2025-08-01 … 2026-07-31.
+
+```bash
+frcst/bin/python train_cl_tft_bc.py \
+    -c configs/solar_tft/config_solar_tft_testyear.yaml \
+    --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+    --gpu <G> --cache-dir /mnt/nvme2/data_cache --max-cache-gb 150
+
+frcst/bin/python get_test_results_tft_bc.py \
+    -c configs/solar_tft/config_solar_tft_testyear.yaml \
+    --hpo-study cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo \
+    --model-tag train_tft_bc_m-tft_c-solar_tft_testyear \
+    --raw-out-name tft_solar_tft_testyear --gpu <G>
+```
+
+**Trockentest am 17.09.2026, 12:58 (l2, GPU 1):** Das Retrain-Kommando für
+Fold 1 läuft an — die Studie wird aufgelöst (`best_trial=111,
+best_value=51.718800`), die Hyperparameter werden korrekt übernommen, das
+Preprocessing lädt die 41 Trainingsstationen und fittet den globalen `scaler_x`
+auf **35 Feature-Spalten** (30 known inklusive `u_10m`, 2 observed, 3 static).
+Der Lauf wurde an dieser Stelle abgebrochen; Training und Auswertung sind noch
+offen. Der Cache-Eintrag war zu diesem Zeitpunkt noch nicht geschrieben, der
+erste echte Lauf baut ihn also neu.
+
+#### Stolperfallen — vor dem Start lesen
+
+1. **`get_test_results_tft_bc.py` ist noch nicht multi-target-fähig und muss
+   angepasst werden.** Zeile 257 und 264 lesen `config['data']['target_col']`
+   (Singular). Solar-Configs setzen `data.target_cols: [ghi, dhi]`, `target_col`
+   ist dort **`None`** — verifiziert über `tools.load_config`. Richtig ist
+   `preprocessing.get_target_cols(config)`, das `target_cols` bevorzugt und für
+   Wind unverändert `['wind_speed']` liefert. Zweitens rechnet die Metrikschleife
+   (ab Zeile 287) RMSE/MAE/R² über das ganze Array: bei zwei Zielgrößen hat
+   `y_pred` die Form `(n, horizon, 2)`, und man erhielte **eine vermischte Zahl
+   über GHI und DHI statt zweier getrennter Werte**. Beides muss vor der
+   Auswertung behoben werden — sonst laufen die Skripte entweder auf einen
+   Fehler oder, schlimmer, auf ein stilles Fehlergebnis. Vorbild für die
+   Aufteilung je Zielgröße: `scripts/eval_testyear.py` (dort für Wind, aber
+   Multi-Target-tauglich; die Wind-Beschriftungen „m/s"/„Windklasse" in den
+   Abbildungen 04/05/06 sind bekannt und müssten für Solar angepasst werden).
+
+2. **`--test-mode` hier NICHT verwenden** — anders als beim Wind-Pfad, wo
+   `train_cl_tft_bc.py` es im Docstring ausdrücklich für den finalen Testlauf
+   vorsieht. Grund: Das Flag mischt `val_files` in den Trainingspool. Bei Wind
+   sind `val_files` und `test_files` disjunkt (50 gegen 50, Überschneidung 0),
+   dort ist das korrekt. **In `config_solar_tft_testyear.yaml` sind `val_files`
+   und `test_files` identisch** (dieselben 21 Teststationen) — `--test-mode`
+   zöge sie ins Training und machte die Schlussmessung wertlos. Ohne das Flag
+   trainiert die Config auf 62 Poolstationen und misst auf den 21 Teststationen,
+   genau wie in `station_splits_solar.md` §4 festgelegt.
+
+3. **Dass `val_files` gleich `test_files` ist, ist Absicht, kein Fehler.** Die
+   21 Teststationen dienen im Trainingszeitraum als Validierungsset für Early
+   Stopping und werden erst im Testjahr zur Messung herangezogen — zeitlich
+   getrennt. Der dadurch entstehende Optimismus ist gemessen und bewusst
+   akzeptiert (`station_splits_solar.md` §6, Entscheidung Viktor 18.08.2026:
+   rund ein Prozent, kein Umbau).
+
+4. **`--hpo-study` immer explizit angeben.** Beide Skripte leiten den
+   Studiennamen sonst aus dem Config-Dateinamen ab und kämen bei
+   `config_solar_tft_fold1.yaml` auf `…_solar_tft`, nicht auf das tatsächliche
+   `…_solar_tft_hpo`. Ohne das Flag greifen sie ins Leere oder auf eine falsche
+   Studie.
+
+5. **Die Fold-Configs hatten kein `test_files` — am 17.09.2026 ergänzt.**
+   `get_test_results_tft_bc.py` liest per Default `files_key='test_files'`; ohne
+   den Schlüssel fände die Fold-Auswertung keine Station und liefe ins Leere.
+   Die Zielstationen des Folds stehen jetzt in `val_files` **und** `test_files`
+   (21/21/20), ausgewertet im Fenster `test_start`…`test_end` = 2024-08-01 …
+   2025-08-01, also im Validierungsjahr. Der zurückgehaltene Testsatz bleibt
+   unberührt. Das spiegelt, was der Generator bei der Schlussmessung ohnehin
+   tut. Alternativ gäbe es `--eval-split val`, das dafür aber ein `val_start` in
+   der Config braucht, das die Fold-Configs nicht setzen — bei
+   `next_n_stations: 0` liefern beide Wege dasselbe, weil sich die Wege nur im
+   `neighbor_pool` unterscheiden.
+
+   Zum Kontrast, damit die Wind-Analogie nicht in die Irre führt: Wind-Folds
+   haben drei getrennte Mengen (103 train / 50 val / 50 test), Solar-Folds nur
+   zwei (41 train / 21 Ziel) — die 21 Teststationen liegen außerhalb des Pools
+   und kommen erst in der Schlussmessung vor.
+
+6. **Featuresatz ist am 17.09.2026 angeglichen worden.** Die Fold- und
+   Testyear-Configs enthielten `u_10m` nicht, die HPO lief aber damit — sie
+   hätten ein anderes Modell trainiert als das optimierte. `u_10m` steht jetzt
+   am **Ende** von `icond2_features` und `known_features` (genau dort hängt
+   `hpo_tft_bc.py` optionale Features an, damit bleibt der Cache-Schlüssel
+   identisch), dazu `next_n_grid_ecmwf: 0` explizit. Erzeugt wurde das über
+   `scripts/make_solar_tft_configs.py --force`; die Configs sind generiert und
+   **nicht von Hand zu pflegen**.
+
+7. **Cache.** Auf l2 liegen die drei HPO-Fold-Einträge unter
+   `/mnt/nvme2/data_cache` (~50 GB, Budget 150 GB). Die Retrain-Läufe haben
+   andere Zeitachsen als die HPO und bauen daher **eigene** Einträge — je Lauf
+   rund 16 GB, beim ersten Start entsprechend Vorlaufzeit einplanen. Auf ws
+   liegt der Cache unter `$HOME/data_cache` (dort existiert `/mnt/nvme2` nicht),
+   auf l1 ist `DATA_ROOT=/mnt/nvme1` statt `/mnt/lambda1/nvme1`, was in den
+   Cache-Schlüssel eingeht: **Einträge sind zwischen l1 und l2/ws nicht
+   austauschbar**, ohne den Schlüssel neu zu rechnen.
+
+8. **Mehrere Läufe gleichzeitig auf einem Host mit leerem Cache vermeiden.**
+   `DataCache.save_preprocessed_data` schreibt ohne Lock und ohne atomares
+   `os.replace` (den flock hat nur `GNNCache`). Gleichzeitig startende Prozesse
+   bauen denselben Eintrag mehrfach parallel, und ein Leser kann eine halb
+   geschriebene `prepared.pkl` sehen. Erst einen Lauf durchlassen, dann die
+   übrigen.
+
+9. **Datenlage im Testjahr prüfen, bevor Zahlen interpretiert werden.** Der
+   mittlere Anteil echter Messwerte liegt dort bei 0.85, im Minimum bei 0.12.
+   Mit `eval.exclude_imputed: true` (in allen Configs gesetzt) bleibt
+   entsprechend weniger Auswertungsmasse übrig — je Station nachzählen.
+
+10. **Station 05792 fällt im CL-Pfad aus** (siehe unten in §5.1.1), die Läufe
+   arbeiten deshalb auf 61 statt 62 Poolstationen. Für alle Arme gleich, aber
+   beim Vergleich gegen die DCRNN-Arme (21 Zielstationen) zu berücksichtigen.
+
+11. **GPU-Wahl.** GPU 0 auf l2 ist oft fremdbelegt; auf l1 tragen die GPUs 3 und
+    5–7 dauerhaft Fremdlast eines anderen Nutzers. Vor dem Start mit
+    `nvidia-smi` prüfen. Ein Trainingslauf dieser Größe belegt 4–15 GB.
 
 ### 5.2 Lead-0-Fehler in weiteren Solar-Pfaden
 
