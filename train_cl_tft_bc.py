@@ -89,7 +89,12 @@ def main() -> None:
             raise ValueError("--test-mode requires 'test_files' to be set in the config.")
         logger.info("--test-mode: merging val_files into training set (files += val_files).")
         config['data']['files'] = list(config['data'].get('files', [])) + list(config['data'].get('val_files', []))
-        config['data']['val_files'] = []  # skip _replace_val_with_val_files, fall back to plain val_split
+        # Achtung: damit bleibt KEINE Validierungsquelle uebrig. Seit dem 17.09.2026
+        # wird nach Datum getrennt statt nach Anteil (hpo.val_split ist entfallen),
+        # und der Zeitschnitt kommt aus data.val_files. create_or_load_preprocessed_data
+        # bricht deshalb ab, wenn hpo.kfolds 1 ist. Fuer einen Testlauf ohne eigenes
+        # val_files-Set ist cv_mode: spatial mit data.val_start der vorgesehene Weg.
+        config['data']['val_files'] = []
 
     # --hpo-study ist optional. Ohne Studie bleiben Architektur und Preprocessing auf
     # den Werten der Config stehen — der Trockenlauf mit Standard-Hyperparametern,

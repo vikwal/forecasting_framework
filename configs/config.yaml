@@ -96,7 +96,6 @@ hpo:
   trials: 1000
   kfolds: 12
   min_train_len: 8760 # hours
-  val_split: 1
   pruning:
     use_median_pruner: True
     n_startup_trials: 10

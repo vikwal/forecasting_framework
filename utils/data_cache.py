@@ -588,6 +588,71 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
     return scaler
 
 
+#: Konfigurationsschluessel, die das vorprozessierte Ergebnis veraendern, ohne in
+#: ``DataCache._get_config_hash`` einzugehen. Weicht einer davon vom Erzeugerlauf
+#: ab, liefert ein Cache-Treffer stillschweigend Daten, die zur aktuellen Config
+#: nicht passen.
+#:
+#: Aufgefallen am 17.09.2026: ``hpo.val_split`` schnitt beim Bauen 5 % des
+#: Trainingsblocks ab, stand aber nicht im Hash. Ein Lauf mit korrigierter Config
+#: bekam denselben Eintrag zurueck und trainierte weiter auf 162 993 statt 171 572
+#: Fenstern — ohne Warnung, sichtbar nur daran, dass die Zahl sich nicht bewegte.
+#: (``val_split`` selbst ist seitdem ersatzlos entfallen, die Luecke bleibt aber
+#: fuer jeden anderen Schluessel dieser Art bestehen.)
+#:
+#: Den Hash zu erweitern schied aus: er ist ein md5 ueber das gesamte hash_data-Dict,
+#: jeder neue Schluessel aendert damit JEDE cache_id — die bestehenden Eintraege
+#: waeren unauffindbar und, schlimmer, bereits trainierte Modelle nicht mehr
+#: auswertbar (get_test_results_tft_bc.py rechnet die Trainings-cache_id nach, um
+#: scaler_x zu laden, und bricht ohne sie ab). Diese Pruefung kostet dagegen keinen
+#: einzigen Eintrag.
+CACHE_GUARD_KEYS = (
+    ('data', 'train_start'), ('data', 'train_end'), ('data', 'test_end'),
+    ('data', 'val_start'), ('data', 'data_cutoff'), ('data', 'train_frac'),
+    ('data', 'scale_x'), ('data', 'scale_y'), ('data', 'lag_in_col'),
+    ('data', 'n_neighbors'), ('data', 'interpol_path'),
+    ('data', 'knnimputer_path'), ('data', 'knn_impute_cols'),
+    ('params', 'impute_night_zero'), ('params', 'daytime_zenith_threshold'),
+    ('params', 'sub_hourly_fill'), ('params', 'nwp_baseline_col'),
+    ('params', 'clearsky_clip_max'), ('params', 'random_seed'),
+    ('params', 'topo_features_path'),
+    ('hpo', 'cv_mode'),
+    ('eval', 't_0'), ('eval', 'eval_on_all_test_data'),
+)
+
+
+def pruefe_cache_config(metadata: Dict, config: Dict, cache_id: str, logger) -> None:
+    """Config des Cache-Eintrags gegen die aktuelle halten — Abbruch bei Abweichung.
+
+    Prueft die Schluessel aus ``CACHE_GUARD_KEYS``, also genau die, die das
+    Ergebnis veraendern, aber nicht im Cache-Schluessel stehen. Gehashte Schluessel
+    brauchen die Pruefung nicht: weichen sie ab, ist es ohnehin ein anderer Eintrag.
+    """
+    gespeichert = (metadata or {}).get('config')
+    if not isinstance(gespeichert, dict):
+        logger.warning("Cache-Eintrag %s hat keine gespeicherte Config — Pruefung "
+                       "uebersprungen (Eintrag aus einer aelteren Version).", cache_id)
+        return
+
+    abweichungen = []
+    for sektion, schluessel in CACHE_GUARD_KEYS:
+        alt = (gespeichert.get(sektion) or {}).get(schluessel)
+        neu = (config.get(sektion) or {}).get(schluessel)
+        if str(alt) != str(neu):
+            abweichungen.append(f"  {sektion}.{schluessel}: Eintrag={alt!r}  Config={neu!r}")
+
+    if abweichungen:
+        raise ValueError(
+            f"Cache-Eintrag {cache_id} passt nicht zur aktuellen Config. Diese "
+            f"Schluessel veraendern das vorprozessierte Ergebnis, gehen aber nicht in "
+            f"den Cache-Schluessel ein:\n" + "\n".join(abweichungen) +
+            f"\n\nDer Eintrag wurde also mit anderen Einstellungen gebaut. Entweder "
+            f"die Config angleichen oder den Eintrag verwerfen "
+            f"(rm -rf <cache_dir>/{cache_id}*) und neu bauen lassen. Ihn "
+            f"weiterzuverwenden hiesse, auf Daten zu trainieren, die zu dieser "
+            f"Config nicht gehoeren.")
+
+
 def _replace_val_with_val_files(combined_kfolds, config, features, logger):
     """
     Replace the val portion of each k-fold with data from val_files stations.
@@ -743,6 +808,18 @@ def create_or_load_preprocessed_data(config: Dict,
     """
     logger = logging.getLogger(__name__)
 
+    # n_splits=1 hat seit dem 17.09.2026 keine eigene Validierung mehr: getrennt wird
+    # nach Datum, nicht nach Anteil (hpo.kfolds_with_per_file_min_train_len). Ohne
+    # val_files kaeme das Training also ganz ohne Validierungssatz durch — Early
+    # Stopping liefe ins Leere. Frueh pruefen, vor dem Preprocessing.
+    if int(config['hpo'].get('kfolds', 1)) == 1 and not config['data'].get('val_files'):
+        raise ValueError(
+            "hpo.kfolds=1 braucht data.val_files: die Validierung wird nach Datum aus "
+            "diesen Stationen geschnitten (_replace_val_with_val_files). Ohne sie gibt "
+            "es keinen Validierungssatz mehr — der frühere hpo.val_split, der dafür "
+            "einen Anteil abschnitt, ist entfallen. Alternative: hpo.cv_mode: spatial "
+            "mit data.val_start.")
+
     # If caching is disabled, process data directly
     if not use_cache:
         logger.info("Caching disabled, processing data directly")
@@ -763,6 +840,7 @@ def create_or_load_preprocessed_data(config: Dict,
     if is_cached and not force_reprocess:
         logger.info(f"Found cached data (ID: {cache_id}), loading from cache")
         prepared_datasets, combined_kfolds, metadata = cache.load_preprocessed_data(cache_id)
+        pruefe_cache_config(metadata, config, cache_id, logger)
 
         # Create lazy loader
         if combined_kfolds is not None:
@@ -827,7 +905,6 @@ def create_or_load_preprocessed_data(config: Dict,
         combined_kfolds = hpo.kfolds_with_per_file_min_train_len(
             prepared_datasets=prepared_datasets,
             n_splits=config['hpo']['kfolds'],
-            val_split=config['hpo']['val_split'],
             min_train_date=min_train_date
         )
 
@@ -998,10 +1075,10 @@ def _build_spatial_fold_data(fold_config: Dict, features: Dict, logger) -> Tuple
             prepared_val.append(prepared_data)
 
     train_splits = [_split_prepared_by_time(p, until=val_start) for p in prepared_train]
-    val_splits = [_split_prepared_by_time(p, since=val_start, until=test_start) for p in prepared_val]
+    val_teile = [_split_prepared_by_time(p, since=val_start, until=test_start) for p in prepared_val]
 
     train_pair = _concat_fold_split(train_splits)
-    val_pair = _concat_fold_split(val_splits)
+    val_pair = _concat_fold_split(val_teile)
     if train_pair is None or val_pair is None:
         raise ValueError(
             "create_or_load_preprocessed_data_spatial: fold produced an empty train or "
@@ -1059,13 +1136,6 @@ def create_or_load_preprocessed_data_spatial(config: Dict,
             "window is fixed by data.val_start/data.test_start instead.",
             config['hpo']['min_train_date'],
         )
-    if config.get('hpo', {}).get('val_split') not in (None, 1):
-        logger.warning(
-            "cv_mode='spatial': hpo.val_split=%s is ignored — there is exactly one "
-            "fixed val window per fold, no chunk selection.",
-            config['hpo'].get('val_split'),
-        )
-
     if not use_cache:
         logger.info("Caching disabled, processing spatial fold directly")
         fold_config = copy.deepcopy(config)
@@ -1078,7 +1148,8 @@ def create_or_load_preprocessed_data_spatial(config: Dict,
 
     if is_cached and not force_reprocess:
         logger.info(f"Spatial fold: found cached data (ID: {cache_id}), loading from cache")
-        _, combined_kfolds, _ = cache.load_preprocessed_data(cache_id)
+        _, combined_kfolds, metadata = cache.load_preprocessed_data(cache_id)
+        pruefe_cache_config(metadata, fold_config, cache_id, logger)
         if combined_kfolds is not None:
             return LazyFoldLoader(combined_kfolds), cache_id
         logger.warning("Spatial fold: no k-folds found in cache, need to reprocess")

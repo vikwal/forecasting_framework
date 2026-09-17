@@ -244,7 +244,6 @@ model:
 hpo:
   trials: 100
   kfolds: 5
-  val_split: 0.2
   studies_path: "studies/"
 
 # ... additional configuration sections

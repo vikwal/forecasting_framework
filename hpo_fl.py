@@ -338,7 +338,6 @@ def main() -> None:
         fold_data = hpo.kfolds_with_per_file_min_train_len(
             prepared_datasets=client_prepared,
             n_splits=n_splits,
-            val_split=config['hpo']['val_split'],
             min_train_date=min_train_date
         )
         client_kfolds[client_id] = fold_data

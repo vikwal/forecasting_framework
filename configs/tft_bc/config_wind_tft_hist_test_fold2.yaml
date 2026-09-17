@@ -124,7 +124,6 @@ hpo:
   trials: 1000
   kfolds: 1            # single train/val split for final test-mode training (not CV)
   min_train_date: '2024-03-31'   # matches DCRNN/MTGNN — anchors val-fold boundaries (utils/data_cache.py::_replace_val_with_val_files)
-  val_split: 0.9        # --test-mode clears val_files; last 10% (chronological) used as early-stopping val
   pruning:
     use_median_pruner: True
     n_startup_trials: 20

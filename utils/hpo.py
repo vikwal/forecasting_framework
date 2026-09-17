@@ -150,7 +150,6 @@ def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
 
 def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
                                       n_splits: int,
-                                      val_split: float = None,
                                       min_train_date: str = None) -> List:
     """
     Erstellt k-folds mit per-file minimum training date.
@@ -158,14 +157,19 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
     Args:
         prepared_datasets: Liste von prepared_data Dictionaries von jeder Datei
         n_splits: Anzahl der Splits
-        val_split: Validation split ratio (nur für n_splits=1)
         min_train_date: End-Datum für minimum training block (z.B. '2024-07-31')
 
     Returns:
         Liste von ((X_train_combined, y_train_combined), (X_val_combined, y_val_combined)) Tupeln
+
+    Bei ``n_splits=1`` bleibt der Trainingsblock vollstaendig und die
+    Validierung ist ``None`` — sie wird nach Datum von aussen gesetzt, siehe
+    ``kfolds``. Der Aufrufer muss dafuer sorgen, dass sie auch wirklich kommt;
+    ``data_cache.create_or_load_preprocessed_data`` bricht ohne ``val_files`` ab.
     """
     if n_splits == 1:
-        # Für n_splits=1, kombiniere einfach alle Daten und verwende val_split
+        # Für n_splits=1 alle Daten kombinieren; getrennt wird nach Datum, nicht
+        # nach Anteil, und das erledigt der Aufrufer ueber val_files.
         X_train_all = None
         y_train_all = None
 
@@ -177,8 +181,7 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
                 X_train_all = tools.concatenate_data(old=X_train_all, new=prepared_data['X_train'])
                 y_train_all = np.concatenate((y_train_all, prepared_data['y_train']))
 
-        X_train, y_train, X_val, y_val = split_val(X=X_train_all, y=y_train_all, val_split=val_split)
-        return [((X_train, y_train), (X_val, y_val))]
+        return [((X_train_all, y_train_all), (None, None))]
 
     # Wende min_train_date pro Datei an
     split_result = apply_min_train_len_per_file(prepared_datasets, min_train_date)
@@ -198,7 +201,7 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
                 X_train_all = tools.concatenate_data(old=X_train_all, new=prepared_data['X_train'])
                 y_train_all = np.concatenate((y_train_all, prepared_data['y_train']))
 
-        return kfolds(X=X_train_all, y=y_train_all, n_splits=n_splits, val_split=val_split)
+        return kfolds(X=X_train_all, y=y_train_all, n_splits=n_splits)
 
     # Kombiniere die minimum blocks effizienter
     X_min_combined = None
@@ -232,7 +235,7 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
     for prepared_data in remaining_datasets:
         if len(prepared_data['y_train']) > 0:  # Nur wenn noch Daten vorhanden sind
             fold_data = kfolds(X=prepared_data['X_train'], y=prepared_data['y_train'],
-                             n_splits=n_splits, val_split=val_split)
+                             n_splits=n_splits)
             remaining_kfolds.append(fold_data)
 
     # Kombiniere minimum block mit jedem fold - optimiert für bessere Performance
@@ -504,32 +507,9 @@ def load_study(studies_path: str,
         study = None
     return study
 
-def split_val(X: Any,
-              y: np.ndarray,
-              val_split):
-    if val_split == 0:
-        return X, y, None, None
-    val_index = int(len(y)*(1-val_split))
-    # case for tft
-    if type(X) == dict:
-        X_train, X_val = {}, {}
-        for key, value in X.items():
-            if len(value) == 0:
-                continue
-            X_train[key] = value[:val_index]
-            X_val[key] = value[val_index:]
-    else:
-        X_train = X[:val_index]
-        X_val = X[val_index:]
-    y_train = y[:val_index]
-    y_val = y[val_index:]
-    return X_train, y_train, X_val, y_val
-
-
 def kfolds(X: Any,
            y: np.ndarray,
-           n_splits: int,
-           val_split: float = None) -> List:
+           n_splits: int) -> List:
     """
     Erstellt k-folds für Zeitserien.
 
@@ -537,15 +517,21 @@ def kfolds(X: Any,
         X: Features (numpy array oder dict für TFT)
         y: Target values
         n_splits: Anzahl der Splits
-        val_split: Validation split ratio (nur für n_splits=1)
 
     Returns:
         Liste von ((X_train, y_train), (X_val, y_val)) Tupeln
+
+    ``n_splits=1`` liefert einen Fold ohne eigene Validierung: Trainings- und
+    Validierungsdaten werden nach DATUM getrennt, nicht nach Anteil. Die
+    Validierung kommt dann von aussen — im temporalen Pfad aus
+    ``data.val_files`` (data_cache._replace_val_with_val_files schneidet sie
+    zeitlich zu), im raeumlichen aus ``data.val_start``. Der frühere Parameter
+    ``val_split`` ist am 17.09.2026 entfallen; er schnitt nur noch Trainingsdaten
+    weg, die anschliessend verworfen wurden.
     """
     kfolds = []
     if n_splits == 1: # if not kfolds
-        X_train, y_train, X_val, y_val = split_val(X=X, y=y, val_split=val_split)
-        kfolds.append(((X_train, y_train), (X_val, y_val)))
+        kfolds.append(((X, y), (None, None)))
         return kfolds
 
     # Standard TimeSeriesSplit ohne minimum training length

@@ -1,6 +1,11 @@
 # TFT im Testjahr (angelegt 2026-09-05): Kopie von config_wind_tft_sp_base.yaml fuer
 # train_cl_tft_bc.py --test-mode (files += val_files = 153, val_files leer, Early Stopping
-# auf den chronologisch letzten 10 % des Trainingsfensters, hpo.kfolds 1, val_split 0.9,
+# auf den chronologisch letzten 10 % des Trainingsfensters ueber hpo.val_split 0.9,
+# das am 17.09.2026 entfallen ist: getrennt wird seitdem nach Datum, und der
+# Zeitschnitt kommt aus data.val_files. Mit --test-mode (val_files geleert) und
+# hpo.kfolds 1 bricht diese Config deshalb jetzt ab; der Lauf von 2026-09-05 ist
+# damit nicht mehr unveraendert wiederholbar — Weg dafuer waere cv_mode: spatial
+# mit data.val_start. Sonst wie config_wind_tft_base_test.yaml, hpo.kfolds 1,
 # wie configs/tft_bc/config_wind_tft_base_test.yaml). cv_mode entfernt (temporal), test_end
 # auf 2026-07-31. Hyperparameter aus der Studie cl_m-tft-bc_out-48_freq-1h_wind_tft_sp_base.
 data:
@@ -96,7 +101,6 @@ hpo:
   trials: 1000
   kfolds: 1
   min_train_date: '2024-03-31'
-  val_split: 0.9
   pruning: {use_median_pruner: true, n_startup_trials: 5, n_warmup_steps: 1, interval_steps: 1, disable_pruning: false}
   batch_size: [64, 256]
   epochs: [1, 100]
