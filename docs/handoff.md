@@ -286,8 +286,38 @@ Trials brachten keine Verbesserung. Die Größenordnungen erklären, warum:
 
 Der Vorsprung der besten Trials entspricht damit etwa **einer Standardabweichung
 der bloßen Wiederholung** — der „beste" Trial ist vom soliden Mittelfeld
-statistisch kaum zu unterscheiden. Das Modell ist an dieser Stelle
-datenlimitiert, nicht hyperparameterlimitiert.
+statistisch kaum zu unterscheiden.
+
+> **Korrektur vom 18.09.2026.** Hier stand zuerst, das Modell sei
+> „datenlimitiert". Das ist nicht haltbar: 62 Stationen × 4 Läufe × 96 Leads ×
+> 730 Tage sind rund 17 Mio Zielwerte für 508 134 Parameter, und die Stationen
+> sind dabei **nicht** redundant. Die Korrelation des NWP-Fehlers zwischen zwei
+> Stationen liegt bei 0.156 unter 50 km, 0.107 bei 100–200 km und im Mittel über
+> alle 210 Paare bei **0.051** — das Netz liefert also fast 62 unabhängige
+> Beobachtungen je Zeitpunkt. Richtig ist **informationslimitiert**: der
+> NWP-Fehler ist aus den verfügbaren Eingangsgrößen überwiegend nicht
+> rekonstruierbar. Der lernbare Anteil ist der bedingte Bias (§5.1.4), und der
+> ist mit wenigen tausend Beispielen ausgeschöpft; der Rest ist irreduzibel —
+> ICON-D2 hat die Wolke am falschen Ort, und keine Nachbearbeitung derselben
+> Felder schiebt sie dorthin.
+
+**Die Suche arbeitet unter der Rauschgrenze — in beiden Studien.** Das ist der
+allgemeinere Befund und gilt über diesen Arm hinaus:
+
+| | mit Historie (98 Trials) | ohne Historie (50 Trials) |
+|---|---|---|
+| Streuung über alle Trials (σ) | 0.181 | 0.266 |
+| Abstand bester ↔ Median | 0.236 | 0.226 |
+| Verbesserung in der zweiten Hälfte | **0.000** | — |
+
+Zum Vergleich: dieselbe Konfiguration zweimal trainiert streut um ±0.13 … 0.21
+(IDW-Test unten). Die Streuung *zwischen* Trials liegt damit in der Größenordnung
+der Streuung *derselben* Konfiguration — was die Suche als besseren
+Hyperparametersatz ausweist, ist zum großen Teil Trainingsrauschen. In der ersten
+Studie stand der beste Wert bei Trial 38; die folgenden 60 Trials brachten exakt
+null Verbesserung. **Für künftige Arme heißt das: 40–50 Trials genügen, und die
+Wahl „bester statt typischer Trial" ist rund 0.23 W/m² wert — weniger als der
+Unterschied, den die Featurewahl macht.**
 
 **Keine Obergrenze des Suchraums bindet.** Geprüft über die zehn besten Trials:
 
@@ -672,17 +702,43 @@ Messzeitpunkt vor dem Lauf und dem Lead beträgt 0.55 (Lead 0), 0.33 (1 h),
 0.12 (3 h) und ist ab 6 h weg. Über alle 96 Leads gewichtet bleiben +0.65 W/m²
 (GHI) und +0.75 (DHI).
 
-**Daraus läuft seit 17.09., 16:46 ein zweiter Arm:** `configs/solar_tft_nohist/`
-mit `observed_features: []`. Da `next_n_stations` 0 ist, sieht das Modell dort
-überhaupt keine Messung mehr, auch keine fremde — eine reine Nachbearbeitung der
-NWP-Prognose. Studie `cl_m-tft-bc_out-96_freq-30min_solar_tft_nohist_hpo`,
-gestartet über `CFG=… scripts/run_solar_hpo.sh`, 17 Worker.
+**Der Arm ohne Historie ist durchgerechnet** (`configs/solar_tft_nohist/`,
+`observed_features: []`; da `next_n_stations` 0 ist, sieht das Modell überhaupt
+keine Messung mehr, auch keine fremde — eine reine Nachbearbeitung der
+NWP-Prognose). Studie `cl_m-tft-bc_out-96_freq-30min_solar_tft_nohist_hpo`,
+50 Trials, bester Wert 52.114 (Trial 184) gegen 51.719 des Arms mit Historie.
+Die Kette lief in der Nacht zum 18.09. unbeaufsichtigt durch
+(`scripts/run_nohist_kette.sh`): 05:01 vier Trainings, 06:12 alle vier
+ausgewertet.
 
-Zwischenstand nach 17 abgeschlossenen Trials: bester Wert 52.298 gegen 51.719 des
-Arms mit Historie (+0.579), Median 52.361 gegen 51.955 (+0.406) — in der
-Größenordnung, die die Ablation vorhersagt. Die eigentliche Aussage kommt aber
-aus der Fold-Auswertung **nach Lead**: bei Lead 0 stehen 0.155 gegen erwartete
-~0.08, im gepoolten Mittel ist der Unterschied klein.
+| | Fold 1 | Fold 2 | Fold 3 | Testjahr |
+|---|---|---|---|---|
+| Skill_NWP mit Historie | 0.098 | 0.109 | 0.107 | **0.119** |
+| Skill_NWP ohne Historie | 0.096 | 0.102 | 0.099 | **0.113** |
+
+**Entscheidend ist der Lead-Verlauf**, gerechnet auf exakt gepaarten Zeilen
+(8 349 545, GHI, nur Tagesschritte):
+
+| Lead | 0.0 h | 0.5 h | 1 h | 1.5–3 h | 3–6 h | 12–24 h | 24–48 h | gesamt |
+|---|---|---|---|---|---|---|---|---|
+| mit Historie | **0.155** | 0.095 | 0.086 | 0.081 | 0.088 | 0.099 | 0.113 | 0.105 |
+| ohne | **0.038** | 0.053 | 0.061 | 0.071 | 0.084 | 0.097 | 0.110 | 0.099 |
+| Differenz | **0.117** | 0.042 | 0.024 | 0.011 | 0.004 | 0.001 | 0.003 | 0.005 |
+
+Bei Lead 0 trennt die Messhistorie die beiden Arme um 0.117 Skill-Punkte (71.4
+gegen 81.3 W/m²), ab drei Stunden ist der Unterschied nicht mehr vorhanden. Für
+Nowcasting ist der Kanal also der wichtigste des Modells, für die Tagesplanung
+bedeutungslos.
+
+**Die Ablation überschätzt den Beitrag** — ein Punkt, der über diesen Fall
+hinausgeht: sie ergab bei Lead 0 +29 % RMSE ohne Historie, der Vergleich zweier
+getrennt trainierter Modelle nur +13.8 %. Ein Modell, das ohne den Kanal
+trainiert wurde, stützt sich stärker auf die übrigen Signale; ein Modell, dem man
+den Kanal zur Laufzeit wegnimmt, verliert mehr. Wer Featurebeiträge beziffert,
+muss die beiden Verfahren auseinanderhalten.
+
+Kennzahlen des Arms ohne Historie (Stationsmittel): Folds GHI 64.32 / R² 0.912,
+DHI 36.99 / R² 0.831; Testjahr GHI 62.29 / R² 0.917, DHI 35.34 / R² 0.838.
 
 ### 5.2 Lead-0-Fehler in weiteren Solar-Pfaden
 
