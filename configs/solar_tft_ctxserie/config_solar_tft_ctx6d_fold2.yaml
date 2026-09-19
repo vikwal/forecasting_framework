@@ -1,18 +1,13 @@
-# Lookback-Serie, Fold 1 — Kontextfenster 5 Tage (240 Schritte)
+# Lookback-Serie, Fold 2 — Kontextfenster 6 Tage (288 Schritte)
 #
-# Einziger Unterschied zu configs/solar_tft/config_solar_tft_fold1.yaml:
-# model.lookback 96 -> 240. Hyperparameter ueber --hpo-study aus Trial 111;
-# lookback steht nicht im Suchraum und wird von dort nicht ueberschrieben.
+# Einziger Unterschied zu configs/solar_tft/config_solar_tft_fold2.yaml:
+# model.lookback 96 -> 288. Hyperparameter ueber --hpo-study aus Trial 111.
 #
-# Die Serie beantwortet, wo das Optimum der Fenstergroesse liegt, ohne dafuer
-# eine HPO mit lookback im Suchraum zu fahren: jeder Wert braucht einen eigenen
-# Cache-Eintrag (lookback geht in _get_config_hash ein), fuenf Werte mal drei
-# Folds waeren rund 675 GB je Host — bei 150 GB Budget liefe enforce_cache_budget
-# im Dauerbetrieb (der Fall vom 16.09., §5.1.1).
-#
-# Dieses Fenster verlangt 3 vorangegangene ICON-Laeufe im 48-h-Abstand
-# (create_tft_sequences). Fehlt einer, faellt das Sample weg — bei 10 Tagen
-# kostete das 11 % der Trainingsmenge.
+# Nur GERADE Tageszahlen: das Kontextfenster wird aus ganzen NWP-Laeufen
+# gestapelt (je 96 Schritte = 48 h). Teilt lookback nicht restfrei, wird
+# known_future laenger als der Horizont und traegt Vergangenheit als Zukunft —
+# create_tft_sequences bricht seit dem 19.09.2026 dagegen ab.
+# Dieses Fenster braucht 3 Vorlaeufe im 48-h-Abstand.
 
 data:
   use_case: solar
@@ -29,91 +24,91 @@ data:
   - ghi
   - dhi
   files:
-  - '00232'
+  - 00282
   - '00342'
-  - '00460'
   - 00591
+  - '00701'
+  - 00853
+  - 00867
+  - 00880
+  - 00963
+  - 01048
+  - '01346'
+  - '01503'
+  - '01550'
+  - 01639
+  - 01691
+  - 01975
+  - '02014'
+  - '02115'
+  - 02483
+  - 02638
+  - '02667'
+  - '02712'
+  - 02932
+  - '03015'
+  - 03098
+  - '03231'
+  - '03366'
+  - 03668
+  - '04104'
+  - '04177'
+  - '04336'
+  - 04393
+  - 04911
+  - '05100'
+  - '05142'
+  - '05404'
+  - '05426'
+  - 05480
+  - '05705'
+  - 05792
+  - 05906
+  - '15444'
+  val_files:
+  - '00232'
+  - '00460'
   - 00596
   - '00662'
   - 00691
   - '00704'
-  - 00853
-  - 00867
-  - 01048
   - '01303'
   - 01468
-  - '01503'
-  - '01550'
   - '01612'
   - 01684
-  - 01691
   - '02171'
   - '02261'
   - 02290
-  - 02483
   - 02559
   - '02601'
-  - 02638
-  - '03015'
-  - 03098
-  - '03231'
   - 03287
-  - '03366'
   - '03660'
-  - '04104'
-  - '04177'
   - '04271'
-  - 04393
   - '04466'
-  - '05100'
-  - '05426'
   - 05856
   - '07374'
-  - '15444'
-  val_files:
-  - 00282
-  - '00701'
-  - 00880
-  - 00963
-  - '01346'
-  - 01639
-  - 01975
-  - '02014'
-  - '02115'
-  - '02667'
-  - '02712'
-  - 02932
-  - 03668
-  - '04336'
-  - 04911
-  - '05142'
-  - '05404'
-  - 05480
-  - '05705'
-  - 05792
-  - 05906
   test_files:
-  - 00282
-  - '00701'
-  - 00880
-  - 00963
-  - '01346'
-  - 01639
-  - 01975
-  - '02014'
-  - '02115'
-  - '02667'
-  - '02712'
-  - 02932
-  - 03668
-  - '04336'
-  - 04911
-  - '05142'
-  - '05404'
-  - 05480
-  - '05705'
-  - 05792
-  - 05906
+  - '00232'
+  - '00460'
+  - 00596
+  - '00662'
+  - 00691
+  - '00704'
+  - '01303'
+  - 01468
+  - '01612'
+  - 01684
+  - '02171'
+  - '02261'
+  - 02290
+  - 02559
+  - '02601'
+  - 03287
+  - '03660'
+  - '04271'
+  - '04466'
+  - 05856
+  - '07374'
   train_start: '2023-08-01'
   test_start: '2025-08-01'
   test_end: '2026-07-31'
@@ -211,7 +206,7 @@ model:
   name: tft
   num_workers: 4
   output_dim: 96
-  lookback: 240
+  lookback: 288
   horizon: 96
   step_size: 96
   batch_size: 32

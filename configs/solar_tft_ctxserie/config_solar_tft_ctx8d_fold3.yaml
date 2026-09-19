@@ -1,9 +1,13 @@
-# Lookback-Serie, Fold 3 — Kontextfenster 15 Tage (720 Schritte)
+# Lookback-Serie, Fold 3 — Kontextfenster 8 Tage (384 Schritte)
 #
-# Replikat zur Fold-1-Serie: einziger Unterschied zu
-# configs/solar_tft/config_solar_tft_fold3.yaml ist model.lookback 96 -> 720.
-# Hyperparameter ueber --hpo-study aus Trial 111. Braucht 8 Vorlaeufe
-# im 48-h-Abstand; fehlende kosten Samples.
+# Einziger Unterschied zu configs/solar_tft/config_solar_tft_fold3.yaml:
+# model.lookback 96 -> 384. Hyperparameter ueber --hpo-study aus Trial 111.
+#
+# Nur GERADE Tageszahlen: das Kontextfenster wird aus ganzen NWP-Laeufen
+# gestapelt (je 96 Schritte = 48 h). Teilt lookback nicht restfrei, wird
+# known_future laenger als der Horizont und traegt Vergangenheit als Zukunft —
+# create_tft_sequences bricht seit dem 19.09.2026 dagegen ab.
+# Dieses Fenster braucht 4 Vorlaeufe im 48-h-Abstand.
 
 data:
   use_case: solar
@@ -201,7 +205,7 @@ model:
   name: tft
   num_workers: 4
   output_dim: 96
-  lookback: 720
+  lookback: 384
   horizon: 96
   step_size: 96
   batch_size: 32

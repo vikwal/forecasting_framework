@@ -4327,6 +4327,22 @@ def create_tft_sequences(known_data: np.ndarray,
 
             # Number of past forecast runs needed to cover history_len.
             # E.g. history_len=96, future_len=48 → 2 past runs needed.
+            # Das Fenster wird aus GANZEN vergangenen Laeufen gestapelt (s.u.:
+            # np.vstack(past_chunks + [aktueller Lauf])). Seine Laenge ist damit
+            # immer ein Vielfaches von future_len — unabhaengig von history_len.
+            # Teilt history_len nicht restfrei, laeuft das Modell auseinander:
+            # models.py schneidet bei self.lookback, known_future wird dann
+            # laenger als der Horizont und traegt Vergangenheit als Zukunft.
+            # Beispiel: history_len 240 (5 Tage) -> 3 Laeufe -> Fenster 384,
+            # known_future 144 statt 96, Zeitzuordnung um 48 Schritte verschoben.
+            if history_len % future_len != 0:
+                raise ValueError(
+                    f"model.lookback ({history_len} Schritte) muss ein Vielfaches von "
+                    f"model.horizon ({future_len}) sein — das Kontextfenster besteht aus "
+                    f"ganzen NWP-Laeufen. Erlaubt waeren z. B. "
+                    f"{future_len * (history_len // future_len)} oder "
+                    f"{future_len * (history_len // future_len + 1)} Schritte."
+                )
             n_past_runs = math.ceil(history_len / future_len)
 
             # Schrittweite aus den Daten ableiten. history_len/future_len zaehlen

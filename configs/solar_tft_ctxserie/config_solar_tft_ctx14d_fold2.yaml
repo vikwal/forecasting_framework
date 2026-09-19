@@ -1,13 +1,13 @@
-# Lookback-Serie, Fold 3 — Kontextfenster 20 Tage (960 Schritte)
+# Lookback-Serie, Fold 2 — Kontextfenster 14 Tage (672 Schritte)
 #
-# Einziger Unterschied zu configs/solar_tft/config_solar_tft_fold3.yaml:
-# model.lookback 96 -> 960. Hyperparameter ueber --hpo-study aus Trial 111.
+# Einziger Unterschied zu configs/solar_tft/config_solar_tft_fold2.yaml:
+# model.lookback 96 -> 672. Hyperparameter ueber --hpo-study aus Trial 111.
 #
 # Nur GERADE Tageszahlen: das Kontextfenster wird aus ganzen NWP-Laeufen
 # gestapelt (je 96 Schritte = 48 h). Teilt lookback nicht restfrei, wird
 # known_future laenger als der Horizont und traegt Vergangenheit als Zukunft —
 # create_tft_sequences bricht seit dem 19.09.2026 dagegen ab.
-# Dieses Fenster braucht 10 Vorlaeufe im 48-h-Abstand.
+# Dieses Fenster braucht 7 Vorlaeufe im 48-h-Abstand.
 
 data:
   use_case: solar
@@ -24,90 +24,91 @@ data:
   - ghi
   - dhi
   files:
-  - '00232'
   - 00282
+  - '00342'
+  - 00591
+  - '00701'
+  - 00853
+  - 00867
+  - 00880
+  - 00963
+  - 01048
+  - '01346'
+  - '01503'
+  - '01550'
+  - 01639
+  - 01691
+  - 01975
+  - '02014'
+  - '02115'
+  - 02483
+  - 02638
+  - '02667'
+  - '02712'
+  - 02932
+  - '03015'
+  - 03098
+  - '03231'
+  - '03366'
+  - 03668
+  - '04104'
+  - '04177'
+  - '04336'
+  - 04393
+  - 04911
+  - '05100'
+  - '05142'
+  - '05404'
+  - '05426'
+  - 05480
+  - '05705'
+  - 05792
+  - 05906
+  - '15444'
+  val_files:
+  - '00232'
   - '00460'
   - 00596
   - '00662'
   - 00691
-  - '00701'
   - '00704'
-  - 00880
-  - 00963
   - '01303'
-  - '01346'
   - 01468
   - '01612'
-  - 01639
   - 01684
-  - 01975
-  - '02014'
-  - '02115'
   - '02171'
   - '02261'
   - 02290
   - 02559
   - '02601'
-  - '02667'
-  - '02712'
-  - 02932
   - 03287
   - '03660'
-  - 03668
   - '04271'
-  - '04336'
   - '04466'
-  - 04911
-  - '05142'
-  - '05404'
-  - 05480
-  - '05705'
-  - 05792
   - 05856
-  - 05906
   - '07374'
-  val_files:
-  - '00342'
-  - 00591
-  - 00853
-  - 00867
-  - 01048
-  - '01503'
-  - '01550'
-  - 01691
-  - 02483
-  - 02638
-  - '03015'
-  - 03098
-  - '03231'
-  - '03366'
-  - '04104'
-  - '04177'
-  - 04393
-  - '05100'
-  - '05426'
-  - '15444'
   test_files:
-  - '00342'
-  - 00591
-  - 00853
-  - 00867
-  - 01048
-  - '01503'
-  - '01550'
-  - 01691
-  - 02483
-  - 02638
-  - '03015'
-  - 03098
-  - '03231'
-  - '03366'
-  - '04104'
-  - '04177'
-  - 04393
-  - '05100'
-  - '05426'
-  - '15444'
+  - '00232'
+  - '00460'
+  - 00596
+  - '00662'
+  - 00691
+  - '00704'
+  - '01303'
+  - 01468
+  - '01612'
+  - 01684
+  - '02171'
+  - '02261'
+  - 02290
+  - 02559
+  - '02601'
+  - 03287
+  - '03660'
+  - '04271'
+  - '04466'
+  - 05856
+  - '07374'
   train_start: '2023-08-01'
   test_start: '2025-08-01'
   test_end: '2026-07-31'
@@ -205,7 +206,7 @@ model:
   name: tft
   num_workers: 4
   output_dim: 96
-  lookback: 960
+  lookback: 672
   horizon: 96
   step_size: 96
   batch_size: 32
