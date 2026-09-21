@@ -740,6 +740,89 @@ muss die beiden Verfahren auseinanderhalten.
 Kennzahlen des Arms ohne Historie (Stationsmittel): Folds GHI 64.32 / R² 0.912,
 DHI 36.99 / R² 0.831; Testjahr GHI 62.29 / R² 0.917, DHI 35.34 / R² 0.838.
 
+### 5.1.5 Kontextfenster: 2 bis 20 Tage — kein Hebel (19.–21.09.2026)
+
+**Frage:** Die Messhistorie trägt nur in den ersten drei Stunden (§5.1.4). Hilft
+es, ihr mehr Kontext zu geben — statt 2 Tagen etwa 10? Ein längeres Fenster
+könnte einen *stationsspezifischen* Bias schätzbar machen (Sensor, Horizont,
+lokale Albedo), der über alle Vorlaufzeiten gleich wirkt.
+
+**Antwort: nein.** Sieben Fenstergrößen, je drei Folds, ausgewertet auf
+3 415 147 gemeinsamen Tagesschritten (GHI):
+
+| Fenster | RMSE | Skill | vs. 2 Tage | Stationen besser | p | p Holm |
+|---|---|---|---|---|---|---|
+| 2 Tage | 94.03 | 0.1037 | — | — | — | — |
+| 4 Tage | 93.98 | 0.1043 | −0.054 | 38/62 | 0.243 | 0.85 |
+| 6 Tage | 93.87 | 0.1053 | −0.160 | 39/62 | 0.040 | 0.20 |
+| 8 Tage | 93.83 | 0.1057 | −0.204 | 40/62 | 0.029 | 0.17 |
+| 10 Tage | 93.97 | 0.1044 | −0.065 | 31/62 | 0.517 | 0.89 |
+| 14 Tage | 94.07 | 0.1034 | +0.038 | 36/62 | 0.443 | 0.89 |
+| 20 Tage | 94.18 | 0.1023 | +0.152 | 25/62 | 0.213 | 0.85 |
+
+Die Kurve ist flach: ein schwaches Minimum bei 6–8 Tagen (0.2 % des RMSE), nach
+Holm-Korrektur über die sechs Vergleiche nicht signifikant. Jenseits von 10 Tagen
+wird es messbar schlechter — bei 20 Tagen sind nur noch 25 von 62 Stationen
+besser als mit 2 Tagen, was zum Datenverlust passt: dieses Fenster verlangt zehn
+lückenlose Vorläufe im 48-h-Raster.
+
+**Die Kontrolle ohne Messhistorie zeigt dasselbe.** Derselbe Sprung von 2 auf 10
+Tage im Arm mit `observed_features: []` (3 651 920 Zeilen): **+0.023 W/m²**,
+34/62 Stationen, p = 0.48. Weder die zusätzliche Messhistorie noch die
+zusätzlichen ICON-Läufe im Fenster tragen etwas bei.
+
+> **Zurückgenommen: der Zwischenbefund vom 19.09.** Auf Fold 1 allein hatte der
+> 10-Tage-Kontext −0.617 W/m² gebracht, gepaart über die Stationen p = 0.003, mit
+> einem Gewinn, der über die Vorlaufzeit *wächst* — daraus war die Deutung
+> „stationsspezifischer Bias" abgeleitet worden. Über alle drei Folds bleiben
+> davon −0.065 W/m² bei 31 von 62 Stationen (p = 0.52). Der Effekt war ein
+> Einzelfold-Artefakt, die Deutung ist hinfällig. Das ist genau der Fall, vor dem
+> die Rauschgrenze-Rechnung in §5.1.1 warnt: ein Lauf je Variante, und der
+> gepaarte Stationstest trennt Stations-, aber kein Seed-Rauschen.
+
+**Zwei Fehler, die das Experiment aufgedeckt hat** — beide im Code, beide behoben:
+
+* **Das Kontextfenster muss ein Vielfaches des Horizonts sein.**
+  `create_tft_sequences` stapelt es aus GANZEN NWP-Läufen, seine Länge ist immer
+  ein Vielfaches von `future_len`. `models.py` schneidet aber bei `self.lookback`.
+  Bei `lookback` 240 (5 Tage) ist das Fenster 384 lang, `known_future` wird 144
+  statt 96 Schritte — das Modell bekommt Vergangenheit als Zukunft, die
+  Zeitzuordnung verschiebt sich um 48 Schritte. Die Serie steht deshalb auf
+  geraden Tageszahlen; die Funktion bricht seit dem 19.09. dagegen ab. Bestehende
+  Configs sind nicht betroffen (Wind 48/48, Solar 96/96).
+* **`tools.get_y` rechnete alles in einem Vorwärtslauf.** Die Attention skaliert
+  quadratisch mit der Sequenzlänge; bei 20 Tagen (1056 Schritte) und rund 1400
+  Testfenstern sprengt das jede GPU — vier Auswertungen starben am 20.09. an
+  CUDA-OOM, während dasselbe Modell im Training mit `batch_size` 59 lief. Jetzt
+  blockweise, nachgerechnet identisch zum bisherigen Ergebnis.
+
+Configs: `configs/solar_tft_ctxserie/` (7 Größen × 3 Folds),
+`configs/solar_tft_nohist_ctx10d/` (Kontrolle). Rohvorhersagen unter
+`data/raw_preds/tft_solar_tft_ctx*d_fold*_raw.parquet`.
+
+### 5.1.6 Was die Woche insgesamt zeigt
+
+Drei unabhängige Stellschrauben, alle mit demselben Ergebnis:
+
+| Stellschraube | Effekt | belastbar? |
+|---|---|---|
+| Hyperparameter (2 Studien, 148 Trials) | bester ↔ Median 0.23 W/m² | nein — unter der Rauschgrenze (§5.1.1) |
+| Eigene Messhistorie | +29 % RMSE bei Lead 0, ab 4 h nichts | ja, aber nur für Nowcasting (§5.1.4) |
+| Kontextfenster (7 Größen) | ≤ 0.2 % | nein — p = 0.17 nach Holm (§5.1.5) |
+
+Der Solar-TFT ist damit an der Grenze dessen, was sich aus ICON-D2-Feldern plus
+Stationshistorie herausholen lässt. Was er kann, ist die **bedingte
+Bias-Korrektur**: Skill 0.236, wenn ICON-D2 Bedeckung prognostiziert und dabei im
+Mittel 48 W/m² zu tief liegt. Was er nicht kann, ist eine Wolke finden, die
+ICON-D2 am falschen Ort hat — dort ist der Skill 0.006.
+
+**Für die weitere Arbeit heißt das:** zusätzliche Information schlägt zusätzliche
+Modellarbeit. Satellitenbilder, ein zweites NWP-Modell mit anderer
+Wolkenphysik, Messungen der Nachbarstationen (`next_n_stations` ist bei Solar
+bewusst 0) — das sind die Richtungen, in denen noch etwas liegen kann. Weitere
+HPO-Runden, größere Modelle oder längere Fenster sind vermessen und bringen
+nichts.
+
 ### 5.2 Lead-0-Fehler in weiteren Solar-Pfaden
 
 Dieselbe Zeile, dieselbe Reparatur (`lead0_offset(use_case)` aus

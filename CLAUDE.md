@@ -40,9 +40,10 @@ blockiert und braucht zuerst die Solar-Imputation.
 ## Wo nachschlagen (`docs/`, bei Bedarf lesen)
 
 **Stand & Übergaben** — [handoff.md](docs/handoff.md) (**AKTUELL, 17.09.2026**:
-Solar-TFT-HPO abgeschlossen §5.1.1, **Fold-Retrain §5.1.2 und Schlussmessung
-§5.1.3 erledigt** (Testjahr: GHI 61.53 / Skill 0.119), Beitrag der Messhistorie
-gemessen und zweiter Arm ohne sie in §5.1.4; dort auch `hpo.val_split` entfallen,
+Solar-TFT-Kampagne abgeschlossen: HPO §5.1.1, Fold-Retrain §5.1.2,
+Schlussmessung §5.1.3 (Testjahr GHI 61.53 / Skill 0.119), Messhistorie §5.1.4,
+Kontextfenster §5.1.5, **Gesamtbefund in §5.1.6** — Hyperparameter, Messhistorie
+jenseits 4 h und Fenstergroesse sind keine Hebel mehr; dort auch `hpo.val_split` entfallen,
 Cache-Guard und die Multi-Target-Reparatur der Auswertung; dazu die
 Imputationskette und die offenen Stolperfallen),
 [handoff_testmode.md](docs/handoff_testmode.md),
