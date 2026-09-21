@@ -88,7 +88,8 @@ def get_y(X_test: Any,
           model: nn.Module,
           scaler_y: StandardScaler = None,
           device: str = 'cpu',
-          clip_negative: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+          clip_negative: bool = True,
+          batch_size: int = 256) -> Tuple[np.ndarray, np.ndarray]:
     """Get predictions from PyTorch model.
 
     clip_negative : bool
@@ -100,24 +101,31 @@ def get_y(X_test: Any,
     """
     model.eval()
 
+    # In Bloecken rechnen statt in einem einzigen Vorwaertslauf. Die Attention
+    # skaliert quadratisch mit der Sequenzlaenge: bei model.lookback 960 (20 Tage)
+    # ist die Sequenz 1056 Schritte lang, und eine Matrix
+    # (n_heads, batch, 1056, 1056) sprengt jede GPU, sobald batch die Zahl der
+    # Testfenster annimmt (rund 1400). Genau daran sind am 20.09.2026 vier
+    # Auswertungen mit CUDA-OOM gestorben. Die Blockgroesse ist bewusst
+    # konservativ und kostet bei kurzen Fenstern nichts Messbares.
+    bloecke = []
     with torch.no_grad():
         if isinstance(X_test, dict):
             # TFT case
-            X_test_tensors = {
-                'observed': torch.FloatTensor(X_test['observed']).to(device),
-                'known': torch.FloatTensor(X_test['known']).to(device),
-            }
-            if 'static' in X_test:
-                X_test_tensors['static'] = torch.FloatTensor(X_test['static']).to(device)
-                y_pred = model(X_test_tensors['observed'], X_test_tensors['known'], X_test_tensors['static'])
-            else:
-                y_pred = model(X_test_tensors['observed'], X_test_tensors['known'], None)
+            n = len(X_test['known'])
+            for i in range(0, n, batch_size):
+                observed = torch.FloatTensor(X_test['observed'][i:i + batch_size]).to(device)
+                known = torch.FloatTensor(X_test['known'][i:i + batch_size]).to(device)
+                static = (torch.FloatTensor(X_test['static'][i:i + batch_size]).to(device)
+                          if 'static' in X_test else None)
+                bloecke.append(model(observed, known, static).cpu())
         else:
             # Standard case
-            X_test_tensor = torch.FloatTensor(X_test).to(device)
-            y_pred = model(X_test_tensor)
+            n = len(X_test)
+            for i in range(0, n, batch_size):
+                bloecke.append(model(torch.FloatTensor(X_test[i:i + batch_size]).to(device)).cpu())
 
-        y_pred = y_pred.cpu().numpy()
+        y_pred = torch.cat(bloecke, dim=0).numpy() if bloecke else np.empty((0,))
 
     # Reshape if needed. Bei Multi-Target ist y_test (n, horizon, n_targets); dann
     # muss die Vorhersage genau diese Form annehmen, nicht auf 2D plattgedrückt werden.
