@@ -221,6 +221,44 @@ def _mos_static_cols(ctx, cols: list[str]) -> list[str]:
     return [c for c in static if c in cols]
 
 
+def _mos_hist_block(ctx, station_pos, pairs, mode: str):
+    """Messhistorie der Zielstation als Praediktorspalten.
+
+    Gelesen werden die H Stunden, die auf ``t_run_abs - 1`` enden, also genau
+    das Fenster $\\mathbf{y}_{s,t-H+1:t}$, das die grid+hist-Konfiguration der
+    Modelle bei der Inferenz bekommt. Die Werte sind je Lauf konstant und
+    werden ueber die Vorlaufstunden gebroadcastet.
+    """
+    meas = ctx["meas_raw"]                       # (T, N, C)
+    cols = list(ctx["measurement_cols"])
+    C = len(cols)
+    H, F_h = int(ctx["H"]), int(ctx["F_h"])
+    S, P = len(station_pos), len(pairs)
+    t_run = np.array([p[2] for p in pairs], dtype=np.int64)
+    if t_run.min() - H < 0:
+        raise SystemExit(f"FATAL: Messhistorie ragt vor den Datenanfang (t_run_min={t_run.min()}, H={H})")
+    idx = t_run[:, None] - np.arange(H, 0, -1)[None, :]          # (P, H), aelteste zuerst
+    block = meas[idx.reshape(-1)][:, station_pos, :].reshape(P, H, S, C)
+
+    if mode == "window":
+        feat = block.transpose(2, 0, 1, 3).reshape(S, P, H * C)
+        names = [f"hist_t{-(H - j)}_{cols[c]}" for j in range(H) for c in range(C)]
+    elif mode == "compact":
+        parts = [block[:, -1, :, :], block[:, -6:, :, :].mean(axis=1),
+                 block[:, -24:, :, :].mean(axis=1), block.mean(axis=1)]
+        feat = np.stack(parts, axis=-1).transpose(1, 0, 2, 3).reshape(S, P, C * 4)
+        names = [f"hist_{a}_{cols[c]}" for c in range(C) for a in ("last", "m6", "m24", f"m{H}")]
+    else:
+        raise ValueError(mode)
+
+    n_nan = int(np.isnan(feat).sum())
+    if n_nan:
+        raise SystemExit(f"FATAL: {n_nan} NaN in der Messhistorie — die Imputation haette sie fuellen muessen")
+    out = np.broadcast_to(feat[:, :, None, :], (S, P, F_h, feat.shape[-1]))
+    logger.info("Messhistorie '%s': %d Spalten, H=%d, Kanaele=%s", mode, len(names), H, cols)
+    return out.reshape(-1, feat.shape[-1]).astype(np.float64), names
+
+
 def _mos_rich_rows(ctx, args, station_pos, pairs, per_station: bool):
     """Dieselben Zeilen wie ``build_mos_rows``, aber mit den Spalten der
     QRF-Designmatrix. Beide Builder erzeugen station-major/pair/lead, die
@@ -237,6 +275,13 @@ def _mos_rich_rows(ctx, args, station_pos, pairs, per_station: bool):
     idx = {c: i for i, c in enumerate(cols)}
     for c in feat:
         rows[c] = X[:, idx[c]].astype(np.float64)
+    if getattr(args, "mos_hist", "none") != "none":
+        Xh, hnames = _mos_hist_block(ctx, station_pos, pairs, args.mos_hist)
+        if len(Xh) != len(rows):
+            raise SystemExit(f"FATAL: Historienblock {len(Xh)} Zeilen gegen {len(rows)} Modellzeilen")
+        for j, c in enumerate(hnames):
+            rows[c] = Xh[:, j]
+        feat = feat + hnames
     return rows, feat
 
 
@@ -260,9 +305,11 @@ def run_mos(ctx, args, fit_pairs, eval_pairs, train_pos, val_pos, arm: str):
 
     if arm == "mos_regional":
         rows_train = _mos_rows(train_pos, fit_pairs)
-        betas = mos_mod.fit_regional(rows_train, nwp_sources, feature_cols)
+        betas = mos_mod.fit_regional(rows_train, nwp_sources, feature_cols,
+                                     strat=getattr(args, "mos_strat", "runhour_lead"))
         rows_eval = _mos_rows(val_pos, eval_pairs)
-        preds = mos_mod.predict_with_regional(rows_eval, betas, nwp_sources, feature_cols)
+        preds = mos_mod.predict_with_regional(rows_eval, betas, nwp_sources, feature_cols,
+                                              strat=getattr(args, "mos_strat", "runhour_lead"))
 
     elif arm == "mos_nearest":
         rows_train = _mos_rows(train_pos, fit_pairs)
@@ -296,6 +343,8 @@ def run_mos(ctx, args, fit_pairs, eval_pairs, train_pos, val_pos, arm: str):
         raise ValueError(arm)
 
     suffix_full = "_full" if args.mos_features == "full" else ""
+    suffix_full += {"none": "", "window": "_hist", "compact": "_histc"}[getattr(args, "mos_hist", "none")]
+    suffix_full += "_leadonly" if getattr(args, "mos_strat", "runhour_lead") == "lead" else ""
     stem = f"{args.out_prefix}{arm}{suffix_2nwp}{suffix_full}{_stem_suffix(args)}_fold{args.fold_idx}"
     meta = rows_eval.rename(columns={"y": "gt"})[
         ["station_id", "run_time", "valid_time", "horizon", "gt", "nwp_ref", "pers_ref"]
@@ -329,6 +378,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="ICON-D2-Gitterpunkte je Station fuer --mos-features full (Tabelle 8: 4)")
     p.add_argument("--mos-k-e2", type=int, default=4,
                    help="HRES-Gitterpunkte je Station fuer --mos-features full (Tabelle 8: 4)")
+    p.add_argument("--mos-strat", choices=["runhour_lead", "lead"], default="runhour_lead",
+                   help="Stratifizierung der MOS-Gleichungen. 'runhour_lead': je Laufstunde "
+                        "und Vorlaufzeit, 192 Zellen (Standard). 'lead': nur je Vorlaufzeit, "
+                        "48 Zellen mit vierfacher Zeilenzahl — entfernt die implizite "
+                        "Konditionierung auf die Tageszeit. Stem-Zusatz _leadonly.")
+    p.add_argument("--mos-hist", choices=["none", "window", "compact"], default="none",
+                   help="Messhistorie der ZIELstation als Praediktoren, nur mit "
+                        "--mos-features full. 'window': alle H Stunden vor der "
+                        "Initialisierung, je Kanal (H x C Spalten). 'compact': je Kanal "
+                        "der letzte Wert plus Mittel ueber 6, 24 und H Stunden (4 x C "
+                        "Spalten), nach dem Vorbild der persistence predictors in "
+                        "primo2024comparison. Stem-Zusatz _hist bzw. _histc.")
     p.add_argument("--n-fit-rows", type=int, default=0)
     p.add_argument("--subsample-seed", type=int, default=ds.SUBSAMPLE_SEED_DEFAULT)
     p.add_argument("--n-jobs", type=int, default=32)

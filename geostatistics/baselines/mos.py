@@ -148,14 +148,18 @@ def _clip_nonneg(preds: np.ndarray, where: str) -> np.ndarray:
 
 
 def fit_regional(rows_train: pd.DataFrame, nwp_sources: str,
-                 feature_cols: list[str] | None = None) -> dict[tuple[int, int], np.ndarray]:
+                 feature_cols: list[str] | None = None,
+                 strat: str = "runhour_lead") -> dict[tuple[int, int], np.ndarray]:
     """One coefficient set per (run_hour, lead), pooled over ALL rows (all
     fold-train stations). Erwartete Zeilenzahl je Zelle: ~102 x 368
     (Spezifikation-Ersatz 2026-08-10)."""
     _log_run_hours("MOS-regional fit", rows_train)
     betas: dict[tuple[int, int], np.ndarray] = {}
     n_deficient = 0
-    tmp = rows_train.assign(_run_hour=_run_hour(rows_train))
+    # strat="lead": ueber die Laufstunden gepoolt, damit die implizite
+    # Konditionierung auf die Tageszeit entfaellt (Test vom 2026-09-23).
+    tmp = rows_train.assign(
+        _run_hour=_run_hour(rows_train) if strat == "runhour_lead" else -1)
     row_counts = []
     for (r, h), grp in tmp.groupby(["_run_hour", "horizon"]):
         beta, deficient = fit_lead(grp, nwp_sources, feature_cols)
@@ -201,10 +205,12 @@ def fit_per_station(rows_train: pd.DataFrame, nwp_sources: str,
 
 def predict_with_regional(rows_eval: pd.DataFrame, betas: dict[tuple[int, int], np.ndarray],
                            nwp_sources: str,
-                           feature_cols: list[str] | None = None) -> np.ndarray:
+                           feature_cols: list[str] | None = None,
+                           strat: str = "runhour_lead") -> np.ndarray:
     """Same coefficients for every station — group by (run_hour, lead) only."""
     preds = np.full(len(rows_eval), np.nan, dtype=np.float64)
-    tmp = rows_eval.assign(_run_hour=_run_hour(rows_eval))
+    tmp = rows_eval.assign(
+        _run_hour=_run_hour(rows_eval) if strat == "runhour_lead" else -1)
     for (r, h), grp in tmp.groupby(["_run_hour", "horizon"]):
         beta = betas.get((int(r), int(h)))
         preds[grp.index.to_numpy()] = predict_lead(grp, beta, nwp_sources, feature_cols)
