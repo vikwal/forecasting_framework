@@ -246,8 +246,14 @@ class MTGNNModel(nn.Module):
         topk_graph: int | None = None,
         topo_dim: int = 0,
         broadcast_topo: bool = False,
+        nwp_aggregation: str = "attention",   # "attention" | "idw" | "idw_alt" (2026-09-23)
+        idw_p: float = 2.0,
+        alpha_alt: float = 10.0,
+        nwp_max_dist_km: float = 0.0,
+        ecmwf_max_dist_km: float = 0.0,
     ) -> None:
         super().__init__()
+        self.nwp_aggregation = nwp_aggregation
         self.H            = history_length
         self.Fh           = forecast_horizon
         self.alpha        = graph_alpha
@@ -269,6 +275,10 @@ class MTGNNModel(nn.Module):
                 nwp_out_dim=nwp_out_dim,
                 heads=nwp_heads,
                 edge_dim=NWP_EDGE_DIM,
+                aggregation=nwp_aggregation,
+                idw_p=idw_p,
+                alpha_alt=alpha_alt,
+                max_dist_km=nwp_max_dist_km,
             )
             self.nwp_i2_channels = k_nwp * nwp_feat_dim  # slice boundary in x
             # ECMWF als zweiter Knotentyp, eigene Attention und eigene Kanten —
@@ -279,6 +289,10 @@ class MTGNNModel(nn.Module):
                     nwp_out_dim=ecmwf_out_dim,
                     heads=nwp_heads,
                     edge_dim=NWP_EDGE_DIM,
+                    aggregation=nwp_aggregation,
+                    idw_p=idw_p,
+                    alpha_alt=alpha_alt,
+                    max_dist_km=ecmwf_max_dist_km,
                 )
         # in_channels is always proj_in; the training script must compute it as
         # M + nwp_out_dim + ecmwf_channels when nwp_nodes=True.

@@ -56,9 +56,12 @@ VAL = {
     "wavenet_base":  [f"retrain_wavenet_fold{i}" for i in (1, 2, 3)],
     "tft":           [f"retrain_tft_sp_base_fold{i}" for i in (1, 2, 3)],
     "tft_hist":      [f"retrain_tft_sp_hist_fold{i}" for i in (1, 2, 3)],
-    "mos_reg":       [f"mos_regional_2nwp_fold{i}" for i in (0, 1, 2)],
-    "mos_near":      [f"mos_nearest_2nwp_fold{i}" for i in (0, 1, 2)],
-    "mos_loc":       [f"mos_local_2nwp_fold{i}" for i in (0, 1, 2)],
+    "mos_reg":       [f"mos_regional_2nwp_full_fold{i}" for i in (0, 1, 2)],
+    "mos_near":      [f"mos_nearest_2nwp_full_fold{i}" for i in (0, 1, 2)],
+    "mos_loc":       [f"mos_local_2nwp_full_fold{i}" for i in (0, 1, 2)],
+    # --- added 2026-09-23: regional MOS given the target's trailing 48 h (window: 144 columns, compact: 12 summaries)
+    "mos_reg_hist":  [f"mos_regional_2nwp_full_hist_fold{i}" for i in (0, 1, 2)],
+    "mos_reg_histc": [f"mos_regional_2nwp_full_histc_fold{i}" for i in (0, 1, 2)],
     # --- added 2026-09-05: seed replicates of A and D' (new imputation chain, see seedrep_worker.sh on ws)
     "dcrnn_rep2":     [f"rep2_dcrnn_fold{i}" for i in (1, 2, 3)],
     "dcrnn_rep3":     [f"rep3_dcrnn_fold{i}" for i in (1, 2, 3)],
@@ -80,9 +83,11 @@ TEST = {
     "dcrnn_hist_once": ["testmode_dcrnn_nwp_hist_once"],
     "mtgnn_hist_once": ["testmode_mtgnn_nwp_hist_once"],
     # MOS in --test-mode on the test year (configs/baselines/config_wind_mos_testyear_fold1.yaml)
-    "mos_reg":  ["testyear_mos_regional_2nwp_test_fold0"],
-    "mos_near": ["testyear_mos_nearest_2nwp_test_fold0"],
-    "mos_loc":  ["testyear_mos_local_2nwp_test_fold0"],
+    "mos_reg":  ["testyear_mos_regional_2nwp_full_test_fold0"],
+    "mos_near": ["testyear_mos_nearest_2nwp_full_test_fold0"],
+    "mos_loc":  ["testyear_mos_local_2nwp_full_test_fold0"],
+    "mos_reg_hist":  ["testyear_mos_regional_2nwp_full_hist_test_fold0"],
+    "mos_reg_histc": ["testyear_mos_regional_2nwp_full_histc_test_fold0"],
     # TFT sp_base / sp_hist in --test-mode on the test year
     "tft":      ["testmode_tft_base"],
     "tft_hist": ["testmode_tft_hist"],

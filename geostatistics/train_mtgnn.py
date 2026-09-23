@@ -746,6 +746,13 @@ def main() -> None:
         nwp_heads        = nwp_heads,
         M                = M_meas_only,
         topk_graph       = mcfg.get("topk_graph", None),
+        # 2026-09-23: prescribed grid weighting for the + site obs. arms (D + obs.).
+        # Defaults reproduce every earlier run bit for bit (attention).
+        nwp_aggregation  = mcfg.get("nwp_aggregation", "attention"),
+        idw_p            = float(mcfg.get("idw_p", 2.0)),
+        alpha_alt        = float(mcfg.get("alpha_alt", 10.0)),
+        nwp_max_dist_km  = float(getattr(sampler, "nwp_max_dist_km", 0.0)),
+        ecmwf_max_dist_km= float(getattr(sampler, "ecmwf_max_dist_km", 0.0)),
     ).to(device)
     logger.info("MTGNN parameters: %s", f"{model.count_parameters():,}")
     logger.info("Hyperparameters:\n%s", yaml.dump(mcfg, default_flow_style=False))

@@ -159,14 +159,19 @@ class HomoSampler:
         self._nwp_knn_idx, self._nwp_knn_w, self._nwp_edge_attr = self._init_grid_knn(
             lats, lons, alts, icond2_coords, icond2_alts, k_nwp,
         )
+        # physical-km normaliser of edge_attr[:, 0] (dist_norm = dist_km / max);
+        # needed by HomoNWPAttentionLayer(aggregation="idw_alt") to recover km.
+        self.nwp_max_dist_km = float(self._last_max_dist_km)
         if grid_ecmwf_scaled is not None and k_ecmwf > 0 and ecmwf_coords is not None:
             self._ecmwf_knn_idx, self._ecmwf_knn_w, self._ecmwf_edge_attr = self._init_grid_knn(
                 lats, lons, alts, ecmwf_coords, ecmwf_alts, k_ecmwf,
             )
+            self.ecmwf_max_dist_km = float(self._last_max_dist_km)
         else:
             self._ecmwf_knn_idx  = np.empty((len(lats), 0), dtype=np.int32)
             self._ecmwf_knn_w    = np.empty((len(lats), 0), dtype=np.float32)
             self._ecmwf_edge_attr = np.empty((len(lats), 0, 4), dtype=np.float32)
+            self.ecmwf_max_dist_km = 0.0
         self._topo_feats = topo_feats or {}
         self._init_static(lats, lons, alts)
 
@@ -230,6 +235,7 @@ class HomoSampler:
         dist_km = geodesic_km(s_lat, s_lon, g_lat, g_lon)
         az_rad  = np.deg2rad(bearing_deg(s_lat, s_lon, g_lat, g_lon))
         dist_norm = dist_km / max(float(dist_km.max()), 1e-8)
+        self._last_max_dist_km = max(float(dist_km.max()), 1e-8)   # read back by __init__ (idw_alt)
 
         if grid_alts is None:
             alt_diff = np.zeros_like(dist_norm)
