@@ -206,21 +206,67 @@ def run_qrf_local(ctx, args, fit_pairs, eval_pairs, train_pos, val_pos, arm_labe
     return assemble_and_save(preds, meta, val_ids, len(val_pos), len(eval_pairs), ctx["F_h"], stem)
 
 
+# Innerhalb einer (Laufstunde, Lead)-Zelle konstant und damit kollinear zum
+# Achsenabschnitt -- die Stratifizierung ersetzt sie bereits.
+MOS_DROP_ALWAYS = ("horizon", "valid_hour_sin", "valid_hour_cos")
+
+
+def _mos_static_cols(ctx, cols: list[str]) -> list[str]:
+    """Spalten, die je Station konstant sind. In einem Fit je Station sind sie
+    kollinear zum Achsenabschnitt, dort muessen sie heraus; bei MOS-regional
+    variieren sie ueber die gepoolten Stationen und bleiben drin."""
+    static = list(ds.TOPO_FEATURE_ORDER) + ["lat", "lon", "alt"]
+    static += [c for c in cols
+               if c.startswith(("d_i2_", "dz_i2_", "d_e2_", "dz_e2_"))]
+    return [c for c in static if c in cols]
+
+
+def _mos_rich_rows(ctx, args, station_pos, pairs, per_station: bool):
+    """Dieselben Zeilen wie ``build_mos_rows``, aber mit den Spalten der
+    QRF-Designmatrix. Beide Builder erzeugen station-major/pair/lead, die
+    Zeilenordnung stimmt also ueberein."""
+    X, _y, cols, meta = ds.build_feature_matrix(
+        ctx, station_pos, pairs,
+        k_i2=args.mos_k_i2, k_e2=args.mos_k_e2, need_meta=True,
+        nwp_geometry=args.nwp_geometry, i2_hist=args.i2_hist)
+    drop = set(MOS_DROP_ALWAYS)
+    if per_station:
+        drop |= set(_mos_static_cols(ctx, cols))
+    feat = [c for c in cols if c not in drop]
+    rows = meta.rename(columns={"gt": "y"}).reset_index(drop=True)
+    idx = {c: i for i, c in enumerate(cols)}
+    for c in feat:
+        rows[c] = X[:, idx[c]].astype(np.float64)
+    return rows, feat
+
+
 def run_mos(ctx, args, fit_pairs, eval_pairs, train_pos, val_pos, arm: str):
     nwp_sources = args.nwp_sources
     val_ids = [ctx["all_ids"][i] for i in val_pos]
     train_ids = [ctx["all_ids"][i] for i in train_pos]
     suffix_2nwp = "_2nwp" if nwp_sources == "both" else ""
+    per_station = arm in ("mos_nearest", "mos_local")
+    feature_cols = None
+
+    if args.mos_features == "full":
+        def _mos_rows(pos, pairs):
+            nonlocal feature_cols
+            rows, feat = _mos_rich_rows(ctx, args, pos, pairs, per_station)
+            feature_cols = feat
+            return rows
+    else:
+        def _mos_rows(pos, pairs):
+            return ds.build_mos_rows(ctx, pos, pairs, nwp_sources)
 
     if arm == "mos_regional":
-        rows_train = ds.build_mos_rows(ctx, train_pos, fit_pairs, nwp_sources)
-        betas = mos_mod.fit_regional(rows_train, nwp_sources)
-        rows_eval = ds.build_mos_rows(ctx, val_pos, eval_pairs, nwp_sources)
-        preds = mos_mod.predict_with_regional(rows_eval, betas, nwp_sources)
+        rows_train = _mos_rows(train_pos, fit_pairs)
+        betas = mos_mod.fit_regional(rows_train, nwp_sources, feature_cols)
+        rows_eval = _mos_rows(val_pos, eval_pairs)
+        preds = mos_mod.predict_with_regional(rows_eval, betas, nwp_sources, feature_cols)
 
     elif arm == "mos_nearest":
-        rows_train = ds.build_mos_rows(ctx, train_pos, fit_pairs, nwp_sources)
-        per_station_betas = mos_mod.fit_per_station(rows_train, nwp_sources)
+        rows_train = _mos_rows(train_pos, fit_pairs)
+        per_station_betas = mos_mod.fit_per_station(rows_train, nwp_sources, feature_cols)
         # Jede Zielstation uebernimmt die Koeffizienten der geodaetisch naechsten
         # Trainingsstation (Spezifikation 3.5) — ueber pairwise_geodesic_km,
         # NICHT euklidisch in Grad (B2).
@@ -234,22 +280,23 @@ def run_mos(ctx, args, fit_pairs, eval_pairs, train_pos, val_pos, arm: str):
             nearest_map[sid] = (nb_sid, dist_km)
         logger.info("MOS-nearest station->nearest-train map: %s",
                     {k: (v[0], round(v[1], 2)) for k, v in list(nearest_map.items())[:5]})
-        rows_eval = ds.build_mos_rows(ctx, val_pos, eval_pairs, nwp_sources)
-        preds = mos_mod.predict_with_per_station(rows_eval, target_betas, nwp_sources)
+        rows_eval = _mos_rows(val_pos, eval_pairs)
+        preds = mos_mod.predict_with_per_station(rows_eval, target_betas, nwp_sources, feature_cols)
 
     elif arm == "mos_local":
         # Transduktive Obergrenze (F5/Spezifikation 3.5): Fit UND Auswertung an
         # derselben Zielstation. Fit-Zeilen kommen aus dem TRAININGSFENSTER
         # (fit_pairs) DIESER Station, nicht aus train_pos.
-        rows_train = ds.build_mos_rows(ctx, val_pos, fit_pairs, nwp_sources)
-        per_station_betas = mos_mod.fit_per_station(rows_train, nwp_sources)
-        rows_eval = ds.build_mos_rows(ctx, val_pos, eval_pairs, nwp_sources)
-        preds = mos_mod.predict_with_per_station(rows_eval, per_station_betas, nwp_sources)
+        rows_train = _mos_rows(val_pos, fit_pairs)
+        per_station_betas = mos_mod.fit_per_station(rows_train, nwp_sources, feature_cols)
+        rows_eval = _mos_rows(val_pos, eval_pairs)
+        preds = mos_mod.predict_with_per_station(rows_eval, per_station_betas, nwp_sources, feature_cols)
 
     else:
         raise ValueError(arm)
 
-    stem = f"{args.out_prefix}{arm}{suffix_2nwp}{_stem_suffix(args)}_fold{args.fold_idx}"
+    suffix_full = "_full" if args.mos_features == "full" else ""
+    stem = f"{args.out_prefix}{arm}{suffix_2nwp}{suffix_full}{_stem_suffix(args)}_fold{args.fold_idx}"
     meta = rows_eval.rename(columns={"y": "gt"})[
         ["station_id", "run_time", "valid_time", "horizon", "gt", "nwp_ref", "pers_ref"]
     ]
@@ -272,6 +319,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--test-mode", action="store_true")
     p.add_argument("--hpo-study", choices=["auto", "none"], default="none")
     p.add_argument("--nwp-sources", choices=["icond2", "both"], default="both")
+    p.add_argument("--mos-features", choices=["ws", "full"], default="ws",
+                   help="'ws': veroeffentlichte Gleichung, Achsenabschnitt + ws_i2 [+ ws_e2]. "
+                        "'full': gleiches Feature-Budget wie die Graph- und TFT-Arme, also die "
+                        "QRF-Designmatrix (k_i2 x ICON- plus k_e2 x HRES-Gitterpunkte mit allen "
+                        "Kanaelen, dazu Gelaende und Position). Ergebnisse gehen unter dem "
+                        "Stem-Zusatz '_full' heraus und ueberschreiben nichts.")
+    p.add_argument("--mos-k-i2", type=int, default=4,
+                   help="ICON-D2-Gitterpunkte je Station fuer --mos-features full (Tabelle 8: 4)")
+    p.add_argument("--mos-k-e2", type=int, default=4,
+                   help="HRES-Gitterpunkte je Station fuer --mos-features full (Tabelle 8: 4)")
     p.add_argument("--n-fit-rows", type=int, default=0)
     p.add_argument("--subsample-seed", type=int, default=ds.SUBSAMPLE_SEED_DEFAULT)
     p.add_argument("--n-jobs", type=int, default=32)

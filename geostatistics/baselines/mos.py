@@ -70,14 +70,31 @@ logger = logging.getLogger("baselines.mos")
 EXPECTED_RUN_HOURS = (6, 9, 12, 15)
 
 
-def _design(df: pd.DataFrame, nwp_sources: str) -> np.ndarray:
+def _design(df: pd.DataFrame, nwp_sources: str,
+            feature_cols: list[str] | None = None) -> np.ndarray:
+    """Design matrix for one fit cell.
+
+    ``feature_cols is None`` reproduces the published two/three-parameter
+    equation bit for bit (Achsenabschnitt + ws_i2 [+ ws_e2]). Wird eine
+    Spaltenliste uebergeben, treten genau diese Spalten an die Stelle der
+    beiden Windgeschwindigkeiten -- das ist der Gleiches-Feature-Budget-Arm
+    (Nutzerentscheidung 2026-09-23, siehe docs/mos_feature_budget.md).
+    Skalierung ist fuer reines OLS ohne Strafterm gegenstandslos, die
+    Vorhersagen sind invariant unter affiner Spaltentransformation.
+    """
+    if feature_cols is not None:
+        cols = [np.ones(len(df))]
+        cols += [df[c].to_numpy(dtype=np.float64) for c in feature_cols]
+        return np.stack(cols, axis=1)
     cols = [np.ones(len(df)), df["ws_i2"].to_numpy(dtype=np.float64)]
     if nwp_sources == "both":
         cols.append(df["ws_e2"].to_numpy(dtype=np.float64))
     return np.stack(cols, axis=1)
 
 
-def n_params(nwp_sources: str) -> int:
+def n_params(nwp_sources: str, feature_cols: list[str] | None = None) -> int:
+    if feature_cols is not None:
+        return 1 + len(feature_cols)
     return 3 if nwp_sources == "both" else 2
 
 
@@ -94,13 +111,14 @@ def _log_run_hours(where: str, df: pd.DataFrame) -> None:
                 f"  UNERWARTET={unexpected}" if unexpected else "")
 
 
-def fit_lead(df_cell: pd.DataFrame, nwp_sources: str) -> tuple[np.ndarray, bool]:
+def fit_lead(df_cell: pd.DataFrame, nwp_sources: str,
+             feature_cols: list[str] | None = None) -> tuple[np.ndarray, bool]:
     """OLS fit for one (group, run_hour, lead) cell.
 
     Rangdefekt-Absicherung: bei ``matrix_rank(X) < X.shape[1]`` NICHT per
     Pseudoinverse fuellen, sondern NaN zurueckgeben und loggen.
     """
-    X = _design(df_cell, nwp_sources)
+    X = _design(df_cell, nwp_sources, feature_cols)
     y = df_cell["y"].to_numpy(dtype=np.float64)
     rank = int(np.linalg.matrix_rank(X))
     if rank < X.shape[1]:
@@ -109,10 +127,11 @@ def fit_lead(df_cell: pd.DataFrame, nwp_sources: str) -> tuple[np.ndarray, bool]
     return beta, False
 
 
-def predict_lead(df_cell: pd.DataFrame, beta: np.ndarray, nwp_sources: str) -> np.ndarray:
+def predict_lead(df_cell: pd.DataFrame, beta: np.ndarray, nwp_sources: str,
+                 feature_cols: list[str] | None = None) -> np.ndarray:
     if beta is None or np.isnan(beta).any():
         return np.full(len(df_cell), np.nan)
-    X = _design(df_cell, nwp_sources)
+    X = _design(df_cell, nwp_sources, feature_cols)
     return X @ beta
 
 
@@ -128,7 +147,8 @@ def _clip_nonneg(preds: np.ndarray, where: str) -> np.ndarray:
     return np.maximum(preds, 0.0)
 
 
-def fit_regional(rows_train: pd.DataFrame, nwp_sources: str) -> dict[tuple[int, int], np.ndarray]:
+def fit_regional(rows_train: pd.DataFrame, nwp_sources: str,
+                 feature_cols: list[str] | None = None) -> dict[tuple[int, int], np.ndarray]:
     """One coefficient set per (run_hour, lead), pooled over ALL rows (all
     fold-train stations). Erwartete Zeilenzahl je Zelle: ~102 x 368
     (Spezifikation-Ersatz 2026-08-10)."""
@@ -138,7 +158,7 @@ def fit_regional(rows_train: pd.DataFrame, nwp_sources: str) -> dict[tuple[int, 
     tmp = rows_train.assign(_run_hour=_run_hour(rows_train))
     row_counts = []
     for (r, h), grp in tmp.groupby(["_run_hour", "horizon"]):
-        beta, deficient = fit_lead(grp, nwp_sources)
+        beta, deficient = fit_lead(grp, nwp_sources, feature_cols)
         betas[(int(r), int(h))] = beta
         n_deficient += int(deficient)
         row_counts.append(len(grp))
@@ -150,7 +170,8 @@ def fit_regional(rows_train: pd.DataFrame, nwp_sources: str) -> dict[tuple[int, 
     return betas
 
 
-def fit_per_station(rows_train: pd.DataFrame, nwp_sources: str) -> dict[str, dict[tuple[int, int], np.ndarray]]:
+def fit_per_station(rows_train: pd.DataFrame, nwp_sources: str,
+                    feature_cols: list[str] | None = None) -> dict[str, dict[tuple[int, int], np.ndarray]]:
     """One coefficient set per (station, run_hour, lead) — MOS-nearest's
     train stations and MOS-local's target stations. Erwartete Zeilenzahl je
     Zelle: ~368 gegen 2/3 Parameter (Spezifikation-Ersatz 2026-08-10)."""
@@ -163,7 +184,7 @@ def fit_per_station(rows_train: pd.DataFrame, nwp_sources: str) -> dict[str, dic
     for sid, grp_s in tmp.groupby("station_id"):
         betas: dict[tuple[int, int], np.ndarray] = {}
         for (r, h), grp in grp_s.groupby(["_run_hour", "horizon"]):
-            beta, deficient = fit_lead(grp, nwp_sources)
+            beta, deficient = fit_lead(grp, nwp_sources, feature_cols)
             betas[(int(r), int(h))] = beta
             n_deficient += int(deficient)
             n_total += 1
@@ -179,19 +200,21 @@ def fit_per_station(rows_train: pd.DataFrame, nwp_sources: str) -> dict[str, dic
 
 
 def predict_with_regional(rows_eval: pd.DataFrame, betas: dict[tuple[int, int], np.ndarray],
-                           nwp_sources: str) -> np.ndarray:
+                           nwp_sources: str,
+                           feature_cols: list[str] | None = None) -> np.ndarray:
     """Same coefficients for every station — group by (run_hour, lead) only."""
     preds = np.full(len(rows_eval), np.nan, dtype=np.float64)
     tmp = rows_eval.assign(_run_hour=_run_hour(rows_eval))
     for (r, h), grp in tmp.groupby(["_run_hour", "horizon"]):
         beta = betas.get((int(r), int(h)))
-        preds[grp.index.to_numpy()] = predict_lead(grp, beta, nwp_sources)
+        preds[grp.index.to_numpy()] = predict_lead(grp, beta, nwp_sources, feature_cols)
     return _clip_nonneg(preds, "MOS-regional")
 
 
 def predict_with_per_station(rows_eval: pd.DataFrame,
                               station_betas: dict[str, dict[tuple[int, int], np.ndarray]],
-                              nwp_sources: str) -> np.ndarray:
+                              nwp_sources: str,
+                              feature_cols: list[str] | None = None) -> np.ndarray:
     """Per-(station, run_hour, lead) coefficients — MOS-local (own betas) or
     MOS-nearest (caller pre-resolves each target station's betas to its
     nearest train station's dict before calling this)."""
@@ -200,5 +223,5 @@ def predict_with_per_station(rows_eval: pd.DataFrame,
     for (sid, r, h), grp in tmp.groupby(["station_id", "_run_hour", "horizon"]):
         betas = station_betas.get(str(sid))
         beta = betas.get((int(r), int(h))) if betas else None
-        preds[grp.index.to_numpy()] = predict_lead(grp, beta, nwp_sources)
+        preds[grp.index.to_numpy()] = predict_lead(grp, beta, nwp_sources, feature_cols)
     return _clip_nonneg(preds, "MOS-nearest/local")
