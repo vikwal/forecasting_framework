@@ -359,7 +359,10 @@ def main() -> None:
                 grid_ecmwf_runs, ecmwf_features = apply_dir_encoding(grid_ecmwf_runs, ecmwf_features)
             E2 = grid_ecmwf_runs.shape[-1]
             e2_scaler = StandardScaler()
-            e2_scaler.fit(grid_ecmwf_runs[train_r_mask].reshape(-1, E2))
+            # Laufmaske hier lokal, weil train_r_mask erst weiter unten
+            # definiert wird und der ECMWF-Skaler davor sitzt.
+            _train_r = run_times < split_time
+            e2_scaler.fit(grid_ecmwf_runs[_train_r].reshape(-1, E2))
             grid_ecmwf_scaled = e2_scaler.transform(
                 grid_ecmwf_runs.reshape(-1, E2)
             ).reshape(R, F_h, len(ecmwf_coords), E2)
