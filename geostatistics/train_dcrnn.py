@@ -97,6 +97,7 @@ from geostatistics.train_stgnn2 import (
     load_icond2_ml_runs,
     load_ecmwf_at_stations_and_grid,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     load_nwp_elevations,
     impute_meas_raw_from_interpol,
     impute_meas_raw_solar,
@@ -789,19 +790,23 @@ def main() -> None:
 
     if next_n_ecmwf == 0:
         logger.info("next_n_ecmwf=0 — ECMWF nodes disabled, skipping ECMWF loading")
-        station_ecmwf_nwp = np.empty((T, len(all_ids), 0), dtype=np.float32)
+        station_ecmwf_nwp = np.empty((R, F_h, len(all_ids), 0), dtype=np.float32)
         ecmwf_coords      = np.empty((0, 2), dtype=np.float32)
-        ecmwf_nwp         = np.empty((T, 0, 0), dtype=np.float32)
+        ecmwf_nwp         = np.empty((R, F_h, 0, 0), dtype=np.float32)
         ecmwf_alts        = np.empty(0, dtype=np.float32)
     else:
         ecmwf_parquet_file = data_cfg.get("ecmwf_path")
 
         if os.path.exists(ecmwf_parquet_file):
+            # Lauf-indiziert, je ICON-D2-Lauf der juengste HRES-Lauf mit
+            # starttime <= icon_starttime (2026-09-24). Vorher valid-time-
+            # indiziert, was HRES-Laeufe von nach dem Vorhersagezeitpunkt las.
             station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
-                load_ecmwf_parquet_at_stations_and_grid(
+                load_ecmwf_runs_at_stations_and_grid(
                     parquet_path=ecmwf_parquet_file,
                     station_lats=lats, station_lons=lons,
-                    features=ecmwf_features, timestamps=timestamps,
+                    features=ecmwf_features, run_times=run_times,
+                    horizon=F_h,
                     next_n_grid_per_station=next_n_ecmwf,
                 )
             logger.info("ECMWF grid nodes: %d", len(ecmwf_coords))
@@ -814,8 +819,11 @@ def main() -> None:
             # hpo_dcrnn.py:637-656: der neue ECMWF-Bestand beginnt am
             # 2023-08-01, die Zeitachse am 2023-07-24, also stehen 192 h NaN am
             # Anfang. Ein Rand-Loch soll das Retrain nicht am Starten hindern.
-            ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp[:audit_t]).sum())
-            ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp[:audit_t]).sum())
+            # audit_t ist ein Zeitindex, die ECMWF-Felder sind lauf-indiziert:
+            # dieselbe Grenze als Laufmaske ausdruecken.
+            _audit_r = run_times <= timestamps[min(audit_t, T) - 1]
+            ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp[_audit_r]).sum())
+            ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp[_audit_r]).sum())
             if ecmwf_nan_station > 0 or ecmwf_nan_grid > 0:
                 logger.warning(
                     "ECMWF data contains NaN in the pre-test window — "
@@ -823,7 +831,7 @@ def main() -> None:
                     "Affected run pairs will be excluded.",
                     ecmwf_nan_station, ecmwf_nan_grid,
                 )
-            _ecmwf_beyond = int(np.isnan(station_ecmwf_nwp[audit_t:]).sum())
+            _ecmwf_beyond = int(np.isnan(station_ecmwf_nwp[~_audit_r]).sum())
             if _ecmwf_beyond > 0:
                 logger.info(
                     "ECMWF: %d NaN jenseits des Run-Paar-Fensters "
@@ -844,17 +852,17 @@ def main() -> None:
             # else:
             logger.warning("ECMWF_WIND_SL_URL not set — using zero ECMWF features")
             station_ecmwf_nwp = np.zeros(
-                (T, len(all_ids), len(ecmwf_features)), dtype=np.float32
+                (R, F_h, len(all_ids), len(ecmwf_features)), dtype=np.float32
             )
             ec_lats = np.arange(47.5, 55.0, 0.5)
             ec_lons = np.arange(6.0, 15.5, 0.5)
             eg, lg  = np.meshgrid(ec_lats, ec_lons)
             ecmwf_coords = np.stack([eg.ravel(), lg.ravel()], axis=1).astype(np.float32)
-            ecmwf_nwp    = np.zeros((T, len(ecmwf_coords), len(ecmwf_features)), dtype=np.float32)
+            ecmwf_nwp    = np.zeros((R, F_h, len(ecmwf_coords), len(ecmwf_features)), dtype=np.float32)
             ecmwf_alts   = np.zeros(len(ecmwf_coords), dtype=np.float32)
 
     # dir_in_deg ECMWF encoding (applied after loading, before scaling)
-    if e2_mode == "dir_in_deg" and station_ecmwf_nwp.shape[2] > 0:
+    if e2_mode == "dir_in_deg" and station_ecmwf_nwp.shape[-1] > 0:
         ecmwf_features_pre = list(ecmwf_features)
         station_ecmwf_nwp, ecmwf_features = apply_dir_encoding(station_ecmwf_nwp, ecmwf_features_pre)
         ecmwf_nwp, _                       = apply_dir_encoding(ecmwf_nwp, ecmwf_features_pre)
@@ -916,19 +924,19 @@ def main() -> None:
         grid_icond2_runs.reshape(-1, I2)
     ).reshape(R, n_leads, N_igrid, I2)
 
-    E2 = station_ecmwf_nwp.shape[2]   # 0 when next_n_ecmwf == 0
+    E2 = station_ecmwf_nwp.shape[-1]   # 0 when next_n_ecmwf == 0
     if E2 > 0:
         e2_scaler = StandardScaler()
-        e2_scaler.fit(station_ecmwf_nwp[:split_t, :N_train].reshape(-1, E2))
+        e2_scaler.fit(station_ecmwf_nwp[train_r_mask][:, :, :N_train].reshape(-1, E2))
         station_ecmwf_scaled = e2_scaler.transform(
             station_ecmwf_nwp.reshape(-1, E2)
-        ).reshape(T, len(all_ids), E2)
+        ).reshape(R, F_h, len(all_ids), E2)
         ecmwf_nwp_scaled = e2_scaler.transform(
             ecmwf_nwp.reshape(-1, E2)
-        ).reshape(T, len(ecmwf_coords), E2)
+        ).reshape(R, F_h, len(ecmwf_coords), E2)
     else:
-        station_ecmwf_scaled = np.empty((T, len(all_ids),  0), dtype=np.float32)
-        ecmwf_nwp_scaled     = np.empty((T, 0,             0), dtype=np.float32)
+        station_ecmwf_scaled = np.empty((R, F_h, len(all_ids), 0), dtype=np.float32)
+        ecmwf_nwp_scaled     = np.empty((R, F_h, 0,            0), dtype=np.float32)
 
     stat_scaler = StandardScaler()
     raw_static  = np.stack([lats, lons, alts], axis=1)

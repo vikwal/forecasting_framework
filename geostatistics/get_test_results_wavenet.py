@@ -44,6 +44,7 @@ from geostatistics.train_stgnn2 import (
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     impute_meas_raw_from_interpol,
     load_knn_imputation,
     apply_knn_imputation,
@@ -348,19 +349,19 @@ def main() -> None:
         ecmwf_path = data_cfg.get("ecmwf_path")
         if ecmwf_path and os.path.exists(ecmwf_path):
             logger.info("Loading ECMWF NWP (%d features, k=%d) …", len(ecmwf_features), next_n_ecmwf)
-            _, ecmwf_coords, grid_ecmwf_runs, _ = load_ecmwf_parquet_at_stations_and_grid(
+            _, ecmwf_coords, grid_ecmwf_runs, _ = load_ecmwf_runs_at_stations_and_grid(
                 parquet_path=ecmwf_path, station_lats=lats, station_lons=lons,
-                features=ecmwf_features, timestamps=timestamps,
+                features=ecmwf_features, run_times=run_times, horizon=F_h,
                 next_n_grid_per_station=next_n_ecmwf,
             )
             if e2_mode == "dir_in_deg":
                 grid_ecmwf_runs, ecmwf_features = apply_dir_encoding(grid_ecmwf_runs, ecmwf_features)
-            E2 = grid_ecmwf_runs.shape[2]
+            E2 = grid_ecmwf_runs.shape[-1]
             e2_scaler = StandardScaler()
-            e2_scaler.fit(grid_ecmwf_runs[:split_t].reshape(-1, E2))
+            e2_scaler.fit(grid_ecmwf_runs[train_r_mask].reshape(-1, E2))
             grid_ecmwf_scaled = e2_scaler.transform(
                 grid_ecmwf_runs.reshape(-1, E2)
-            ).reshape(T, len(ecmwf_coords), E2)
+            ).reshape(R, F_h, len(ecmwf_coords), E2)
         else:
             logger.warning("next_n_ecmwf=%d but ecmwf_path not set or missing — ECMWF disabled", next_n_ecmwf)
             next_n_ecmwf = 0

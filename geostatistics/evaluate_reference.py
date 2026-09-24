@@ -46,6 +46,7 @@ from geostatistics.train_stgnn2 import (
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     impute_meas_raw_from_interpol,
     load_knn_imputation,
     apply_knn_imputation,
@@ -182,8 +183,9 @@ def evaluate_nwp_baselines(
         # ECMWF at each station's own (geodesically) nearest grid point — already
         # resolved by load_ecmwf_parquet_at_stations_and_grid; index directly via
         # val_indices exactly like meas_raw, no re-derived nearest-neighbour here.
-        if has_ecmwf and t_run_abs + F_h <= station_ecmwf_nwp.shape[0]:
-            e2_slice = station_ecmwf_nwp[t_run_abs : t_run_abs + F_h, val_indices, ecmwf_ws_feat_idx]  # (F_h, N_val)
+        if has_ecmwf and r_curr < station_ecmwf_nwp.shape[0]:
+            # lauf-indiziert, genau wie nwp_slice oben (seit 2026-09-24)
+            e2_slice = station_ecmwf_nwp[r_curr, :F_h, val_indices, ecmwf_ws_feat_idx]  # (F_h, N_val)
             e2_fc    = e2_slice.T.astype(np.float32)         # (N_val, F_h)
         else:
             e2_fc = None
@@ -407,12 +409,12 @@ def main() -> None:
 
     if ecmwf_path and os.path.exists(ecmwf_path):
         logger.info("Loading ECMWF from %s …", ecmwf_path)
-        station_ecmwf_nwp, _, _, _ = load_ecmwf_parquet_at_stations_and_grid(
+        station_ecmwf_nwp, _, _, _ = load_ecmwf_runs_at_stations_and_grid(
             parquet_path=ecmwf_path,
             station_lats=lats,
             station_lons=lons,
             features=ecmwf_features_load,
-            timestamps=timestamps,
+            run_times=run_times, horizon=F_h,
             next_n_grid_per_station=1,
         )
         # station_ecmwf_nwp is already resolved to each station's own nearest grid
@@ -422,7 +424,7 @@ def main() -> None:
         # that is exactly the bug just fixed for ICON-D2 above.
         if e2_mode == "dir_in_deg":
             station_ecmwf_nwp, ecmwf_features_load = apply_dir_encoding(station_ecmwf_nwp, ecmwf_features_load)
-        E2 = station_ecmwf_nwp.shape[2]
+        E2 = station_ecmwf_nwp.shape[-1]
         ecmwf_ws_feat_idx = next(
             (i for i, f in enumerate(ecmwf_features_load) if f == "wind_speed_10m"),
             next((i for i, f in enumerate(ecmwf_features_load) if "wind_speed" in f), 0),

@@ -29,6 +29,30 @@ from ..config import ModelConfig
 from ..graph_builder import FoldTopology, HeterogeneousGraphBuilder
 
 
+
+def _assert_run_indexed(*arrays: np.ndarray) -> None:
+    """HRES muss lauf-indiziert sein, (R, 48, N, E2).
+
+    Bis 2026-09-24 kam HRES valid-time-indiziert als (T, N, E2) herein und wurde
+    mit ``[t_hist_abs:t_run_abs+H]`` geschnitten. Das nahm je Gueltigkeitsstunde
+    den juengsten Lauf im Archiv, also fuer einen ICON-D2-Lauf um 09 UTC zu 46
+    von 48 Stunden Laeufe, die es zum Vorhersagezeitpunkt noch nicht gab. Die
+    Sampler werden positional aufgerufen, ein Umbenennen der Parameter wuerde
+    eine vergessene Aufrufstelle also nicht auffangen. Diese Pruefung schon.
+    """
+    for a in arrays:
+        if a is None or getattr(a, "size", 1) == 0:
+            continue
+        if a.ndim != 4:
+            raise ValueError(
+                "ECMWF-Felder muessen lauf-indiziert sein (R, 48, N, E2), "
+                f"bekommen habe ich ndim={a.ndim} mit shape={a.shape}. Die "
+                "Aufrufstelle laedt vermutlich noch ueber "
+                "load_ecmwf_parquet_at_stations_and_grid statt ueber "
+                "load_ecmwf_runs_at_stations_and_grid."
+            )
+
+
 @dataclass
 class SampleBatch:
     data: HeteroData
@@ -194,10 +218,8 @@ class TrainingSampler:
     @staticmethod
     def _station_ecmwf_block(
         all_global: list[int],
-        station_ecmwf_nwp: np.ndarray,        # (T, N_stations, E2) — naechster Gitterpunkt
+        station_e2_window: np.ndarray,        # (T_total, N_stations, E2) — naechster Gitterpunkt
         e2_grid_window: np.ndarray,           # (T_total, N_ecmwf, E2) — Fenster ueber das Gitter
-        t_from: int,
-        t_to: int,
         station_k_nearest_ecmwf: np.ndarray | None,
     ) -> np.ndarray:
         """ECMWF-Kanaele fuer station.x, (N_sub, T_total, [k_e*]E2).
@@ -209,7 +231,7 @@ class TrainingSampler:
         ohnehin ignoriert, weil das Modell dort die ecmwf-Knoten liest).
         """
         if station_k_nearest_ecmwf is None:
-            block = station_ecmwf_nwp[t_from:t_to, :, :][:, all_global, :]
+            block = station_e2_window[:, all_global, :]
             return block.transpose(1, 0, 2)                      # (N_sub, T_total, E2)
         ke  = station_k_nearest_ecmwf[all_global]                # (N_sub, k_e)
         sub = e2_grid_window[:, ke, :]                           # (T_total, N_sub, k_e, E2)
@@ -239,9 +261,9 @@ class TrainingSampler:
         station_meas: np.ndarray,          # (T, N_stations, M)
         station_nearest_grid: np.ndarray,  # (N_stations,) int
         grid_icond2_runs: np.ndarray,      # (R, 48, N_grid, I2)
-        station_ecmwf_nwp: np.ndarray,    # (T, N_stations, E2)
+        station_ecmwf_nwp: np.ndarray,    # (R, 48, N_stations, E2) lauf-indiziert
         station_static: np.ndarray,        # (N_stations, S-1)
-        ecmwf_nwp: np.ndarray,            # (T, N_ecmwf, E2)
+        ecmwf_nwp: np.ndarray,            # (R, 48, N_ecmwf, E2) lauf-indiziert
         icond2_static: np.ndarray,
         ecmwf_static: np.ndarray,
         train_station_indices: list[int],
@@ -319,11 +341,22 @@ class TrainingSampler:
                 grid_icond2_uv_runs[r_curr],
             ], axis=0)   # (96, N_grid, 2)
 
-        # ECMWF
-        e2_grid_full = ecmwf_nwp[t_hist_abs:t_run_abs + H_fore]      # (96, N_ecmwf, E2)
+        # ECMWF — lauf-indiziert wie ICON-D2. Der Historienblock kommt aus dem
+        # vorigen Lauf, der Prognoseblock aus dem aktuellen, und beide tragen
+        # den HRES-Lauf, der zur jeweiligen ICON-D2-Initialisierung verfuegbar
+        # war (train_stgnn2.load_ecmwf_runs_at_stations_and_grid).
+        _assert_run_indexed(ecmwf_nwp, station_ecmwf_nwp)
+        e2_grid_full = np.concatenate([
+            ecmwf_nwp[r_hist],
+            ecmwf_nwp[r_curr],
+        ], axis=0)                                                   # (96, N_ecmwf, E2)
+        e2_station_full = np.concatenate([
+            station_ecmwf_nwp[r_hist],
+            station_ecmwf_nwp[r_curr],
+        ], axis=0)                                                   # (96, N_stations, E2)
         e2_full      = self._station_ecmwf_block(
-            all_global, station_ecmwf_nwp, e2_grid_full,
-            t_hist_abs, t_run_abs + H_fore, station_k_nearest_ecmwf,
+            all_global, e2_station_full, e2_grid_full,
+            station_k_nearest_ecmwf,
         )                                                            # (N_sub, 96, [k_e*]E2)
 
         # Measurements: history only, (H, N_sub, M)
@@ -477,10 +510,18 @@ class TrainingSampler:
                 grid_icond2_uv_runs[r_curr],
             ], axis=0)   # (96, N_grid, 2)
 
-        e2_grid_full = ecmwf_nwp[t_hist_abs:t_run_abs + H_fore]
+        _assert_run_indexed(ecmwf_nwp, station_ecmwf_nwp)
+        e2_grid_full = np.concatenate([
+            ecmwf_nwp[r_hist],
+            ecmwf_nwp[r_curr],
+        ], axis=0)
+        e2_station_full = np.concatenate([
+            station_ecmwf_nwp[r_hist],
+            station_ecmwf_nwp[r_curr],
+        ], axis=0)
         e2_full      = self._station_ecmwf_block(
-            all_global, station_ecmwf_nwp, e2_grid_full,
-            t_hist_abs, t_run_abs + H_fore, station_k_nearest_ecmwf,
+            all_global, e2_station_full, e2_grid_full,
+            station_k_nearest_ecmwf,
         )                                                            # (N_all, 96, [k_e*]E2)
 
         meas_hist = station_meas[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()

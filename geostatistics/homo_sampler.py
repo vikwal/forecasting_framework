@@ -136,7 +136,7 @@ class HomoSampler:
     ) -> None:
         self.meas      = meas_scaled            # (T, N, M)
         self.nwp_runs  = grid_icond2_scaled     # (R, n_leads, N_grid_i2, I2)
-        self.ecmwf_nwp = grid_ecmwf_scaled      # (T, N_grid_e2, E2) or None
+        self.ecmwf_nwp = grid_ecmwf_scaled      # (R, 48, N_grid_e2, E2) or None
         self.train_pairs = train_run_pairs
         self.val_pairs   = val_run_pairs
         self.train_idx   = list(train_station_indices)
@@ -154,7 +154,7 @@ class HomoSampler:
         self.hist_wind_available = hist_wind_available
 
         self.I2 = grid_icond2_scaled.shape[3]
-        self.E2 = grid_ecmwf_scaled.shape[2] if grid_ecmwf_scaled is not None else 0
+        self.E2 = grid_ecmwf_scaled.shape[-1] if grid_ecmwf_scaled is not None else 0
 
         self._nwp_knn_idx, self._nwp_knn_w, self._nwp_edge_attr = self._init_grid_knn(
             lats, lons, alts, icond2_coords, icond2_alts, k_nwp,
@@ -314,24 +314,40 @@ class HomoSampler:
 
     def _aggregate_ecmwf(
         self,
-        t_hist_abs: int,
-        t_end_abs: int,
+        r_hist: int,
+        r_curr: int,
         sub_indices: list[int],
     ) -> np.ndarray | None:
-        """ECMWF NWP for a station subset over the given time window.
+        """ECMWF NWP for a station subset over the two runs of the window.
 
         aggregate_nwp=True  → IDW-weighted mean  → (N_sub, T_total, E2)
         aggregate_nwp=False → concat k points    → (N_sub, T_total, k*E2)
         Returns None if ECMWF is not configured.
+
+        Lauf-indiziert wie ICON-D2 in ``_aggregate_nwp``: der Historienblock
+        kommt aus dem vorigen Lauf, der Prognoseblock aus dem aktuellen, und
+        beide tragen den HRES-Lauf, der zur jeweiligen ICON-D2-Initialisierung
+        verfuegbar war. Bis 2026-09-24 wurde hier ein valid-time-Fenster
+        geschnitten, das je Stunde den juengsten Lauf im Archiv nahm und damit
+        Laeufe las, die es zum Vorhersagezeitpunkt noch nicht gab.
         """
         if self.ecmwf_nwp is None or self._ecmwf_knn_idx.shape[1] == 0:
             return None
+        if self.ecmwf_nwp.ndim != 4:
+            raise ValueError(
+                "ECMWF muss lauf-indiziert sein (R, 48, N_grid_e2, E2), bekommen "
+                f"habe ich shape={self.ecmwf_nwp.shape}. Die Aufrufstelle laedt "
+                "vermutlich noch ueber load_ecmwf_parquet_at_stations_and_grid."
+            )
 
         idxs = self._ecmwf_knn_idx[sub_indices]   # (N_sub, k)
         wgts = self._ecmwf_knn_w[sub_indices]     # (N_sub, k)
 
         # (T_total, N_sub, k, E2)
-        window = self.ecmwf_nwp[t_hist_abs:t_end_abs]   # (T_total, N_grid_e2, E2)
+        window = np.concatenate([
+            self.ecmwf_nwp[r_hist],
+            self.ecmwf_nwp[r_curr],
+        ], axis=0)                                       # (T_total, N_grid_e2, E2)
         sub    = window[:, idxs, :]                      # (T_total, N_sub, k, E2)
 
         if self.aggregate_nwp:
@@ -406,7 +422,7 @@ class HomoSampler:
         nwp_agg = self._aggregate_nwp(r_hist, r_curr, sub_indices)
 
         # ECMWF aggregated at station level → (N_sub, T_total, E2 or k*E2) or None
-        ecmwf_agg = self._aggregate_ecmwf(t_hist_abs, t_run_abs + self.Fh, sub_indices)
+        ecmwf_agg = self._aggregate_ecmwf(r_hist, r_curr, sub_indices)
 
         parts = [meas_full, nwp_agg]
         if ecmwf_agg is not None:

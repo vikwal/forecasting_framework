@@ -88,6 +88,7 @@ from geostatistics.train_stgnn2 import (
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     impute_meas_raw_from_interpol,
     load_knn_imputation,
     apply_knn_imputation,
@@ -535,7 +536,7 @@ def main() -> None:
         grid_icond2_runs = _arrays["grid_icond2_runs"]
         meas_raw         = _arrays["meas_raw"]
         _ecmwf_arr       = _arrays["grid_ecmwf_raw"]
-        grid_ecmwf_raw   = _ecmwf_arr if _ecmwf_arr.shape[1] > 0 else None
+        grid_ecmwf_raw   = _ecmwf_arr if _ecmwf_arr.shape[2] > 0 else None
 
         timestamps    = derived["timestamps"]
         run_times     = derived["run_times"]
@@ -637,9 +638,9 @@ def main() -> None:
             ecmwf_path = data_cfg.get("ecmwf_path")
             if ecmwf_path and os.path.exists(ecmwf_path):
                 logger.info("Loading ECMWF NWP (%d feat, k=%d) …", len(ecmwf_features), next_n_ecmwf)
-                _, ecmwf_coords, grid_ecmwf_raw, _ = load_ecmwf_parquet_at_stations_and_grid(
+                _, ecmwf_coords, grid_ecmwf_raw, _ = load_ecmwf_runs_at_stations_and_grid(
                     parquet_path=ecmwf_path, station_lats=lats, station_lons=lons,
-                    features=ecmwf_features, timestamps=timestamps,
+                    features=ecmwf_features, run_times=run_times, horizon=F_h,
                     next_n_grid_per_station=next_n_ecmwf,
                 )
                 logger.info("ECMWF: %d grid nodes", len(ecmwf_coords))
@@ -699,7 +700,7 @@ def main() -> None:
     # Laufachse. Begruendung und Vorgeschichte stehen an der Funktion.
     from geostatistics.train_stgnn2 import exclude_run_pairs_with_ecmwf_nan
     all_run_pairs = exclude_run_pairs_with_ecmwf_nan(
-        all_run_pairs, [grid_ecmwf_raw], timestamps, H, F_h,
+        all_run_pairs, [grid_ecmwf_raw], run_times, H, F_h,
     )
 
     # ── NWP-Knotenhoehen fuer die Kantenattribute ───────────────────────────
@@ -969,12 +970,12 @@ def main() -> None:
 
             grid_ecmwf_scaled: np.ndarray | None = None
             if next_n_ecmwf > 0 and _t_ecmwf is not None:
-                E2 = _t_ecmwf.shape[2]
+                E2 = _t_ecmwf.shape[-1]
                 e2_scaler = StandardScaler()
                 e2_scaler.fit(_t_ecmwf[:fold_t].reshape(-1, E2))
                 grid_ecmwf_scaled = e2_scaler.transform(
                     _t_ecmwf.reshape(-1, E2)
-                ).reshape(T, len(ecmwf_coords), E2)
+                ).reshape(R, F_h, len(ecmwf_coords), E2)
 
             fold_target_scale = float(meas_scaler.std_[target_feat_idx] + meas_scaler.eps)
             fold_target_mean  = float(meas_scaler.mean_[target_feat_idx])
@@ -1013,7 +1014,7 @@ def main() -> None:
             nwp_heads_v     = int(trial_cfg.get("nwp_heads",   mcfg.get("nwp_heads", 4)))    if nwp_nodes else 4
             # ECMWF laeuft unter nwp_nodes=True durch eine eigene Attention-Schicht
             # (wie beim DCRNN), traegt also nwp_out_dim Kanaele statt k_e*E2.
-            E2_trial        = (_t_ecmwf.shape[2]
+            E2_trial        = (_t_ecmwf.shape[-1]
                                if (_t_ecmwf is not None and next_n_ecmwf_trial > 0) else 0)
             ecmwf_out_dim   = nwp_out_dim if (nwp_nodes and E2_trial > 0) else 0
             in_ch_model     = ((M_meas_only + nwp_out_dim + ecmwf_out_dim)

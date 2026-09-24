@@ -37,6 +37,7 @@ from geostatistics.train_stgnn2 import (          # noqa: E402
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     impute_meas_raw_from_interpol,
     load_knn_imputation,
     apply_knn_imputation,
@@ -214,14 +215,14 @@ def load_context(
     if ecmwf_path and os.path.exists(ecmwf_path):
         logger.info("Loading ECMWF (next_n_grid=%d) …", LOAD_K_E2)
         _station_ecmwf_nwp, ecmwf_coords, grid_ecmwf_raw, _grid_alts = \
-            load_ecmwf_parquet_at_stations_and_grid(
+            load_ecmwf_runs_at_stations_and_grid(
                 parquet_path=ecmwf_path, station_lats=lats, station_lons=lons,
-                features=ecmwf_features, timestamps=timestamps,
+                features=ecmwf_features, run_times=run_times, horizon=F_h,
                 next_n_grid_per_station=LOAD_K_E2,
             )
         if e2_mode == "dir_in_deg":
             grid_ecmwf_raw, ecmwf_features = apply_dir_encoding(grid_ecmwf_raw, ecmwf_features)
-        E2 = grid_ecmwf_raw.shape[2]
+        E2 = grid_ecmwf_raw.shape[-1]
         ecmwf_ws_feat_idx = next(
             (i for i, f in enumerate(ecmwf_features) if f == "wind_speed_10m"),
             next((i for i, f in enumerate(ecmwf_features) if "wind_speed" in f), 0),
@@ -429,7 +430,10 @@ def build_feature_matrix(
         nearest_e2_idx = ctx["nearest_e2_idx"]
         E2 = ctx["E2"]
         idx_e2 = nearest_e2_idx[station_pos][:, :k_e2]           # (S, k_e2)
-        sub_e2 = grid_ecmwf_raw[time_idx]                        # (P, F_h, N_grid_e2, E2)
+        # lauf-indiziert wie sub_i2 oben (seit 2026-09-24); time_idx las je
+        # Gueltigkeitsstunde den juengsten HRES-Lauf im Archiv, auch solche
+        # nach dem Vorhersagezeitpunkt.
+        sub_e2 = grid_ecmwf_raw[r_curr_arr][:, :F_h, :, :]        # (P, F_h, N_grid_e2, E2)
         sub_e2 = sub_e2[:, :, idx_e2, :]                          # (P, F_h, S, k_e2, E2)
         blk_e2 = sub_e2.transpose(2, 0, 1, 3, 4).reshape(S * P * F_h, k_e2 * E2).astype(np.float32)
         blocks.append(blk_e2)
@@ -635,7 +639,7 @@ def build_mos_rows(
         nearest_e2_idx = ctx["nearest_e2_idx"]
         ecmwf_ws = ctx["ecmwf_ws_feat_idx"]
         idx0_e2 = nearest_e2_idx[station_pos][:, 0]
-        sub0_e2 = grid_ecmwf_raw[time_idx][:, :, idx0_e2, ecmwf_ws]              # (P, F_h, S)
+        sub0_e2 = grid_ecmwf_raw[r_curr_arr][:, :F_h, idx0_e2, ecmwf_ws]         # (P, F_h, S)
         ws_e2 = sub0_e2.transpose(2, 0, 1).reshape(-1)
     else:
         ws_e2 = np.full(S * P * F_h, np.nan, dtype=np.float32)

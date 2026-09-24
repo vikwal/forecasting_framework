@@ -1644,10 +1644,10 @@ def main() -> None:
 
     if ecmwf_parquet_source:
         station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
-            load_ecmwf_parquet_at_stations_and_grid(
+            load_ecmwf_runs_at_stations_and_grid(
                 parquet_path=ecmwf_parquet_source,
                 station_lats=lats, station_lons=lons,
-                features=ecmwf_features, timestamps=timestamps,
+                features=ecmwf_features, run_times=run_times, horizon=F_h,
                 next_n_grid_per_station=stgnn_cfg.get("next_n_ecmwf", 4),
             )
         logger.info("ECMWF grid nodes: %d  features: %s", len(ecmwf_coords), ecmwf_features)
@@ -1665,12 +1665,12 @@ def main() -> None:
         #     logger.info("ECMWF grid nodes: %d  features: %s", len(ecmwf_coords), ecmwf_features)
         # else:
         logger.warning("ECMWF_WIND_SL_URL not set — using zero ECMWF features")
-        station_ecmwf_nwp = np.zeros((T, len(all_ids), len(ecmwf_features)), dtype=np.float32)
+        station_ecmwf_nwp = np.zeros((R, F_h, len(all_ids), len(ecmwf_features)), dtype=np.float32)
         ec_lats = np.arange(47.5, 55.0, 0.5)
         ec_lons = np.arange(6.0, 15.5, 0.5)
         eg, lg  = np.meshgrid(ec_lats, ec_lons)
         ecmwf_coords = np.stack([eg.ravel(), lg.ravel()], axis=1).astype(np.float32)
-        ecmwf_nwp    = np.zeros((T, len(ecmwf_coords), len(ecmwf_features)), dtype=np.float32)
+        ecmwf_nwp    = np.zeros((R, F_h, len(ecmwf_coords), len(ecmwf_features)), dtype=np.float32)
         ecmwf_alts   = np.zeros(len(ecmwf_coords), dtype=np.float32)
 
     # ------------------------------------------------------------------
@@ -1723,13 +1723,13 @@ def main() -> None:
 
     E2 = len(ecmwf_features)
     e2_scaler = StandardScaler()
-    e2_scaler.fit(station_ecmwf_nwp[:split_t, :N_train].reshape(-1, E2))
+    e2_scaler.fit(station_ecmwf_nwp[train_r_mask][:, :, :N_train].reshape(-1, E2))
     station_ecmwf_scaled = e2_scaler.transform(
         station_ecmwf_nwp.reshape(-1, E2)
-    ).reshape(T, len(all_ids), E2)
+    ).reshape(R, F_h, len(all_ids), E2)
     ecmwf_nwp_scaled = e2_scaler.transform(
         ecmwf_nwp.reshape(-1, E2)
-    ).reshape(T, len(ecmwf_coords), E2)
+    ).reshape(R, F_h, len(ecmwf_coords), E2)
 
     stat_scaler = StandardScaler()
     raw_static  = np.stack([lats, lons, alts], axis=1)
@@ -1936,17 +1936,18 @@ if __name__ == "__main__":
 def exclude_run_pairs_with_ecmwf_nan(
     all_run_pairs: list[tuple[int, int, int]],
     ecmwf_arrays: list,
-    timestamps: pd.DatetimeIndex,
+    run_times: pd.DatetimeIndex,
     H: int,
     F_h: int,
     max_drop_frac: float = 0.10,
 ) -> list[tuple[int, int, int]]:
     """Drop run pairs whose window touches a NaN in the ECMWF tensors.
 
-    Counterpart to the ICON-D2 exclusion in the hpo_* scripts, which filters on
-    the RUN axis. ECMWF is indexed by timestamp, so this filter runs over
-    ``t_run_abs`` and uses the same window ``[t - H, t + F_h)`` that
-    ``_build_all_run_pairs`` already applies to ``meas_nan_any``.
+    Counterpart to the ICON-D2 exclusion in the hpo_* scripts. Since 2026-09-24
+    ECMWF is loaded per ICON-D2 run, exactly like ICON-D2 itself, so this filter
+    works on the RUN axis too: a pair is dropped when either the current or the
+    history run carries a NaN. ``H`` and ``F_h`` are kept in the signature for
+    the callers and are no longer needed to build the window.
 
     Background: the ECMWF loading path has no NaN check of its own. On
     2026-08-15 a foreign pipeline overwrote the wind columns with NULL and the
@@ -1961,11 +1962,18 @@ def exclude_run_pairs_with_ecmwf_nan(
     """
     masks = []
     for arr in ecmwf_arrays:
-        if arr is None or getattr(arr, "ndim", 0) != 3:
+        if arr is None:
             continue
-        if arr.shape[1] == 0 or arr.shape[2] == 0:
+        nd = getattr(arr, "ndim", 0)
+        if nd == 3:
+            raise ValueError(
+                "ECMWF-Feld ist valid-time-indiziert (ndim=3). Seit 2026-09-24 "
+                "wird je ICON-D2-Lauf geladen; die Aufrufstelle muss "
+                "load_ecmwf_runs_at_stations_and_grid benutzen."
+            )
+        if nd != 4 or arr.shape[2] == 0 or arr.shape[3] == 0:
             continue
-        masks.append(np.isnan(arr).any(axis=(1, 2)))
+        masks.append(np.isnan(arr).any(axis=(1, 2, 3)))     # (R,)
     if not masks:
         return all_run_pairs
 
@@ -1976,23 +1984,23 @@ def exclude_run_pairs_with_ecmwf_nan(
 
     kept = [
         (rc, rh, t) for rc, rh, t in all_run_pairs
-        if not nan_any[max(t - H, 0): t + F_h].any()
+        if not (nan_any[rc] or nan_any[rh])
     ]
     dropped = len(all_run_pairs) - len(kept)
     idx = np.where(nan_any)[0]
-    span = f"{timestamps[idx[0]]} .. {timestamps[idx[-1]]}"
+    span = f"{run_times[idx[0]]} .. {run_times[idx[-1]]}"
     frac = dropped / len(all_run_pairs) if all_run_pairs else 0.0
     if frac > max_drop_frac:
         raise ValueError(
-            f"ECMWF data contains NaN at {int(nan_any.sum())} of {len(nan_any)} "
-            f"timestamps ({span}); that would drop {dropped} of "
+            f"ECMWF data contains NaN in {int(nan_any.sum())} of {len(nan_any)} "
+            f"runs ({span}); that would drop {dropped} of "
             f"{len(all_run_pairs)} run pairs ({100 * frac:.1f} % > "
             f"{100 * max_drop_frac:.0f} %). Refusing to train on a partial ECMWF "
             f"archive \u2014 check the parquet export."
         )
     logger.warning(
         "Excluded %d of %d run pairs due to NaN in ECMWF data "
-        "(%d of %d timestamps affected, %s).",
+        "(%d of %d runs affected, %s).",
         dropped, len(all_run_pairs), int(nan_any.sum()), len(nan_any), span,
     )
     return kept

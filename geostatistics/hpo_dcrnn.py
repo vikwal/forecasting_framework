@@ -72,6 +72,7 @@ from geostatistics.train_stgnn2 import (
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     load_nwp_elevations,
     impute_meas_raw_from_interpol,
     impute_meas_raw_solar,
@@ -673,36 +674,37 @@ def main() -> None:
         ecmwf_parquet_file = data_cfg.get("ecmwf_path", "/mnt/nvme1/ecmwf/parquet")
         if max_next_n_ecmwf == 0:
             logger.info("next_n_ecmwf=0 — ECMWF nodes disabled, skipping ECMWF loading")
-            station_ecmwf_nwp = np.empty((T, len(all_ids), 0), dtype=np.float32)
+            station_ecmwf_nwp = np.empty((R, F_h, len(all_ids), 0), dtype=np.float32)
             ecmwf_coords      = np.empty((0, 2), dtype=np.float32)
-            ecmwf_nwp         = np.empty((T, 0, 0), dtype=np.float32)
+            ecmwf_nwp         = np.empty((R, F_h, 0, 0), dtype=np.float32)
             ecmwf_alts        = np.empty(0, dtype=np.float32)
         else:
             E2 = len(ecmwf_features)
 
             if os.path.exists(ecmwf_parquet_file):
                 station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
-                    load_ecmwf_parquet_at_stations_and_grid(
+                    load_ecmwf_runs_at_stations_and_grid(
                         parquet_path=ecmwf_parquet_file,
                         station_lats=lats, station_lons=lons,
-                        features=ecmwf_features, timestamps=timestamps,
+                        features=ecmwf_features, run_times=run_times, horizon=F_h,
                         next_n_grid_per_station=max_next_n_ecmwf,
                     )
             else:
                 logger.warning("ECMWF parquet not found — using zeros")
-                station_ecmwf_nwp = np.zeros((T, len(all_ids), E2), dtype=np.float32)
+                station_ecmwf_nwp = np.zeros((R, F_h, len(all_ids), E2), dtype=np.float32)
                 ec_lats = np.arange(47.5, 55.0, 0.5)
                 ec_lons = np.arange(6.0, 15.5, 0.5)
                 eg, lg  = np.meshgrid(ec_lats, ec_lons)
                 ecmwf_coords = np.stack([eg.ravel(), lg.ravel()], axis=1).astype(np.float32)
-                ecmwf_nwp    = np.zeros((T, len(ecmwf_coords), E2), dtype=np.float32)
+                ecmwf_nwp    = np.zeros((R, F_h, len(ecmwf_coords), E2), dtype=np.float32)
                 ecmwf_alts   = np.zeros(len(ecmwf_coords), dtype=np.float32)
 
             # Only check the training+validation window (timestamps before test_start).
             # Timestamps from test_start onward are not used during HPO; ECMWF data
             # may legitimately be absent for future dates.
-            ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp[:split_t]).sum())
-            ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp[:split_t]).sum())
+            _audit_r = run_times < split_time
+            ecmwf_nan_station = int(np.isnan(station_ecmwf_nwp[_audit_r]).sum())
+            ecmwf_nan_grid    = int(np.isnan(ecmwf_nwp[_audit_r]).sum())
             if ecmwf_nan_station > 0 or ecmwf_nan_grid > 0:
                 # Frueher ein harter Abbruch. Seit 2026-08-17 uebernimmt
                 # exclude_run_pairs_with_ecmwf_nan die betroffenen Run-Paare und
@@ -714,7 +716,7 @@ def main() -> None:
                     "Affected run pairs will be excluded.",
                     ecmwf_nan_station, ecmwf_nan_grid,
                 )
-            _beyond = int(np.isnan(station_ecmwf_nwp[split_t:]).sum())
+            _beyond = int(np.isnan(station_ecmwf_nwp[~_audit_r]).sum())
             if _beyond > 0:
                 logger.info(
                     "ECMWF: %d NaN beyond test_start (timestamps not used in HPO — OK).", _beyond
@@ -750,7 +752,7 @@ def main() -> None:
 
         M_meas = len(measurement_cols)
         I2     = len(icond2_features_all)
-        E2     = station_ecmwf_nwp.shape[2]   # 0 when next_n_ecmwf == 0
+        E2     = station_ecmwf_nwp.shape[-1]   # 0 when next_n_ecmwf == 0
 
         # Static node features: coordinates + altitude are time- and fold-independent,
         # so fitting on all nodes is not leakage — these go into the cache scaled.
@@ -1411,10 +1413,10 @@ def main() -> None:
                 ).reshape(T, len(all_ids), trial_E2)
                 ecmwf_nwp_scaled = fold_e2_scaler.transform(
                     trial_ecmwf_nwp.reshape(-1, trial_E2)
-                ).reshape(T, len(ecmwf_coords), trial_E2)
+                ).reshape(R, F_h, len(ecmwf_coords), trial_E2)
             else:
-                station_ecmwf_scaled = np.empty((T, len(all_ids),  0), dtype=np.float32)
-                ecmwf_nwp_scaled     = np.empty((T, 0,             0), dtype=np.float32)
+                station_ecmwf_scaled = np.empty((R, F_h, len(all_ids),  0), dtype=np.float32)
+                ecmwf_nwp_scaled     = np.empty((R, F_h, 0,             0), dtype=np.float32)
 
             # Extra lag channel (dcrnn.interpolate_history) — see the same
             # block in train_dcrnn.py: it fed on the Kriging column 'rk_pred',

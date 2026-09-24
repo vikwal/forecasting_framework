@@ -81,6 +81,7 @@ from geostatistics.train_stgnn2 import (
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     load_nwp_elevations,
 )
 from geostatistics.stgnn import HeterogeneousGraphBuilder, ModelConfig, STGNN
@@ -325,21 +326,21 @@ def main() -> None:
 
     if os.path.exists(ecmwf_parquet_file):
         station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
-            load_ecmwf_parquet_at_stations_and_grid(
+            load_ecmwf_runs_at_stations_and_grid(
                 parquet_path=ecmwf_parquet_file,
                 station_lats=lats, station_lons=lons,
-                features=ecmwf_features, timestamps=timestamps,
+                features=ecmwf_features, run_times=run_times, horizon=H_fore,
                 next_n_grid_per_station=next_n_ecmwf,
             )
         logger.info("ECMWF grid nodes: %d", len(ecmwf_coords))
     else:
         logger.warning("ECMWF parquet not found at %s — using zeros", ecmwf_parquet_file)
-        station_ecmwf_nwp = np.zeros((T, len(all_ids), E2), dtype=np.float32)
+        station_ecmwf_nwp = np.zeros((R, H_fore, len(all_ids), E2), dtype=np.float32)
         ec_lats = np.arange(47.5, 55.0, 0.5)
         ec_lons = np.arange(6.0,  15.5, 0.5)
         eg, lg  = np.meshgrid(ec_lats, ec_lons)
         ecmwf_coords = np.stack([eg.ravel(), lg.ravel()], axis=1).astype(np.float32)
-        ecmwf_nwp    = np.zeros((T, len(ecmwf_coords), E2), dtype=np.float32)
+        ecmwf_nwp    = np.zeros((R, H_fore, len(ecmwf_coords), E2), dtype=np.float32)
         ecmwf_alts   = np.zeros(len(ecmwf_coords), dtype=np.float32)
 
     # ── NWP altitudes ────────────────────────────────────────────────────
@@ -380,13 +381,13 @@ def main() -> None:
     ).reshape(R, 48, N_igrid, I2)
 
     e2_scaler = StandardScaler()
-    e2_scaler.fit(station_ecmwf_nwp[:split_t, :N_train].reshape(-1, E2))
+    e2_scaler.fit(station_ecmwf_nwp[train_r_mask][:, :, :N_train].reshape(-1, E2))
     station_ecmwf_nwp_scaled = e2_scaler.transform(
         station_ecmwf_nwp.reshape(-1, E2)
-    ).reshape(T, len(all_ids), E2)
+    ).reshape(R, H_fore, len(all_ids), E2)
     ecmwf_nwp_scaled = e2_scaler.transform(
         ecmwf_nwp.reshape(-1, E2)
-    ).reshape(T, len(ecmwf_coords), E2)
+    ).reshape(R, H_fore, len(ecmwf_coords), E2)
 
     stat_scaler = StandardScaler()
     raw_static  = np.stack([lats, lons, alts], axis=1).astype(np.float32)

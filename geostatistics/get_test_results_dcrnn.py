@@ -46,6 +46,7 @@ from geostatistics.train_stgnn2 import (
     load_station_metadata,
     load_icond2_ml_runs,
     load_ecmwf_parquet_at_stations_and_grid,
+    load_ecmwf_runs_at_stations_and_grid,
     load_nwp_elevations,
     impute_meas_raw_from_interpol,
     impute_meas_raw_solar,
@@ -415,21 +416,21 @@ def main() -> None:
     E2 = len(ecmwf_features)
     if os.path.exists(ecmwf_parquet_file):
         station_ecmwf_nwp, ecmwf_coords, ecmwf_nwp, ecmwf_alts = \
-            load_ecmwf_parquet_at_stations_and_grid(
+            load_ecmwf_runs_at_stations_and_grid(
                 parquet_path=ecmwf_parquet_file, station_lats=lats, station_lons=lons,
-                features=ecmwf_features, timestamps=timestamps,
+                features=ecmwf_features, run_times=run_times, horizon=H_fore,
                 next_n_grid_per_station=dcrnn_cfg.get("next_n_ecmwf", 4)
             )
     else:
         logger.warning("ECMWF parquet not found — using zeros")
-        station_ecmwf_nwp = np.zeros((T, len(all_ids), E2), dtype=np.float32)
+        station_ecmwf_nwp = np.zeros((R, H_fore, len(all_ids), E2), dtype=np.float32)
         ecmwf_coords = np.zeros((1, 2), dtype=np.float32)
-        ecmwf_nwp = np.zeros((T, 1, E2), dtype=np.float32)
+        ecmwf_nwp = np.zeros((R, H_fore, 1, E2), dtype=np.float32)
         ecmwf_alts = np.zeros(1, dtype=np.float32)
 
     # dir_in_deg ECMWF encoding (applied after loading, before scaling) —
     # mirror train_dcrnn.py so ECMWF channels match the trained model.
-    if e2_mode == "dir_in_deg" and station_ecmwf_nwp.shape[2] > 0:
+    if e2_mode == "dir_in_deg" and station_ecmwf_nwp.shape[-1] > 0:
         ecmwf_features_pre = list(ecmwf_features)
         station_ecmwf_nwp, ecmwf_features = apply_dir_encoding(station_ecmwf_nwp, ecmwf_features_pre)
         ecmwf_nwp, _                      = apply_dir_encoding(ecmwf_nwp, ecmwf_features_pre)
@@ -477,9 +478,9 @@ def main() -> None:
     ).reshape(R, _L_i2, N_igrid, len(icond2_features))
 
     e2_scaler = StandardScaler()
-    e2_scaler.fit(station_ecmwf_nwp[:split_t, :N_train].reshape(-1, E2))
-    station_ecmwf_scaled = e2_scaler.transform(station_ecmwf_nwp.reshape(-1, E2)).reshape(T, len(all_ids), E2)
-    ecmwf_nwp_scaled = e2_scaler.transform(ecmwf_nwp.reshape(-1, E2)).reshape(T, len(ecmwf_coords), E2)
+    e2_scaler.fit(station_ecmwf_nwp[train_r_mask][:, :, :N_train].reshape(-1, E2))
+    station_ecmwf_scaled = e2_scaler.transform(station_ecmwf_nwp.reshape(-1, E2)).reshape(R, H_fore, len(all_ids), E2)
+    ecmwf_nwp_scaled = e2_scaler.transform(ecmwf_nwp.reshape(-1, E2)).reshape(R, H_fore, len(ecmwf_coords), E2)
 
     stat_scaler = StandardScaler()
     raw_static  = np.stack([lats, lons, alts], axis=1).astype(np.float32)
@@ -644,7 +645,7 @@ def main() -> None:
         from geostatistics.train_stgnn2 import exclude_run_pairs_with_ecmwf_nan
         _n_before = len(test_run_pairs)
         test_run_pairs = exclude_run_pairs_with_ecmwf_nan(
-            test_run_pairs, _ecmwf_nan_arrays, timestamps, H_hist, H_fore,
+            test_run_pairs, _ecmwf_nan_arrays, run_times, H_hist, H_fore,
         )
         if len(test_run_pairs) != _n_before:
             logger.info("Test run pairs nach ECMWF-NaN-Ausschluss: %d (-%d)",

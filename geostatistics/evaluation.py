@@ -117,14 +117,21 @@ def build_eval_batch(
         grid_icond2_runs_scaled[r_curr],
     ], axis=0)                                                   # (96, N_grid, I2)
 
-    e2_grid_full = ecmwf_nwp_scaled[t_hist_abs:t_run_abs + H_fore]   # (96, N_ecmwf, E2)
+    # HRES lauf-indiziert wie ICON-D2 darueber (seit 2026-09-24)
+    e2_grid_full = np.concatenate([
+        ecmwf_nwp_scaled[r_hist],
+        ecmwf_nwp_scaled[r_curr],
+    ], axis=0)                                                   # (96, N_ecmwf, E2)
     if station_k_nearest_ecmwf is not None:
         # k naechste ECMWF-Punkte konkateniert, spiegelbildlich zu ICON-D2 oben
         ke_idx  = station_k_nearest_ecmwf[all_global]            # (N_all, k_e)
         e2_full = e2_grid_full[:, ke_idx, :].transpose(1, 0, 2, 3).reshape(
             N_all, e2_grid_full.shape[0], -1)                    # (N_all, 96, k_e*E2)
     else:
-        e2_full = station_ecmwf_nwp_scaled[t_hist_abs:t_run_abs + H_fore, :, :][:, all_global, :]
+        e2_full = np.concatenate([
+            station_ecmwf_nwp_scaled[r_hist],
+            station_ecmwf_nwp_scaled[r_curr],
+        ], axis=0)[:, all_global, :]
         e2_full = e2_full.transpose(1, 0, 2)                     # (N_all, 96, E2)
 
     meas_hist = station_meas_scaled[t_hist_abs:t_run_abs, :, :][:, all_global, :].copy()
