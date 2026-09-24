@@ -163,4 +163,9 @@ t_run - 48h              t_run              t_run + 48h
 - **NWP-Sequenz:** `concat(runs[t_run - 48h], runs[t_run])` → `(96, node, feat)`
 - **Messungen:** nur `[t_run-48h, t_run)`, für Forecast-Periode auf 0 gesetzt
 - **ECMWF:** für jeden ICON-D2 Run den neuesten ECMWF-Run `≤ t_run` nehmen, auf valid_time mergen
+  — **die Implementierung hat das bis zum 2026-09-24 nicht getan**: sie nahm je
+  gültiger Stunde den jüngsten Lauf im Archiv, unabhängig von `t_run`, und las
+  damit für einen ICON-D2-Lauf um 09 UTC 46 von 48 Stunden aus Läufen, die es zu
+  dem Zeitpunkt noch nicht gab. Behoben, siehe
+  [`hres_run_indexing_20260924.md`](hres_run_indexing_20260924.md).
 - **Training-Indices:** alle gültigen Runs wo auch der History-Run `(t_run - 48h)` existiert
