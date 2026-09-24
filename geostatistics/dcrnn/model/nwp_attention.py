@@ -173,7 +173,7 @@ Column 0 (distance) is normalised by a *graph-dependent* scalar
 forward() time — see graph_builder.py:_build_nwp_to_station_edges). Column
 ``altitude_diff_col()`` (usually 3, but see DCRNNConfig.altitude_diff_col()
 for why it is derived rather than hardcoded) is normalised by a *fixed
-literal*, ``_ALT_COL_NORM_M = 3000.0`` metres, hardcoded in
+literal*, ``_ALT_COL_NORM_M = 500.0`` metres, hardcoded in
 stgnn/utils/spatial.py:edge_features() — NOT graph-dependent.
 
 Plain "idw" never needed to know either constant: it only ever computes a
@@ -257,8 +257,8 @@ from torch_geometric.utils import scatter
 
 _IDW_EPS = 1e-6      # floor on distance (any unit) before the ratio/power law
 _DIST_COL = 0         # edge_attr column holding normalised distance (see module docstring)
-_ALT_COL_NORM_M = 3000.0  # MUST match stgnn/utils/spatial.py:edge_features()'s altitude_diff
-                           # normalisation literal ("rough normalisation: +-3000 m range -> +-1").
+_ALT_COL_NORM_M = 500.0   # MUST match stgnn/utils/spatial.py:edge_features()'s altitude_diff
+                           # normalisation literal (/500, clipped to +-3, since 2026-09-24).
                            # Not derived/imported from there because edge_features() has no public
                            # constant to import; if that literal ever changes, this one has to
                            # change with it — deliberately loud about that coupling here.
@@ -328,7 +328,7 @@ def _idw_alt_distance_km(
     max_dist_km (recovered via DCRNNConfig.attach_nwp_geometry, see there)
     recovers physical km.
 
-    edge_attr[:, alt_col] is clip((dst_alt - src_alt) / _ALT_COL_NORM_M, -1, 1);
+    edge_attr[:, alt_col] is clip((dst_alt - src_alt) / _ALT_COL_NORM_M, -3, 3);
     multiplying back by _ALT_COL_NORM_M and converting m -> km recovers the
     (signed) physical height difference. Only its magnitude matters here since
     it is squared.

@@ -201,8 +201,16 @@ def edge_features(
 
     if use_altitude_diff and src_alt is not None and dst_alt is not None:
         diff = (dst_alt - src_alt).reshape(-1, 1)
-        # rough normalisation: ±3000 m range → ±1
-        parts.append(np.clip(diff / 3000.0, -1.0, 1.0))
+        # Normalisation matched to the homogeneous sampler used by MTGNN
+        # (homo_sampler._init_grid_knn: alt_diff / 500, clipped to +-3), so
+        # that both model paths see the altitude difference on one scale.
+        # Was /3000 clipped to +-1 until 2026-09-24. That literal was sized
+        # for station-to-station edges; on grid-to-station edges, where the
+        # real differences are mostly below 200 m, it squeezed the feature
+        # into +-0.07 and gave the DCRNN attention a far flatter altitude
+        # signal than MTGNN sees. _ALT_COL_NORM_M in
+        # dcrnn/model/nwp_attention.py MUST equal the literal below.
+        parts.append(np.clip(diff / 500.0, -3.0, 3.0))
 
     if topo_feature_names:
         for name in topo_feature_names:
