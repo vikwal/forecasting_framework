@@ -8,6 +8,8 @@ features and NWP grid-point lookup over regional domains.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from pyproj import Geod
 from scipy.spatial import Delaunay
@@ -146,6 +148,17 @@ def delaunay_edges(coords: np.ndarray) -> np.ndarray:
     return np.array(sorted(edges), dtype=np.int64)
 
 
+# Altitude-difference normalisation of edge_features(). Default since
+# 2026-09-24: /500 clipped to +-3, matching homo_sampler._init_grid_knn so
+# that the DCRNN and MTGNN paths present the feature on one scale. The two
+# environment variables exist so that the previous convention (/3000 clipped
+# to +-1) can be reproduced at the same commit for an A/B control; without
+# them the control would also carry every other change made since August.
+# dcrnn/model/nwp_attention.py reads ALT_DIFF_NORM_M as well and MUST agree.
+ALT_DIFF_NORM_M = float(os.environ.get("ALT_DIFF_NORM_M", "500"))
+ALT_DIFF_CLIP = float(os.environ.get("ALT_DIFF_CLIP", "3"))
+
+
 def edge_features(
     src_coords: np.ndarray,
     dst_coords: np.ndarray,
@@ -210,7 +223,8 @@ def edge_features(
         # into +-0.07 and gave the DCRNN attention a far flatter altitude
         # signal than MTGNN sees. _ALT_COL_NORM_M in
         # dcrnn/model/nwp_attention.py MUST equal the literal below.
-        parts.append(np.clip(diff / 500.0, -3.0, 3.0))
+        parts.append(np.clip(diff / ALT_DIFF_NORM_M,
+                             -ALT_DIFF_CLIP, ALT_DIFF_CLIP))
 
     if topo_feature_names:
         for name in topo_feature_names:

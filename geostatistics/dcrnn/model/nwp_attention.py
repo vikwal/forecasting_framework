@@ -248,6 +248,7 @@ alpha_alt=100).
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import torch.nn as nn
@@ -257,7 +258,8 @@ from torch_geometric.utils import scatter
 
 _IDW_EPS = 1e-6      # floor on distance (any unit) before the ratio/power law
 _DIST_COL = 0         # edge_attr column holding normalised distance (see module docstring)
-_ALT_COL_NORM_M = 500.0   # MUST match stgnn/utils/spatial.py:edge_features()'s altitude_diff
+_ALT_COL_NORM_M = float(os.environ.get("ALT_DIFF_NORM_M", "500"))
+                          # MUST match stgnn/utils/spatial.py:edge_features()'s altitude_diff
                            # normalisation literal (/500, clipped to +-3, since 2026-09-24).
                            # Not derived/imported from there because edge_features() has no public
                            # constant to import; if that literal ever changes, this one has to
