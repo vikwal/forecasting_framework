@@ -351,7 +351,7 @@ def main() -> None:
             logger.info("Loading ECMWF NWP (%d features, k=%d) …", len(ecmwf_features), next_n_ecmwf)
             _, ecmwf_coords, grid_ecmwf_runs, _ = load_ecmwf_runs_at_stations_and_grid(
                 parquet_path=ecmwf_path, station_lats=lats, station_lons=lons,
-                features=ecmwf_features, run_times=run_times, horizon=F_h,
+                features=ecmwf_features, run_times=run_times, freq_h=data_cfg.get("freq", "1h"), horizon=F_h,
                 next_n_grid_per_station=next_n_ecmwf,
             )
             if e2_mode == "dir_in_deg":

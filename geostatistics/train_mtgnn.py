@@ -588,7 +588,7 @@ def main() -> None:
                 station_lats=lats,
                 station_lons=lons,
                 features=ecmwf_features,
-                run_times=run_times,
+                run_times=run_times, freq_h=data_cfg.get("freq", "1h"),
                 horizon=F_h,
                 next_n_grid_per_station=next_n_ecmwf,
             )

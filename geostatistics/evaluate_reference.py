@@ -414,7 +414,7 @@ def main() -> None:
             station_lats=lats,
             station_lons=lons,
             features=ecmwf_features_load,
-            run_times=run_times, horizon=F_h,
+            run_times=run_times, freq_h=data_cfg.get("freq", "1h"), horizon=F_h,
             next_n_grid_per_station=1,
         )
         # station_ecmwf_nwp is already resolved to each station's own nearest grid

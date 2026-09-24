@@ -805,7 +805,7 @@ def main() -> None:
                 load_ecmwf_runs_at_stations_and_grid(
                     parquet_path=ecmwf_parquet_file,
                     station_lats=lats, station_lons=lons,
-                    features=ecmwf_features, run_times=run_times,
+                    features=ecmwf_features, run_times=run_times, freq_h=data_cfg.get("freq", "1h"),
                     horizon=F_h,
                     next_n_grid_per_station=next_n_ecmwf,
                 )

@@ -916,6 +916,13 @@ def load_ecmwf_at_stations_and_grid(
     return station_nwp, grid_coords, grid_nwp, grid_alts
 
 
+
+def _freq_hours(freq: str | float) -> float:
+    """Zielschrittweite in Stunden. "1h" -> 1.0, "30min" -> 0.5."""
+    if isinstance(freq, (int, float)):
+        return float(freq)
+    return pd.Timedelta(freq).total_seconds() / 3600.0
+
 def _ecmwf_run_for(run_time: pd.Timestamp, hres_starts) -> pd.Timestamp | None:
     """The HRES run a forecast issued at ``run_time`` could actually have used.
 
@@ -935,6 +942,7 @@ def load_ecmwf_runs_at_stations_and_grid(
     station_lons: np.ndarray,
     features: list[str],
     run_times: pd.DatetimeIndex,
+    freq_h: str | float,
     horizon: int = 48,
     next_n_grid_per_station: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -951,15 +959,21 @@ def load_ecmwf_runs_at_stations_and_grid(
     Returns
     -------
     station_runs : (R, horizon, N_stations, F) float32
+
+    ``freq_h`` ist die Schrittweite der Zielachse ("1h" fuer Wind, "30min" fuer
+    Solar) und ist Pflicht, damit eine vergessene Aufrufstelle auffaellt statt
+    still die falschen Vorlaufstunden zu ziehen.
     grid_coords  : (N_grid, 2) [lat, lon]
     grid_runs    : (R, horizon, N_grid, F) float32
     grid_alts    : (N_grid,) float32 zeros
     """
-    if any(_ist_akkumuliertes_ecmwf_feature(f) for f in features):
-        raise NotImplementedError(
-            "load_ecmwf_runs_at_stations_and_grid handles instantaneous fields only; "
-            "accumulated ECMWF features need the interval logic of _reindex_nwp_to_grid."
-        )
+    # HRES liegt stuendlich vor, die Zielachse kann feiner sein (Solar: 30 min).
+    # Gespiegelt aus _reindex_nwp_to_grid: der Stundenwert wird ueber seine
+    # Teilschritte konstant gehalten (floor), und ein akkumuliertes Feld, das
+    # das Intervall (V-1h, V] beschreibt, wird um einen Quellschritt nach vorn
+    # geholt, damit ein linksbuendiges Ziel T das Intervall [T, T+1h) bekommt.
+    step_h = _freq_hours(freq_h)
+    acc = np.array([_ist_akkumuliertes_ecmwf_feature(f) for f in features], dtype=bool)
 
     run_times = pd.DatetimeIndex(run_times)
     R, F, Ns = len(run_times), len(features), len(station_lats)
@@ -992,7 +1006,9 @@ def load_ecmwf_runs_at_stations_and_grid(
     N_grid = len(grid_keys)
     grid_runs = np.full((R, horizon, N_grid, F), np.nan, dtype=np.float32)
 
-    leads = np.arange(1, horizon + 1)
+    # Versatz in Stunden je Vorlaufschritt; floor haelt den Stundenwert ueber
+    # die Teilschritte konstant, +1 verschiebt die akkumulierten Felder.
+    off_h = np.floor(np.arange(1, horizon + 1) * step_h).astype(int)
     for gi, key in enumerate(tqdm(grid_keys, desc="Loading ECMWF per ICON-D2 run")):
         fpath = path_by_key.get((round(float(key[0]), 5), round(float(key[1]), 5)))
         if not fpath:
@@ -1015,11 +1031,12 @@ def load_ecmwf_runs_at_stations_and_grid(
             if hs is None:
                 continue
             lead0 = int((t0 - hs).total_seconds() // 3600)
-            want = lead0 + leads
-            ok = want <= max_lead
-            if not ok.any():
-                continue
-            grid_runs[ri, ok, gi, :] = cube[start_pos[hs], want[ok], :]
+            for fi in range(F):
+                want = lead0 + off_h + (1 if acc[fi] else 0)
+                ok = (want >= 0) & (want <= max_lead)
+                if not ok.any():
+                    continue
+                grid_runs[ri, ok, gi, fi] = cube[start_pos[hs], want[ok], fi]
 
     station_runs = np.full((R, horizon, Ns, F), np.nan, dtype=np.float32)
     for si in range(Ns):
@@ -1647,7 +1664,7 @@ def main() -> None:
             load_ecmwf_runs_at_stations_and_grid(
                 parquet_path=ecmwf_parquet_source,
                 station_lats=lats, station_lons=lons,
-                features=ecmwf_features, run_times=run_times, horizon=F_h,
+                features=ecmwf_features, run_times=run_times, freq_h=freq_h, horizon=F_h,
                 next_n_grid_per_station=stgnn_cfg.get("next_n_ecmwf", 4),
             )
         logger.info("ECMWF grid nodes: %d  features: %s", len(ecmwf_coords), ecmwf_features)
