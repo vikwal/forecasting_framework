@@ -916,6 +916,124 @@ def load_ecmwf_at_stations_and_grid(
     return station_nwp, grid_coords, grid_nwp, grid_alts
 
 
+def _ecmwf_run_for(run_time: pd.Timestamp, hres_starts) -> pd.Timestamp | None:
+    """The HRES run a forecast issued at ``run_time`` could actually have used.
+
+    The newest HRES run whose initialisation is at or before the ICON-D2 run,
+    i.e. the 0000 UTC run for the 0600 and 0900 UTC ICON-D2 runs and the 1200
+    UTC run for the 1200 and 1500 UTC ones. Returns None if no such run exists
+    (only at the very start of the archive).
+    """
+    idx = pd.DatetimeIndex(hres_starts)
+    i = int(idx.searchsorted(pd.Timestamp(run_time), side="right")) - 1
+    return None if i < 0 else idx[i]
+
+
+def load_ecmwf_runs_at_stations_and_grid(
+    parquet_path: str,
+    station_lats: np.ndarray,
+    station_lons: np.ndarray,
+    features: list[str],
+    run_times: pd.DatetimeIndex,
+    horizon: int = 48,
+    next_n_grid_per_station: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load HRES per ICON-D2 run, the way an operational forecast would see it.
+
+    The valid-time indexed loader above takes, for every valid hour, the newest
+    HRES run in the archive. For an ICON-D2 run at 0900 UTC that pulls 46 of the
+    48 forecast hours from runs initialised 3 to 39 h AFTER the ICON-D2 run, and
+    it caps the HRES lead time at 11 h. Measured consequence: raw HRES showed no
+    error growth at all over the 48 h horizon while raw ICON-D2 grew from 1.236
+    to 1.472 m/s. This function pins each ICON-D2 run to the newest HRES run
+    available at that time instead, so the HRES lead grows with the ICON-D2 lead.
+
+    Returns
+    -------
+    station_runs : (R, horizon, N_stations, F) float32
+    grid_coords  : (N_grid, 2) [lat, lon]
+    grid_runs    : (R, horizon, N_grid, F) float32
+    grid_alts    : (N_grid,) float32 zeros
+    """
+    if any(_ist_akkumuliertes_ecmwf_feature(f) for f in features):
+        raise NotImplementedError(
+            "load_ecmwf_runs_at_stations_and_grid handles instantaneous fields only; "
+            "accumulated ECMWF features need the interval logic of _reindex_nwp_to_grid."
+        )
+
+    run_times = pd.DatetimeIndex(run_times)
+    R, F, Ns = len(run_times), len(features), len(station_lats)
+
+    parquet_source = Path(parquet_path)
+    parent_has_files = parquet_source.is_dir() and any(parquet_source.glob("*_sl.parquet"))
+    if parent_has_files:
+        split_dir = parquet_source
+    elif parquet_source.is_dir() and (parquet_source / "SL").is_dir():
+        split_dir = parquet_source / "SL"
+    else:
+        split_dir = parquet_source
+    split_files = _list_ecmwf_split_files(str(split_dir))
+    if not split_files:
+        raise FileNotFoundError(f"No '*_sl.parquet' files found in {split_dir}")
+
+    unique_grids = np.array([(lat, lon) for lat, lon, _ in split_files], dtype=np.float64)
+    path_by_key = {(round(float(la), 5), round(float(lo), 5)): fp for la, lo, fp in split_files}
+
+    needed: set[tuple[float, float]] = set()
+    for si in range(Ns):
+        _, _, dists = _GEOD.inv(
+            np.full(len(unique_grids), station_lons[si]),
+            np.full(len(unique_grids), station_lats[si]),
+            unique_grids[:, 1], unique_grids[:, 0])
+        for i in np.argsort(dists)[:next_n_grid_per_station]:
+            needed.add(tuple(unique_grids[i]))
+    grid_keys = sorted(needed)
+    grid_coords = np.array(grid_keys, dtype=np.float32)
+    N_grid = len(grid_keys)
+    grid_runs = np.full((R, horizon, N_grid, F), np.nan, dtype=np.float32)
+
+    leads = np.arange(1, horizon + 1)
+    for gi, key in enumerate(tqdm(grid_keys, desc="Loading ECMWF per ICON-D2 run")):
+        fpath = path_by_key.get((round(float(key[0]), 5), round(float(key[1]), 5)))
+        if not fpath:
+            continue
+        gdf = pd.read_parquet(fpath)
+        gdf["starttime"] = pd.to_datetime(gdf["starttime"], utc=True)
+        gdf["forecasttime"] = gdf["forecasttime"].astype(int)
+        gdf = _compute_derived_features(gdf, features)
+        starts = pd.DatetimeIndex(gdf["starttime"].unique()).sort_values()
+        start_pos = {t: i for i, t in enumerate(starts)}
+        max_lead = int(gdf["forecasttime"].max())
+        cube = np.full((len(starts), max_lead + 1, F), np.nan, dtype=np.float32)
+        si_idx = gdf["starttime"].map(start_pos).to_numpy()
+        li_idx = gdf["forecasttime"].to_numpy()
+        for fi, feat in enumerate(features):
+            if feat in gdf.columns:
+                cube[si_idx, li_idx, fi] = gdf[feat].to_numpy(dtype=np.float32)
+        for ri, t0 in enumerate(run_times):
+            hs = _ecmwf_run_for(t0, starts)
+            if hs is None:
+                continue
+            lead0 = int((t0 - hs).total_seconds() // 3600)
+            want = lead0 + leads
+            ok = want <= max_lead
+            if not ok.any():
+                continue
+            grid_runs[ri, ok, gi, :] = cube[start_pos[hs], want[ok], :]
+
+    station_runs = np.full((R, horizon, Ns, F), np.nan, dtype=np.float32)
+    for si in range(Ns):
+        _, _, dists = _GEOD.inv(
+            np.full(N_grid, station_lons[si]), np.full(N_grid, station_lats[si]),
+            grid_coords[:, 1].astype(float), grid_coords[:, 0].astype(float))
+        station_runs[:, :, si, :] = grid_runs[:, :, int(np.argmin(dists)), :]
+
+    covered = np.isfinite(grid_runs).any(axis=(1, 2, 3)).sum()
+    logger.info("ECMWF per run: %d grid nodes, %d of %d ICON-D2 runs covered",
+                N_grid, int(covered), R)
+    return station_runs, grid_coords, grid_runs, np.zeros(N_grid, dtype=np.float32)
+
+
 def load_ecmwf_parquet_at_stations_and_grid(
     parquet_path: str,
     station_lats: np.ndarray,
