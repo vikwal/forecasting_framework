@@ -456,6 +456,7 @@ def test_run_simulation_smoke(cpu_only, strategy):
     history, weights = _run(strategy)
     df = history['metrics_aggregated']
     assert list(df.index) == [1, 2] and np.isfinite(df['val_rmse']).all()
+    assert history['last_round'] == 2
     assert set(weights) == {'A', 'B'}
     assert history['comm_stats']['sync_steps'] == (8 if strategy == 'fedgradient' else 2)  # 4 batches/round
     assert history['comm_stats']['total_upload_bytes'] > 0
@@ -472,9 +473,20 @@ def test_fedgradient_resume_equals_uninterrupted_run(cpu_only, tmp_path):
     ck = fg.load_checkpoint(os.path.join(tmp_path, 'last.pt'))
     assert ck['round'] == 2 and ck['server_optimizer']['state']
     resumed, w_res = _run('fedgradient', n_rounds=3, resume=os.path.join(tmp_path, 'last.pt'))
-    assert list(resumed['metrics_aggregated'].index) == [1, 2, 3]
+    assert list(resumed['metrics_aggregated'].index) == [1, 2, 3] and resumed['last_round'] == 3
     assert resumed['comm_stats']['sync_steps'] == full['comm_stats']['sync_steps']
     best_full = full['best_round']
     assert resumed['best_round'] == best_full
     for k in w_full['A']:
         assert torch.allclose(w_full['A'][k], w_res['A'][k], atol=1e-6), k
+
+
+def test_last_round_is_the_stopping_round(cpu_only):
+    cfg = _sim_config('fedgradient', n_rounds=6)
+    cfg['fl']['global_early_stopping'] = {'enabled': True, 'patience': 1, 'min_delta': 10.0}
+    hp = _sim_hp('fedgradient')
+    hp['n_rounds'] = 6
+    history, _ = federated.run_simulation(_partitions(), cfg, hp)
+    # round 1 improves on inf, round 2 cannot beat it by min_delta -> stop after round 2
+    assert history['early_stopped'] and history['last_round'] == 2 and history['best_round'] == 1
+    assert list(history['metrics_aggregated'].index) == [1, 2]

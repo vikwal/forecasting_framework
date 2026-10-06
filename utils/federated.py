@@ -1313,9 +1313,7 @@ def run_simulation(partitions: Any,
 
     client_results = []
     round_num = start_round - 1
-    for round_num in range(start_round, n_rounds + 1):
-        if stopped:
-            break
+    for round_num in (range(start_round, n_rounds + 1) if not stopped else ()):
         history[round_num] = {}
         logging.debug(f"--- Round {round_num}/{n_rounds} ---")
         round_start_time = time.time()
@@ -1462,6 +1460,8 @@ def run_simulation(partitions: Any,
         logging.info("  ".join(_parts))
 
         _save_checkpoint(round_num)
+        if stopped:
+            break
 
     end_time = time.time()
     logging.info(f"--- Simulation terminated in {end_time - start_time:.2f} seconds ---")
