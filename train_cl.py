@@ -185,6 +185,23 @@ def main() -> None:
         )
         logging.info("Loaded %d val stations, %d training stations.", len(val_dfs), len(dfs))
 
+    # data.holdout_files: stations evaluated with the trained model only -- no training, no
+    # early stopping (unlike val_files, which replace the validation/test set). Used for the
+    # CL reference of the FL runs (docs/parks_v1.md), where early stopping runs on `files`.
+    holdout_dfs = None
+    if config['data'].get('holdout_files') and not test_mode:
+        if config.get('params', {}).get('static_categorical'):
+            raise ValueError("holdout_files with a categorical static (park id): the holdout "
+                             "parks would be evaluated with untrained embedding rows")
+        holdout_dfs = preprocessing.get_data(
+            data_dir=data_dir,
+            config=config,
+            freq=freq,
+            features=features,
+            files_key='holdout_files',
+        )
+        logging.info("Loaded %d holdout stations (evaluation only).", len(holdout_dfs))
+
     # ── NaN audit ────────────────────────────────────────────────────────────
     target_col_data = preprocessing.get_target_cols(config)[0]
     handle_nans = config.get('data', {}).get('handle_nans', 'warn')
@@ -566,6 +583,15 @@ def main() -> None:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             gc.collect()
 
+        if holdout_dfs is not None:
+            if len(test_periods) > 1:
+                raise NotImplementedError("holdout_files is implemented for a single test period")
+            holdout_generator = tools.create_data_generator(
+                holdout_dfs, period_config, features, scaler_x=global_scaler_x,
+                scaler_y=global_scaler_y if fit_scaler_y else None)
+            _, _, _, _, holdout_test_data, _ = tools.combine_datasets_efficiently(holdout_generator)
+            test_data = {**test_data, **holdout_test_data}
+
         # --- GENERATE PREDICTIONS AND EVALUATE PER PARK ---
         logging.info('Start evaluation pipeline...')
 
@@ -576,6 +602,8 @@ def main() -> None:
             park_df = dfs.get(park_key)
             if park_df is None and val_dfs:
                 park_df = val_dfs.get(park_key)
+            if park_df is None and holdout_dfs:
+                park_df = holdout_dfs.get(park_key)
             if park_df is None:
                 logging.warning(f"No raw data found for park {park_key}, skipping evaluation.")
                 continue

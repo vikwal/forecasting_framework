@@ -50,12 +50,24 @@ regional, N0–N3 überregional, je 10 Parks; `holdout` = 10 Parks). Strategie `
 |---|---|---|
 | `config_parks_v1_fl_fedgradient.yaml` | 80 Client-Parks | 80 + Holdout (`val_files`, globales Modell) |
 | `config_parks_v1_fl_fedgradient_parkid.yaml` | 80, Park-ID-Embedding (Codes global, zeilenweise Aggregation) | nur die 80 |
-| `config_parks_v1_cl80{,_parkid}.yaml` | CL-Referenz auf denselben 80 Parks | wie FL |
+| `config_parks_v1_cl80{,_parkid}.yaml` | CL-Referenz auf denselben 80 Parks, Early Stopping auf ihnen | wie FL; Holdout über `data.holdout_files` |
 | `…_smoke.yaml` | 2 Clients × 2 Parks, 2 Runden | |
 
 ```bash
 python train_fl.py -c configs/parks_v1/config_parks_v1_fl_fedgradient -m tft   # 8 Clients, je 1 GPU
 python train_cl.py -c configs/parks_v1/config_parks_v1_cl80 -m tft
 ```
-Vergleich FedAvg: dieselbe Config mit `fl.strategy: fedavg` (`n_local_epochs: 1`).
+Vergleich FedAvg: `config_parks_v1_fl_fedavg{,_parkid}.yaml` (dieselbe Config, `fl.strategy: fedavg`,
+`n_local_epochs: 1`).
+
+`data.holdout_files` (nur `train_cl.py`): Stationen, die nach dem Training mit demselben Modell
+und Scaler bewertet werden, ohne Training und ohne Early Stopping. `val_files` ersetzt in
+`train_cl.py` dagegen die Validierungs- und Testmenge (Early Stopping und Bewertung auf ihnen).
+In `train_fl.py` sind `val_files` reine Bewertungsparks.
+
+Ergebnisse 2026-10-06 (R² je Park auf 2024-08 … 2025-07, 80 Client-Parks, Mittel / Median):
+CL80 0,833 / 0,845, FedGradient 0,831 / 0,841, FedAvg 0,831 / 0,841; mit Park-ID CL80 0,861 /
+0,868, FedGradient 0,857 / 0,866, FedAvg 0,843 / 0,850 (nach 100 Runden noch nicht konvergiert).
+Holdout (10 Parks, ohne Park-ID): CL80 0,836, FedGradient 0,839, FedAvg 0,838.
+Bericht: `FL_Contribution/reports/fl_fedgradient_parks_v1.md`.
 Tests: `python -m pytest tests/test_fedgradient.py`.

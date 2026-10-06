@@ -1,6 +1,7 @@
 # CL reference for the FL runs (config_parks_v1_fl_fedgradient.yaml): config_parks_v1_cl.yaml
-# trained on the 80 client parks only (data.files, CSV order); the 10 holdout parks are
-# val_files (evaluation only).
+# trained on the 80 client parks only (data.files, CSV order; training and early stopping on
+# them, as in FL); the 10 holdout parks are holdout_files: evaluated with the trained model only
+# (val_files would replace the validation/early-stopping set).
 data:
   use_case: 'wind'
   path: !ENV '${DATA_ROOT}/synthetic/wind/parks_v1'
@@ -21,9 +22,9 @@ data:
           'SEL993861086927', 'SEL912467718001', 'SEL976587138088', 'SEL981593167083', 'SEL925665319789',
           'SEL960606996902', 'SEL937461669326', 'SEL938227856370', 'SEL976828877561', 'SEL913657221011',
           'SEL906726088325', 'SEL991588581619', 'SEL918588435674', 'SEL905943201210', 'SEL995278091327']
-  val_files: [
+  holdout_files: [
           'SEL973237169225', 'SEL946979148230', 'SEL956244291691', 'SEL915967155468', 'SEL945620760623',
-          'SEL970401215122', 'SEL951964547998', 'SEL977908977119', 'SEL989394978914', 'SEL998556473464']   # holdout parks (client 'holdout'), evaluation only
+          'SEL970401215122', 'SEL951964547998', 'SEL977908977119', 'SEL989394978914', 'SEL998556473464']   # client 'holdout', evaluation only
   stations_master: 'data/parks_v1/stations_master.csv'
   wind_parameter_file: 'data/parks_v1/wind_parameter.csv'
   turbine_parameter_file: 'data/parks_v1/turbine_parameter.csv'
