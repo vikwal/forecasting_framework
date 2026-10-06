@@ -131,6 +131,21 @@ class DataCache:
         _ecmwf_extra = {
             'next_n_grid_points_ecmwf': config['params'].get('next_n_grid_points_ecmwf'),
             'ecmwf_solar_path': config['data'].get('ecmwf_solar_path'),
+            # real MaStR parks (parks_v1): explicit target column/capacity, parameter
+            # tables outside data.path, nwp_ready store layout (site prefix, ECMWF per
+            # site and run) -- same rule: only hashed when set
+            'power_col': config['data'].get('power_col'),
+            'capacity_col': config['data'].get('capacity_col'),
+            'wind_parameter_file': config['data'].get('wind_parameter_file'),
+            'turbine_parameter_file': config['data'].get('turbine_parameter_file'),
+            'nwp_site_prefix': config['data'].get('nwp_site_prefix'),
+            'static_categorical': (tuple(config['params']['static_categorical'])
+                                   if config['params'].get('static_categorical') else None),
+            'ecmwf_layout': config['data'].get('ecmwf_layout'),
+            'ecmwf_path': config['data'].get('ecmwf_path') if config['data'].get('ecmwf_layout') else None,
+            'forecast_hours': (tuple(config['data']['forecast_hours'])
+                               if config['data'].get('ecmwf_layout') and config['data'].get('forecast_hours')
+                               else None),
         }
         for _k, _v in _ecmwf_extra.items():
             if _v is not None:

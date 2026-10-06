@@ -66,6 +66,9 @@ Skill_NWP, MultiIndex-Fallstricke), [predict_solar.md](docs/predict_solar.md)
 [icond2_database_integration.md](docs/icond2_database_integration.md),
 [spatial_interpolation.md](docs/spatial_interpolation.md)
 
+**Reale MaStR-Parks (parks_v1)** — [parks_v1.md](docs/parks_v1.md) (90 Parks, regulärer
+Wind-Pfad mit `power_col`/`nwp_site_prefix`/`ecmwf_layout: site_runs`, Configs `configs/parks_v1/`)
+
 **Modelle, Baselines, Ablationen** — [train_dcrnn.md](docs/train_dcrnn.md) (CLI,
 `--hpo-study`, Output-Format, Architektur-Updates Mai 2026),
 [baselines_implementation_spec.md](docs/baselines_implementation_spec.md),

@@ -5,7 +5,7 @@ implementation of Temporal Fusion Transformer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional, Any, List
 
 
 def _shape_predictions(predictions: torch.Tensor,
@@ -34,6 +34,20 @@ def _num_targets(config: Dict[str, Any]) -> int:
     return len(cols) if isinstance(cols, (list, tuple)) else 1
 
 
+def _static_cardinalities(config: Dict[str, Any], static_dim: int) -> Optional[List[int]]:
+    """Per static feature: number of categories (params.static_categorical, nn.Embedding)
+    or 0 (numeric, nn.Linear). None when no static feature is categorical."""
+    cats = config.get('params', {}).get('static_categorical') or []
+    if not cats or static_dim == 0:
+        return None
+    from utils.preprocessing import static_categories
+    statics = config['params'].get('static_features', []) or []
+    if len(statics) != static_dim:
+        raise ValueError(f"static_features {statics} do not match static_dim={static_dim}")
+    lists = static_categories(config)
+    return [len(lists[f]) if f in cats else 0 for f in statics]
+
+
 def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Module:
     """
     Factory function to create PyTorch models based on config.
@@ -50,6 +64,7 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             observed_dim=feature_dims['observed_dim'],
             known_dim=feature_dims['known_dim'],
             static_dim=feature_dims['static_dim'],
+            static_cardinalities=_static_cardinalities(config, feature_dims['static_dim']),
             hidden_dim=hyperparameters.get('hidden_size', hyperparameters.get('hidden_dim', 32)),
             num_heads=hyperparameters.get('attention_head_size', hyperparameters.get('n_heads', 4)),
             lookback=config['model']['lookback'],
@@ -98,6 +113,8 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
         tft_quantiles = config['model'].get('tft', {}).get('quantiles', None)
         num_quantiles = len(tft_quantiles) if tft_quantiles else 1
 
+        if config.get('params', {}).get('static_categorical'):
+            raise NotImplementedError("static_categorical is implemented for 'tft' only")
         model = TCN_TFT(
             observed_dim=feature_dims['observed_dim'],
             known_dim=feature_dims['known_dim'],
@@ -562,6 +579,7 @@ class TFT(nn.Module):
         rnn_type: str = 'lstm',
         num_quantiles: int = 1,
         num_targets: int = 1,
+        static_cardinalities: Optional[List[int]] = None,
     ):
         super().__init__()
 
@@ -583,10 +601,16 @@ class TFT(nn.Module):
         # === Feature Embedding Layers (Paper: raw → ξ) ===
         # Transform raw features to d_model dimension BEFORE variable selection
 
-        # Static feature embeddings
+        # Static feature embeddings: numeric -> nn.Linear(1, d); categorical
+        # (static_cardinalities[i] > 0, e.g. a park id) -> nn.Embedding(n, d)
+        self.static_cardinalities = list(static_cardinalities) if static_cardinalities else [0] * static_dim
+        if len(self.static_cardinalities) != static_dim:
+            raise ValueError("static_cardinalities must have one entry per static feature")
         if static_dim > 0:
             self.static_embed = nn.ModuleList([
-                nn.Linear(1, self.static_embedding_dim) for _ in range(static_dim)
+                nn.Embedding(n, self.static_embedding_dim) if n > 0
+                else nn.Linear(1, self.static_embedding_dim)
+                for n in self.static_cardinalities
             ])
 
         # Observed feature embeddings (time-varying, unknown future)
@@ -704,8 +728,13 @@ class TFT(nn.Module):
             # Embed each static feature: scalar → d_model
             static_embedded = []
             for i in range(self.static_dim):
-                feat = static[:, i:i+1]  # (batch, 1)
-                embedded = self.static_embed[i](feat)  # (batch, static_emb_dim)
+                if self.static_cardinalities[i] > 0:
+                    # category code arrives as float (after the dataframe pipeline)
+                    idx = static[:, i].round().long()  # (batch,)
+                    embedded = self.static_embed[i](idx)  # (batch, static_emb_dim)
+                else:
+                    feat = static[:, i:i+1]  # (batch, 1)
+                    embedded = self.static_embed[i](feat)  # (batch, static_emb_dim)
                 static_embedded.append(embedded)
 
             # Stack: (batch, static_dim, static_emb_dim)

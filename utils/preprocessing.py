@@ -76,6 +76,27 @@ def get_target_cols(config: dict, default: str = 'power') -> List[str]:
     return [str(data_cfg.get('target_col', default))]
 
 
+def static_categories(config: dict) -> Dict[str, list]:
+    """Category lists of the categorical static features (params.static_categorical).
+
+    Only 'park_id' is supported: its categories are the station/park ids in the order
+    data.files + val_files + test_files, so the integer code of a park is the same in
+    training, validation, testing and in the model's embedding table
+    (utils.models.get_model derives the cardinality from this list).
+    """
+    out = {}
+    for name in config.get('params', {}).get('static_categorical', []) or []:
+        if name != 'park_id':
+            raise ValueError(f"static_categorical: only 'park_id' is supported, got {name!r}")
+        ids = []
+        for key in ('files', 'val_files', 'test_files'):
+            for f in config.get('data', {}).get(key, []) or []:
+                if str(f) not in ids:
+                    ids.append(str(f))
+        out[name] = ids
+    return out
+
+
 def _get_data_from_config_files(config: dict,
                                 freq: str,
                                 features: dict = None,
@@ -483,7 +504,8 @@ def pipeline(data: pd.DataFrame,
                                              scaler_x=config.get('scaler_x', None),
                                              scaler_y=config.get('scaler_y', None),
                                              nwp_baseline_col=config.get('params', {}).get('nwp_baseline_col'),
-                                             test_split_optional=config.get('_test_split_optional', False))
+                                             test_split_optional=config.get('_test_split_optional', False),
+                                             categorical_static_cols=config['params'].get('static_categorical'))
     elif config['model']['name'] == 'chronos':
         prepared_data = prepare_data_for_chronos2(
             data=df,
@@ -1515,7 +1537,10 @@ def _process_forecast_hour(args):
     forecast_hour, config, station_id, station_lat, station_lon, next_n_grid_points, turbines = args
 
     try:
-        icon_d2_base_path = f"{config['data']['nwp_path']}/ML/{forecast_hour}/{station_id}"
+        # data.nwp_site_prefix: per-site directories named '<prefix><station_id>'
+        # (nwp_ready store: 'park_<lokation>'); default '' = plain station id
+        _site_dir = f"{config['data'].get('nwp_site_prefix', '')}{station_id}"
+        icon_d2_base_path = f"{config['data']['nwp_path']}/ML/{forecast_hour}/{_site_dir}"
 
         if not os.path.exists(icon_d2_base_path):
             logging.warning(f"Icon-D2 data path not found: {icon_d2_base_path}")
@@ -1979,6 +2004,67 @@ def _fetch_ecmwf_data_from_split_parquets(
     return pd.concat(frames, ignore_index=True)
 
 
+def _fetch_ecmwf_data_from_site_runs(
+    station_lat: float,
+    station_lon: float,
+    next_n_grid_points: int,
+    ecmwf_path: str,
+    site_dir: str,
+    raw_columns: list[str],
+    starttime_min: pd.Timestamp = None,
+    starttime_max: pd.Timestamp = None,
+    runs: tuple = ('00', '12'),
+) -> pd.DataFrame:
+    """
+    ECMWF from the per-site, per-run store of the point extraction (nwp_ready):
+    ``<ecmwf_path>/SL/<run>/<site_dir>/<lat>_<lon>_wind_sl.parquet``.
+
+    Grid points are pooled over the run directories, ranked by geodesic distance to
+    the station, and the nearest ``next_n_grid_points`` are returned with both runs
+    concatenated. Output format as `_fetch_ecmwf_data_from_split_parquets`
+    (starttime, forecasttime, rank, <raw_columns>, _st_key), so the run assignment
+    downstream (ICON run < 12 UTC -> ECMWF 00 UTC of the same day) is unchanged.
+    """
+    base = Path(ecmwf_path)
+    split_root = base / "SL" if (base / "SL").is_dir() else base
+    by_point: dict = {}
+    for run in runs:
+        run_dir = split_root / run / site_dir
+        if not run_dir.is_dir():
+            logging.warning(f"ECMWF run directory missing: {run_dir}")
+            continue
+        for p in run_dir.glob("*_wind_sl.parquet"):
+            coords = _parse_ecmwf_sl_filename(p.name)
+            if coords is not None:
+                by_point.setdefault(coords, []).append(str(p))
+    if not by_point:
+        return pd.DataFrame()
+
+    ranked = sorted(by_point.items(),
+                    key=lambda kv: geodesic((station_lat, station_lon), kv[0]).kilometers)
+    requested_cols = [re.sub(r"_(\d+m)$", r"\1", c) for c in raw_columns]
+    frames = []
+    for rank, (_coords, paths) in enumerate(ranked[:next_n_grid_points], start=1):
+        df = pd.concat([pd.read_parquet(fp) for fp in paths], ignore_index=True)
+        df["starttime"] = pd.to_datetime(df["starttime"], utc=True)
+        if starttime_min is not None and starttime_max is not None:
+            df = df[(df["starttime"] >= starttime_min) & (df["starttime"] <= starttime_max)]
+        missing = [c for c in requested_cols if c not in df.columns]
+        if missing:
+            logging.warning("ECMWF site_runs files %s missing columns: %s", paths, missing)
+        df = df[["starttime", "forecasttime"] + [c for c in requested_cols if c in df.columns]].copy()
+        df["forecasttime"] = df["forecasttime"].astype(int)
+        df["rank"] = int(rank)
+        df["_st_key"] = (
+            df["starttime"].dt.year * 1000000
+            + df["starttime"].dt.month * 10000
+            + df["starttime"].dt.day * 100
+            + df["starttime"].dt.hour
+        ).astype(np.int64)
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 @lru_cache(maxsize=4)
 def _load_topo_features_table(topo_features_path: str) -> pd.DataFrame:
     """Load + merge topo_features.csv (elevation/slope/aspect/tpi5/tdi/elev_std/
@@ -2184,8 +2270,13 @@ def preprocess_synth_wind_icond2(path: str,
         turbines = pd.DataFrame(columns=['hub_height'])
     else:
         # Load synthetic wind data and turbine parameters (analog zu openmeteo)
-        wind_parameter_path = os.path.join(config['data']['path'], 'wind_parameter.csv')
-        turbine_parameter_path = os.path.join(config['data']['path'], 'turbine_parameter.csv')
+        # data.wind_parameter_file / data.turbine_parameter_file: parameter tables outside
+        # data.path (real MaStR parks keep them next to the configs, the target data dir
+        # stays a pure release). Default unchanged: <data.path>/{wind,turbine}_parameter.csv
+        wind_parameter_path = (config['data'].get('wind_parameter_file')
+                               or os.path.join(config['data']['path'], 'wind_parameter.csv'))
+        turbine_parameter_path = (config['data'].get('turbine_parameter_file')
+                                  or os.path.join(config['data']['path'], 'turbine_parameter.csv'))
         power_curves_path = os.path.join(config['data']['power_curves_path'], 'turbine_power.csv')
 
         # Load synthetic wind data — prefer parquet, fall back to CSV
@@ -2235,7 +2326,20 @@ def preprocess_synth_wind_icond2(path: str,
         # Turbine handling (analog zu openmeteo)
         heights = []
 
-        if 'turbines' in config['params']:
+        _power_col = config['data'].get('power_col')
+        if _power_col:
+            # Real parks (parks_v1): the target is one finished park column (e.g.
+            # power_park = free-stream sum x wake factor), normalised by the registered
+            # capacity from wind_parameter (data.capacity_col, kW). Summing every column
+            # with 'power' in its name (branch below) would add power_t*, power_park_free
+            # and power_park on top of each other.
+            _wp_row = wind_parameter.loc[wind_parameter.park_id == station_id]
+            installed_capacity = float(_wp_row[config['data'].get('capacity_col', 'capacity_kw')].values[0]) * 1000.0
+            turbines = turbine_parameter.loc[turbine_parameter.park_id == station_id]
+            heights = turbines['hub_height'].values
+            df_synth['power'] = df_synth[_power_col]
+            df_synth = df_synth[['power']]
+        elif 'turbines' in config['params']:
             turbines_list = config['params']['turbines']
             if 'station_turbine_type' in config['params']:
                 # Deterministic assignment from station_turbine_assignments.csv
@@ -2280,7 +2384,9 @@ def preprocess_synth_wind_icond2(path: str,
             static_data['park_age'] = park_age_years
             static_data['installed_capacity'] = installed_capacity
             static_data['altitude'] = altitude
-            for index, turbine in turbines.iterrows():
+            # power_col mode (real parks): several turbine groups per park, so one
+            # hub_height/rotor/cut_in per park does not exist -> no per-turbine statics
+            for index, turbine in ([] if _power_col else turbines.iterrows()):
                 turbine_name = turbine['turbine_name']
                 turbine_id = turbine['turbine']
                 static_data[f'hub_height'] = turbine['hub_height']
@@ -2289,6 +2395,14 @@ def preprocess_synth_wind_icond2(path: str,
                 static_data[f'cut_in'] = turbine['cut_in']
                 static_data[f'cut_out'] = turbine['cut_out']
                 static_data[f'rated_wind_speed'] = turbine['rated']
+
+        # Categorical static 'park_id' (params.static_categorical): integer code instead
+        # of the id string, consistent across splits (static_categories)
+        _cats = static_categories(config)
+        if static_features and 'park_id' in _cats:
+            if station_id not in _cats['park_id']:
+                raise ValueError(f"park {station_id} missing in the park_id categories")
+            static_data['park_id'] = _cats['park_id'].index(station_id)
 
         # Normalize power
         df_synth['power'] = df_synth['power'] / installed_capacity
@@ -2540,8 +2654,24 @@ def preprocess_synth_wind_icond2(path: str,
         _ecmwf_path = config.get('data', {}).get('ecmwf_path')
         _df_ecmwf = pd.DataFrame()
 
+        # data.ecmwf_layout == 'site_runs': nwp_ready store,
+        # <ecmwf_path>/SL/{00,12}/<prefix><station_id>/<lat>_<lon>_wind_sl.parquet
+        if _ecmwf_path and config['data'].get('ecmwf_layout') == 'site_runs':
+            _df_ecmwf = _fetch_ecmwf_data_from_site_runs(
+                station_lat=station_lat,
+                station_lon=station_lon,
+                next_n_grid_points=_next_n_grid_ecmwf,
+                ecmwf_path=_ecmwf_path,
+                site_dir=f"{config['data'].get('nwp_site_prefix', '')}{station_id}",
+                raw_columns=_ecmwf_features_cfg,
+                starttime_min=_ecmwf_ts_min,
+                starttime_max=_ecmwf_ts_max,
+            )
+            if _df_ecmwf.empty:
+                raise FileNotFoundError(
+                    f"Station {station_id}: no ECMWF files in the site_runs layout under {_ecmwf_path}")
         # Preferred source: split ECMWF parquet files in <ecmwf_path>/SL (or directly in ecmwf_path).
-        if _ecmwf_path:
+        elif _ecmwf_path:
             try:
                 _df_ecmwf = _fetch_ecmwf_data_from_split_parquets(
                     station_lat=station_lat,
@@ -3800,9 +3930,12 @@ def prepare_data_for_tft(data: pd.DataFrame,
                          scaler_x: StandardScaler = None,
                          scaler_y: StandardScaler = None,
                          nwp_baseline_col: str = None,
-                         test_split_optional: bool = False):
+                         test_split_optional: bool = False,
+                         categorical_static_cols: list = None):
     """
     Prepares data for a Temporal Fusion Transformer, creating a lagged target input.
+    categorical_static_cols: static columns holding integer category codes
+    (params.static_categorical); they are passed through unscaled for nn.Embedding.
     Args:
         data (pd.DataFrame): DataFrame with a time index and all features.
         target_col (str): Name of the target column.
@@ -3929,6 +4062,14 @@ def prepare_data_for_tft(data: pd.DataFrame,
                 X_static_train = scaled_train[0, static_indices]
                 if not test_leer:
                     X_static_test = scaled_test[0, static_indices]
+
+                # Categorical codes stay raw integers (embedding lookup, not a scale)
+                for i, col in enumerate(static_cols):
+                    if col in (categorical_static_cols or []) and col in static_features_in_scaler:
+                        j = static_features_in_scaler.index(col)
+                        X_static_train[j] = dummy_row_train[0, scaler_feature_cols.index(col)]
+                        if not test_leer:
+                            X_static_test[j] = dummy_row_test[0, scaler_feature_cols.index(col)]
 
                 logging.debug(f"Static features scaled using global scaler_x: {static_features_in_scaler}")
             else:
