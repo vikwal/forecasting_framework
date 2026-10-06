@@ -10,7 +10,7 @@ from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 
-from . import tools, models, preprocessing
+from . import tools, models, preprocessing, fedgradient
 
 
 def aggregate_scalers(client_stats):
@@ -38,17 +38,64 @@ def load_federated_data(config, freq, features, target_col='power'):
         # Create temporary config for this client
         client_config = config.copy()
         client_config['data'] = config['data'].copy()
-        client_config['data']['files'] = file_list
+        # data.files stays the global park list (categorical codes, preprocessing.static_categories)
+        client_config['data']['client_files'] = list(file_list)
 
         # Load data for this client using existing get_data function
         client_files = preprocessing.get_data(data_dir=base_path,
                                             config=client_config,
                                             freq=freq,
-                                            features=features)
+                                            features=features,
+                                            files_key='client_files')
 
         clients_data[client_id] = client_files
 
     return clients_data
+
+
+def client_data_config(config: Dict[str, Any], station_ids: List[str]) -> Dict[str, Any]:
+    """Config copy for loading one client's stations via get_data(files_key='client_files').
+
+    data.files is NOT overwritten: it stays the global park list from which
+    preprocessing.static_categories derives the categorical codes (park id). Overwriting it
+    gave every client the codes 0..n_client-1, so parks of different clients shared rows.
+    """
+    import copy
+    cfg = copy.deepcopy(config)
+    cfg['data']['client_files'] = [str(s) for s in station_ids]
+    return cfg
+
+
+def check_client_parks(config: Dict[str, Any]) -> None:
+    """Every client station must be in the global list (data.files + val_files + test_files).
+    Hard error with a categorical static (codes come from that list), warning otherwise."""
+    global_ids = set()
+    for key in ('files', 'val_files', 'test_files'):
+        global_ids.update(str(f) for f in config['data'].get(key, []) or [])
+    clients = config['fl']['clients']
+    missing = sorted({str(s) for ids in clients.values() for s in ids} - global_ids)
+    categorical = bool(config.get('params', {}).get('static_categorical'))
+    if missing:
+        msg = f"{len(missing)} client station(s) not in data.files/val_files/test_files: {missing[:5]}"
+        if categorical:
+            raise ValueError(msg)
+        logging.warning(msg)
+    if categorical:
+        owners = {}
+        for cid, ids in clients.items():
+            for s in ids:
+                owners.setdefault(str(s), []).append(cid)
+        shared = {s: c for s, c in owners.items() if len(c) > 1}
+        if shared:
+            logging.warning(f"{len(shared)} station(s) belong to several clients, e.g. {next(iter(shared.items()))}")
+        unowned = sorted(str(f) for f in config['data'].get('files', []) if str(f) not in owners)
+        if unowned:
+            logging.warning(f"{len(unowned)} station(s) in data.files belong to no client "
+                            f"(untrained embedding rows): {unowned[:5]}")
+        if config['data'].get('val_files'):
+            raise ValueError("categorical static (park id) with data.val_files: the held-out parks "
+                             "would be evaluated with untrained embedding rows; evaluate the holdout "
+                             "with the variant without park id")
 
 
 def state_dict_to_numpy_list(state_dict):
@@ -156,19 +203,17 @@ class ServerOptimizer:
         # Convert back to state_dict
         return numpy_list_to_state_dict(final_weights_list, old_global_weights)
 
-    def step_from_gradients(self,
-                            global_weights: Dict[str, torch.Tensor],
-                            aggregated_gradients: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """FedSGD: apply server optimizer using raw gradients.
-        Converts to pseudo weight-delta (delta = -grad) then delegates to step().
-        Sign: pseudo = old - grad → delta_t = pseudo - old = -grad
-        Adam: m_t += (1-β₁)·(-grad), final = old + lr·m_hat/... = old - lr·grad/... ✓
-        """
-        pseudo_aggregated = {
-            k: global_weights[k].cpu() - g.cpu()
-            for k, g in aggregated_gradients.items()
-        }
-        return self.step(global_weights, pseudo_aggregated)
+    def state_dict(self) -> Dict[str, Any]:
+        state = {'step_count': self.step_count, 'server_state_v': self.server_state_v}
+        if hasattr(self, 'server_state_m'):
+            state['server_state_m'] = self.server_state_m
+        return state
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        self.step_count = int(state['step_count'])
+        self.server_state_v = state['server_state_v']
+        if 'server_state_m' in state:
+            self.server_state_m = state['server_state_m']
 
 
 def _log_gpu_mem(tag: str, device, client_id):
@@ -219,8 +264,10 @@ class ClientActor:
                  config: Dict[str, Any],
                  hyperparameters: Dict[str, Any],
                  initial_personal_weights: Dict[str, Any] = None,
-                 initial_pretrained_weights: Dict[str, Any] = None):
+                 initial_pretrained_weights: Dict[str, Any] = None,
+                 client_index: int = 0):
         self.client_id = client_id
+        self.client_index = client_index
         self.X_train, self.y_train = X_train, y_train
         self.X_val, self.y_val = X_val, y_val
         self.config = config
@@ -567,8 +614,11 @@ class ClientActor:
 
         return results
 
-    def evaluate(self, global_weights: Dict[str, torch.Tensor]):
-        """Performs local evaluation at the end of a communication round."""
+    def evaluate(self, global_weights: Dict[str, torch.Tensor], offload: bool = True):
+        """Performs local evaluation at the end of a communication round.
+
+        offload=False keeps the model on the device (FedGradient); the returned weights
+        are CPU copies either way."""
         # _log_gpu_mem("eval_before_to_device", self.device, self.client_id)
         self.model = self.model.to(self.device)
         # _log_gpu_mem("eval_after_to_device", self.device, self.client_id)
@@ -639,114 +689,51 @@ class ClientActor:
             'client_id': self.client_id,
             'n_samples': len(self.y_val) if self.y_val is not None else 0,
             'metrics': metrics,
-            'weights': self.model.state_dict()
+            'weights': ({k: v.detach().to('cpu', copy=True) for k, v in self.model.state_dict().items()}
+                        if not offload else self.model.state_dict())
         }
 
-        self.model = self.model.to('cpu')
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
+        if offload:
+            self.model = self.model.to('cpu')
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
         # _log_gpu_mem("eval_after_cpu_offload", self.device, self.client_id)
 
         return results
 
-    def compute_gradient(self, global_weights: Dict[str, torch.Tensor]) -> Dict:
-        """FedSGD: sample one mini-batch and return raw gradients (no optimizer.step)."""
-        from . import tools
-        from torch.utils.data import TensorDataset, DataLoader
+    # --- FedGradient (utils/fedgradient.py): one batch gradient per server step ---
 
-        self.model = self.model.to(self.device)
-        personalize = self.config['fl'].get('personalize', False)
-
-        # Load weights (same personalization logic as train())
-        if personalize:
-            model_name = self.config['model']['name']
-            shared_global, _ = self._split_weights_by_layer_name(global_weights, model_name)
-            _, personal_local = self._split_weights_by_layer_name(self.model.state_dict(), model_name)
-            self.model.load_state_dict({**shared_global, **personal_local}, strict=False)
-        else:
-            self.model.load_state_dict(global_weights)
-
-        # Build DataLoader (same as train() L320–340)
-        batch_size = self.hyperparameters['batch_size']
-        is_tft = self.config['model']['name'] in ('tft', 'tcn-tft')
-        if isinstance(self.X_train, dict):
-            tensors = [torch.from_numpy(self.X_train['observed']).float(),
-                       torch.from_numpy(self.X_train['known']).float()]
-            if 'static' in self.X_train:
-                tensors.append(torch.from_numpy(self.X_train['static']).float())
-            tensors.append(torch.from_numpy(self.y_train).float())
-        else:
-            tensors = [torch.from_numpy(self.X_train).float(),
-                       torch.from_numpy(self.y_train).float()]
-        train_loader = DataLoader(TensorDataset(*tensors), batch_size=batch_size,
-                                  shuffle=self.config['model'].get('shuffle', True),
-                                  drop_last=True)
-
-        # Loss (same as train() L379–384)
-        quantiles = self.config['model'].get('tft', {}).get('quantiles', None)
-        if quantiles:
-            criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
-        else:
-            criterion = nn.MSELoss()
-
-        # One batch: forward + backward, NO optimizer.step()
-        self.model.train()
-        self.model.zero_grad()
-        batch = next(iter(train_loader))
-
-        if is_tft:
-            if len(batch) == 4:
-                obs, known, static, targets = [b.to(self.device) for b in batch]
-                predictions = self.model(obs, known, static)
+    def _fedgradient_client(self) -> 'fedgradient.GradientClient':
+        """Lazily build the gradient client; it moves the model and the training data to
+        the actor's device once and keeps them there for the whole run."""
+        if getattr(self, '_fg', None) is None:
+            hp = self.hyperparameters
+            quantiles = self.config['model'].get('tft', {}).get('quantiles', None)
+            if quantiles:
+                criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
+                median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
             else:
-                obs, known, targets = [b.to(self.device) for b in batch]
-                predictions = self.model(obs, known)
-        else:
-            inputs, targets = [b.to(self.device) for b in batch]
-            predictions = self.model(inputs)
+                criterion, median_idx = nn.MSELoss(), None
+            clip = hp['client_clipnorm'] if 'client_clipnorm' in hp else \
+                fedgradient.fedgradient_hyperparameters(self.config)['client_clipnorm']
+            self._fg = fedgradient.GradientClient(
+                model=self.model, X_train=self.X_train, y_train=self.y_train,
+                batch_size=hp['batch_size'], criterion=criterion, device=self.device,
+                is_tft=self.config['model']['name'] in ('tft', 'tcn-tft'),
+                clipnorm=clip, median_idx=median_idx,
+                shuffle=self.config['model'].get('shuffle', True),
+                client_id=self.client_id, dropout_seed_offset=getattr(self, 'client_index', 0))
+            self.model = self._fg.model
+        return self._fg
 
-        loss = criterion(predictions, targets)
-        loss.backward()
+    def fg_prepare_round(self, seed: int, global_state: Dict[str, torch.Tensor]) -> int:
+        return self._fedgradient_client().prepare_round(seed, global_state)
 
-        # Optional gradient clipping
-        grad_clip = self.config.get('fl', {}).get('fedsgd', {}).get('gradient_clip', None)
-        if grad_clip:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+    def fg_step(self, global_params: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+        return self._fedgradient_client().step(global_params)
 
-        # Personalization: apply local gradient step for personal layers,
-        # then return only shared layer gradients to the server.
-        # Personal layers are updated in-place on self.model (persistent across rounds).
-        if personalize:
-            shared_keys = set(self._split_weights_by_layer_name(
-                global_weights, self.config['model']['name'])[0].keys())
-            _plr = self.config.get('fl', {}).get('fedsgd', {}).get('personal_lr')
-            personal_lr = _plr if _plr is not None else self.hyperparameters.get('learning_rate', 0.001)
-            with torch.no_grad():
-                for name, param in self.model.named_parameters():
-                    if param.grad is not None and name not in shared_keys:
-                        param.data.sub_(personal_lr * param.grad)
-        else:
-            shared_keys = None
-
-        # Extract gradients to send to server (shared only when personalize=True)
-        gradients = {
-            name: (param.grad.detach().cpu().clone() if param.grad is not None
-                   else torch.zeros_like(param.data.cpu()))
-            for name, param in self.model.named_parameters()
-            if shared_keys is None or name in shared_keys
-        }
-
-        self.model.cpu()
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
-
-        return {
-            'client_id': self.client_id,
-            'gradients': gradients,
-            'n_samples': targets.shape[0],
-            'metrics': {'train_loss': loss.item()},
-            'history': {'train_loss': [loss.item()]}
-        }
+    def fg_round_metrics(self) -> Dict[str, Any]:
+        return self._fedgradient_client().round_metrics()
 
     def _split_weights_by_layer_name(self, state_dict, model_name):
         """
@@ -842,7 +829,9 @@ def get_shared_keys(state_dict: Dict[str, torch.Tensor], model_name: str,
     return shared_keys
 
 
-def aggregate_weights(client_results: List[Dict[str, Any]], config: Dict[str, Any] = None) -> Dict[str, torch.Tensor]:
+def aggregate_weights(client_results: List[Dict[str, Any]], config: Dict[str, Any] = None,
+                      row_owners: Dict[Any, Dict[str, torch.Tensor]] = None,
+                      reference_weights: Dict[str, torch.Tensor] = None) -> Dict[str, torch.Tensor]:
     """
     Aggregate weights from multiple clients using FedAvg (weighted average).
     Works with PyTorch state_dicts.
@@ -850,6 +839,9 @@ def aggregate_weights(client_results: List[Dict[str, Any]], config: Dict[str, An
     Args:
         client_results: List of dictionaries containing client weights and metadata
         config: Configuration dictionary (optional, needed for personalization)
+        row_owners: {client_id: {param: bool row mask}} for categorical embedding tables
+            (fedgradient.owned_rows). Such a table is averaged row by row over the clients
+            owning the row; rows owned by nobody keep their value from reference_weights.
 
     Returns:
         Aggregated weights dictionary
@@ -879,41 +871,25 @@ def aggregate_weights(client_results: List[Dict[str, Any]], config: Dict[str, An
         # No personalization - aggregate all weights
         weights_agg = {k: torch.zeros_like(v) for k, v in first_weights.items()}
 
+    rowwise = set((row_owners or {}).get(client_results[0]['client_id'], {})) & set(weights_agg)
     for client in client_results:
         client_weights = client['weights']
         num_samples = client['n_samples']
         weight_factor = num_samples / total_samples
 
         for key in weights_agg.keys():
-            weights_agg[key] += client_weights[key] * weight_factor
+            if key not in rowwise:
+                weights_agg[key] += client_weights[key] * weight_factor
+
+    for key in rowwise:
+        ref = reference_weights[key].cpu() if reference_weights is not None else None
+        avg, _ = fedgradient.rowwise_average(
+            [c['weights'][key].cpu() for c in client_results],
+            [c['n_samples'] for c in client_results],
+            [row_owners[c['client_id']][key] for c in client_results], fallback=ref)
+        weights_agg[key] = avg.to(first_weights[key].device)
 
     return weights_agg
-
-
-
-def aggregate_gradients(
-    client_results: List[Dict[str, Any]],
-    config: Dict[str, Any] = None
-) -> Dict[str, torch.Tensor]:
-    """Weighted or uniform average of raw gradients (FedSGD)."""
-    weighting = 'uniform'
-    if config:
-        weighting = config.get('fl', {}).get('fedsgd', {}).get('gradient_weighting', 'uniform')
-
-    n_clients = len(client_results)
-    total_samples = sum(r['n_samples'] for r in client_results)
-    aggregated = {}
-
-    for key in client_results[0]['gradients'].keys():
-        if weighting == 'weighted':
-            aggregated[key] = sum(
-                r['gradients'][key] * (r['n_samples'] / total_samples)
-                for r in client_results
-            )
-        else:  # uniform
-            aggregated[key] = sum(r['gradients'][key] for r in client_results) / n_clients
-
-    return aggregated
 
 
 def aggregate_metrics(client_results: List[Dict[str, Any]]):
@@ -1065,6 +1041,21 @@ def evaluate_model_globally(model, X_val, y_val, config, hyperparameters):
     return {'loss': mse, 'mae': mae, 'rmse': rmse, 'r^2': r2}
 
 
+STRATEGIES = ('fedavg', 'fedavgm', 'fedadam', 'fedyogi', 'fedadagrad', 'fedgradient')
+
+
+def client_row_owners(partitions: Dict[Any, Any], model: nn.Module):
+    """{client_id: {embedding param: bool row mask}} for the categorical embedding tables
+    of ``model`` (None when it has none), derived from each client's training statics."""
+    row_params = fedgradient.embedding_row_params(model)
+    if not row_params:
+        return None
+    named = dict(model.named_parameters())
+    n_rows = {n: named[n].shape[0] for n in row_params}
+    return {cid: fedgradient.owned_rows(part[0], row_params, n_rows)
+            for cid, part in partitions.items()}
+
+
 def run_simulation(partitions: Any,
                    config: Dict[str, Any],
                    hyperparameters: Dict[str, Any],
@@ -1084,8 +1075,14 @@ def run_simulation(partitions: Any,
             When provided and personalize=False, the global model is evaluated once
             server-side instead of running evaluate() on every client actor.
 
+    Strategies: fedavg | fedavgm | fedadam (weights) and fedgradient (per-batch gradient
+    aggregation, one round = one epoch, utils/fedgradient.py).
+    Optional: fl.checkpoint {enabled, dir} writes <dir>/last.pt after every round
+    (global weights, server optimizer state, early-stopping state, metrics, comm stats);
+    fl.resume = <path to last.pt> continues from it.
+
     Returns:
-        history: Training history
+        history: Training history ('metrics_aggregated', 'comm_stats', 'server_steps', ...)
         clients_weights: Final weights for each client
     """
 
@@ -1098,9 +1095,16 @@ def run_simulation(partitions: Any,
             partitions = {i: part for i, part in enumerate(partitions)}
 
     n_clients = len(partitions)
+    client_keys = list(partitions.keys())
     n_rounds = hyperparameters.get('n_rounds', config['fl'].get('n_rounds', 10))
     save_history = config['fl'].get('save_history', False)
     strategy = config['fl'].get('strategy', 'fedavg').lower()
+    personalize = config.get('fl', {}).get('personalize', False)
+
+    if strategy not in STRATEGIES:
+        raise ValueError(f"Unknown fl.strategy {strategy!r}; expected one of {STRATEGIES}")
+    if strategy == 'fedgradient' and personalize:
+        raise NotImplementedError("fedgradient does not support fl.personalize")
 
     # GPU configuration
     # gpu_per_actor is derived from actors-per-GPU (ceiling), then floored to 1 decimal.
@@ -1157,7 +1161,7 @@ def run_simulation(partitions: Any,
 
     # Create client actors
     client_actors = []
-    for key, value in partitions.items():
+    for client_index, (key, value) in enumerate(partitions.items()):
         X_train, y_train, X_val, y_val = value
         actor = ClientActor.options(num_gpus=gpu_per_actor).remote(
             client_id=key,
@@ -1169,8 +1173,18 @@ def run_simulation(partitions: Any,
             hyperparameters=hyperparameters,
             initial_personal_weights=initial_personal_weights,
             initial_pretrained_weights=initial_pretrained_weights,
+            client_index=client_index,
         )
         client_actors.append(actor)
+
+    def _call(actors_idx: List[int], method: str, *args) -> List[Any]:
+        """Call an actor method in groups of max_concurrent; large args are put once."""
+        args = tuple(ray.put(a) if isinstance(a, dict) else a for a in args)
+        out = []
+        for g in range(0, len(actors_idx), max_concurrent):
+            out.extend(ray.get([getattr(client_actors[i], method).remote(*args)
+                                for i in actors_idx[g:g + max_concurrent]]))
+        return out
 
     logging.info("Start FL simulation using Ray and PyTorch.")
     start_time = time.time()
@@ -1178,36 +1192,43 @@ def run_simulation(partitions: Any,
     # Initialize global model — on GPU if available so server-side evaluation runs on GPU
     logging.debug('[Server] Global model is initialized.')
     server_device = torch.device('cuda:0' if total_num_gpus > 0 else 'cpu')
+    torch.manual_seed(int(config.get('params', {}).get('random_seed', 42)))   # reproducible init
     global_model = models.get_model(config=config, hyperparameters=hyperparameters)
-    # _log_gpu_mem("server_before_global_model_to_device", server_device, "server")
     global_model = global_model.to(server_device)
-    # _log_gpu_mem("server_after_global_model_to_device", server_device, "server")
     global_weights = global_model.state_dict()
+
+    # Categorical embedding tables (park id) are aggregated row by row over their owners
+    row_owners = None
+    if config['fl'].get('rowwise_embedding', True):
+        row_owners = client_row_owners(partitions, global_model)
+        if row_owners:
+            for name in next(iter(row_owners.values())):
+                owned = torch.stack([o[name] for o in row_owners.values()]).sum(0)
+                logging.info(f"[Server] Row-wise aggregation of '{name}': {int((owned > 0).sum())}/"
+                             f"{owned.numel()} rows owned, max owners per row {int(owned.max())}")
 
     # Initialize server optimizer if needed
     server_optimizer = None
-    if strategy != 'fedavg':
-        # When personalization is enabled, only initialize with shared weights
-        personalize = config.get('fl', {}).get('personalize', False)
-
-        # FedSGD delegates to fedadam/fedavgm server optimizer internally
-        _opt_strategy = strategy
-        if strategy == 'fedsgd':
-            _sgd_sub = config['fl'].get('fedsgd', {}).get('server_optimizer', 'adam')
-            _opt_strategy = 'fedadam' if _sgd_sub == 'adam' else 'fedavgm'
-
+    fg_optimizer = None
+    fg_hp = None
+    if strategy == 'fedgradient':
+        fg_hp = fedgradient.fedgradient_hyperparameters(config)
+        fg_hp.update({k: hyperparameters[k] for k in fedgradient.HP_KEYS if k in hyperparameters})
+        fg_optimizer = fedgradient.build_server_optimizer(
+            [p for p in global_model.parameters() if p.requires_grad], fg_hp)
+        logging.info(f"[Server] FedGradient server optimizer: {fg_hp}")
+    elif strategy != 'fedavg':
         if personalize:
             model_name = config['model']['name']
             shared_keys = get_shared_keys(global_weights, model_name, config=config)
             shared_weights = {k: v for k, v in global_weights.items() if k in shared_keys}
-            server_optimizer = ServerOptimizer(_opt_strategy, hyperparameters, shared_weights)
-            logging.info(f"[Server] Initialized ServerOptimizer({_opt_strategy}) with {len(shared_weights)} shared weights (personalization enabled)")
+            server_optimizer = ServerOptimizer(strategy, hyperparameters, shared_weights)
+            logging.info(f"[Server] Initialized ServerOptimizer({strategy}) with {len(shared_weights)} shared weights (personalization enabled)")
         else:
-            server_optimizer = ServerOptimizer(_opt_strategy, hyperparameters, global_weights)
-            logging.info(f"[Server] Initialized ServerOptimizer({_opt_strategy}) with {len(global_weights)} weights")
+            server_optimizer = ServerOptimizer(strategy, hyperparameters, global_weights)
+            logging.info(f"[Server] Initialized ServerOptimizer({strategy}) with {len(global_weights)} weights")
 
     # Log shared layer patterns for personalization
-    personalize = config.get('fl', {}).get('personalize', False)
     if personalize:
         model_name_log = config['model']['name'].lower()
         patterns = SHARED_LAYER_PATTERNS.get(model_name_log, 'all (no personalization logic defined)')
@@ -1215,6 +1236,9 @@ def run_simulation(partitions: Any,
 
     history = {}
     all_rounds_metrics_data = []
+    comm = fedgradient.CommStats(client_keys)
+    state_bytes = fedgradient.tensor_bytes(global_weights)
+    server_steps = 0
 
     # Global early stopping setup
     global_es_config = config['fl'].get('global_early_stopping', {})
@@ -1232,47 +1256,100 @@ def run_simulation(partitions: Any,
     if global_es_enabled:
         logging.info(f"[Global Early Stopping] Enabled — monitor={global_es_monitor}, patience={global_es_patience}, min_delta={global_es_min_delta}, mode={global_es_mode}")
 
-    for round_num in range(1, n_rounds+1):
+    # Checkpoint / resume (global model only)
+    ckpt_cfg = config['fl'].get('checkpoint') or {}
+    ckpt_path = os.path.join(ckpt_cfg['dir'], 'last.pt') \
+        if ckpt_cfg.get('enabled', False) and ckpt_cfg.get('dir') else None
+    if ckpt_path and personalize:
+        logging.warning("[Checkpoint] fl.personalize: personal client layers are not checkpointed — disabled.")
+        ckpt_path = None
+    start_round = 1
+    stopped = False
+    resume_path = config['fl'].get('resume')
+    if resume_path:
+        if personalize:
+            raise NotImplementedError("fl.resume is not supported with fl.personalize")
+        ck = fedgradient.load_checkpoint(resume_path)
+        if ck['strategy'] != strategy:
+            raise ValueError(f"checkpoint {resume_path} is strategy {ck['strategy']!r}, config says {strategy!r}")
+        global_model.load_state_dict(ck['global_weights'])
+        global_weights = global_model.state_dict()
+        if fg_optimizer is not None:
+            fg_optimizer.load_state_dict(ck['server_optimizer'])
+        elif server_optimizer is not None:
+            server_optimizer.load_state_dict(ck['server_optimizer'])
+        es = ck['early_stopping']
+        best_global_val, global_es_counter, best_round = es['best_val'], es['counter'], es['best_round']
+        best_global_weights = es['best_weights']
+        if best_global_weights is not None:
+            best_clients_weights = {cid: best_global_weights for cid in client_keys}
+        all_rounds_metrics_data = ck['metrics']
+        comm = fedgradient.CommStats.from_dict(ck['comm'])
+        server_steps = ck.get('server_steps', 0)
+        start_round = ck['round'] + 1
+        stopped = ck.get('stopped', False)
+        logging.info(f"[Checkpoint] Resumed from {resume_path} after round {ck['round']}"
+                     f"{' (early stopping had already triggered)' if stopped else ''}")
+
+    def _save_checkpoint(round_num: int) -> None:
+        if not ckpt_path:
+            return
+        fedgradient.save_checkpoint(ckpt_path, {
+            'round': round_num, 'strategy': strategy, 'stopped': stopped,
+            'global_weights': {k: v.detach().cpu() for k, v in global_model.state_dict().items()},
+            'server_optimizer': (fg_optimizer.state_dict() if fg_optimizer is not None
+                                 else server_optimizer.state_dict() if server_optimizer is not None else None),
+            'early_stopping': {'best_val': best_global_val, 'counter': global_es_counter,
+                               'best_round': best_round, 'best_weights': best_global_weights},
+            'metrics': all_rounds_metrics_data, 'comm': comm.to_dict(), 'server_steps': server_steps,
+        })
+
+    fg_methods = {'prepare_round': 'fg_prepare_round', 'step': 'fg_step',
+                  'round_metrics': 'fg_round_metrics'}
+
+    def _fg_dispatch(method: str, idx: List[int], arg: Any) -> List[Any]:
+        args = () if arg is None else (arg if method == 'prepare_round' else (arg,))
+        return _call(idx, fg_methods[method], *args)
+
+    client_results = []
+    round_num = start_round - 1
+    for round_num in range(start_round, n_rounds + 1):
+        if stopped:
+            break
         history[round_num] = {}
         logging.debug(f"--- Round {round_num}/{n_rounds} ---")
         round_start_time = time.time()
+        round_steps = 0
 
         # Client training — processed in batches to limit concurrent GPU usage
         # global_weights must be on CPU before passing to workers: if the server model
         # lives on GPU, Ray serialises CUDA tensors and every worker re-allocates them
         # on GPU during deserialisation, causing a spike proportional to n_concurrent.
         global_weights_cpu = {k: v.cpu() for k, v in global_weights.items()}
-        client_results = []
 
-        if strategy == 'fedsgd':
-            # FedSGD: clients return raw gradients from a single mini-batch
-            logging.debug(f"[Server] Start FedSGD gradient jobs on clients (batch_size={max_concurrent}).")
-            for batch_start in range(0, n_clients, max_concurrent):
-                batch_actors = client_actors[batch_start:batch_start + max_concurrent]
-                batch_results = ray.get([a.compute_gradient.remote(global_weights_cpu)
-                                         for a in batch_actors])
-                client_results.extend(batch_results)
-            logging.debug(f"[Server] All gradients collected. Aggregating.")
-            aggregated_gradients = aggregate_gradients(client_results, config)
+        if strategy == 'fedgradient':
+            # One epoch: one batch gradient per client and server step until all are through
+            seed = fedgradient.round_seed(config['params'].get('random_seed', 42), round_num)
+            client_results, round_steps = fedgradient.run_round(
+                _fg_dispatch, client_keys, global_model, fg_optimizer, seed,
+                row_owners=row_owners, weighting=fg_hp['gradient_weighting'], comm=comm)
+            server_steps += round_steps
             train_metrics_agg = aggregate_metrics(client_results)
-            personalize = config.get('fl', {}).get('personalize', False)
-            if personalize:
-                shared_global_weights = {k: v for k, v in global_weights.items() if k in aggregated_gradients}
-                new_global_weights = server_optimizer.step_from_gradients(shared_global_weights, aggregated_gradients)
-            else:
-                new_global_weights = server_optimizer.step_from_gradients(global_weights, aggregated_gradients)
+            global_weights = global_model.state_dict()
         else:
             # FedAvg / FedAdam / FedAvgM: clients return updated weights after local training
             logging.debug(f"[Server] Start train jobs on clients (batch_size={max_concurrent}).")
-            for batch_start in range(0, n_clients, max_concurrent):
-                batch_actors = client_actors[batch_start:batch_start + max_concurrent]
-                batch_results = ray.get([a.train.remote(global_weights_cpu) for a in batch_actors])
-                client_results.extend(batch_results)
+            client_results = _call(list(range(n_clients)), 'train', global_weights_cpu)
             logging.debug(f"[Server] All clients trained. Start aggregation.")
-            aggregated_weights = aggregate_weights(client_results, config)
+            aggregated_weights = aggregate_weights(client_results, config, row_owners=row_owners,
+                                                   reference_weights=global_weights_cpu)
             train_metrics_agg = aggregate_metrics(client_results)
+            round_steps = 1
+            server_steps += 1
+            comm.add_step(upload={r['client_id']: fedgradient.tensor_bytes(
+                                      {k: r['weights'][k] for k in aggregated_weights}) for r in client_results},
+                          download={cid: state_bytes for cid in client_keys})
             if server_optimizer:
-                personalize = config.get('fl', {}).get('personalize', False)
                 if personalize:
                     shared_global_weights = {k: v for k, v in global_weights.items() if k in aggregated_weights}
                     new_global_weights = server_optimizer.step(shared_global_weights, aggregated_weights)
@@ -1281,51 +1358,72 @@ def run_simulation(partitions: Any,
             else:
                 new_global_weights = aggregated_weights
 
+            # Update global model
+            if new_global_weights:
+                if personalize:
+                    # When personalization is enabled, aggregated weights only contain shared weights
+                    # We need to merge them with existing personal weights from the global model
+                    current_global_state = global_model.state_dict()
+
+                    # Update only the keys present in new_global_weights (shared weights)
+                    for key, value in new_global_weights.items():
+                        current_global_state[key] = value
+
+                    # Load the merged state dict
+                    global_model.load_state_dict(current_global_state)
+                    global_weights = current_global_state
+
+                    logging.debug(f"[Server] Updated {len(new_global_weights)} shared weights in global model")
+                else:
+                    # No personalization - load all weights normally
+                    global_model.load_state_dict(new_global_weights)
+                    global_weights = global_model.state_dict()
+            else:
+                logging.warning("[Server] Nothing to aggregate.")
+
         # Save client histories
         if save_history:
             history[round_num]['history'] = get_train_history(client_results)
 
         logging.debug('[Server] Training metrics aggregated.')
 
-        # Update global model
-        if new_global_weights:
-            personalize = config.get('fl', {}).get('personalize', False)
-
-            if personalize:
-                # When personalization is enabled, aggregated weights only contain shared weights
-                # We need to merge them with existing personal weights from the global model
-                current_global_state = global_model.state_dict()
-
-                # Update only the keys present in new_global_weights (shared weights)
-                for key, value in new_global_weights.items():
-                    current_global_state[key] = value
-
-                # Load the merged state dict
-                global_model.load_state_dict(current_global_state)
-                global_weights = current_global_state
-
-                logging.debug(f"[Server] Updated {len(new_global_weights)} shared weights in global model")
-            else:
-                # No personalization - load all weights normally
-                global_model.load_state_dict(new_global_weights)
-                global_weights = new_global_weights
-        else:
-            logging.warning("[Server] Nothing to aggregate.")
+        # Evaluate the model aggregated in THIS round (before 2026-10-06 the client path
+        # evaluated the weights broadcast at the start of the round, i.e. one round late).
+        global_weights_cpu = {k: v.detach().cpu() for k, v in global_weights.items()}
 
         # Evaluation: server-side (once) when global_val_data is provided and no personalization,
         # otherwise distributed across all client actors.
-        personalize_eval = config.get('fl', {}).get('personalize', False)
-        if global_val_data is not None and not personalize_eval:
+        if global_val_data is not None and not personalize:
             logging.debug(f'[Server] Global evaluation on server (single pass, device={server_device}).')
             X_val_g, y_val_g = global_val_data
             val_metrics_agg = evaluate_model_globally(global_model, X_val_g, y_val_g, config, hyperparameters)
             logging.debug('[Server] Global evaluation completed.')
         else:
             logging.debug(f'[Server] Start local evaluation.')
-            results_refs = [actor.evaluate.remote(global_weights_cpu) for actor in client_actors]
-            client_results = ray.get(results_refs)
-            val_metrics_agg = aggregate_metrics(client_results)
+            eval_results = _call(list(range(n_clients)), 'evaluate', global_weights_cpu,
+                                 strategy != 'fedgradient')
+            comm.add_eval(client_keys, state_bytes)
+            val_metrics_agg = aggregate_metrics(eval_results)
+            if personalize:
+                client_results = eval_results
             logging.debug(f'[Server] Evaluation metrics aggregated.')
+
+        # Collect round data
+        round_end_time = time.time()
+        round_data = {'round': round_num}
+        if train_metrics_agg:
+            for key, value in train_metrics_agg.items():
+                # Don't add 'train_' prefix if it already exists
+                if key.startswith('train_'):
+                    round_data[key] = value
+                else:
+                    round_data[f'train_{key}'] = value
+        if val_metrics_agg:
+            for key, value in val_metrics_agg.items():
+                round_data[f'val_{key}'] = value
+        round_data['server_steps'] = round_steps
+        round_data['time_s'] = round_end_time - round_start_time
+        all_rounds_metrics_data.append(round_data)
 
         # Global early stopping check
         if global_es_enabled and val_metrics_agg is not None:
@@ -1338,42 +1436,21 @@ def run_simulation(partitions: Any,
                     best_global_val = current_val
                     global_es_counter = 0
                     best_round = round_num
-                    best_global_weights = {k: v.clone() for k, v in global_weights.items()}
-                    best_clients_weights = get_clients_weights(client_results)
+                    best_global_weights = {k: v.clone() for k, v in global_weights_cpu.items()}
+                    best_clients_weights = (get_clients_weights(client_results) if personalize
+                                            else {cid: best_global_weights for cid in client_keys})
                     logging.info(f"[Global Early Stopping] Round {round_num}: {global_es_monitor}={current_val:.6f} improved. New best.")
                 else:
                     global_es_counter += 1
                     logging.info(f"[Global Early Stopping] Round {round_num}: {global_es_monitor}={current_val:.6f} no improvement. Counter: {global_es_counter}/{global_es_patience}")
                     if global_es_counter >= global_es_patience:
                         logging.info(f"[Global Early Stopping] Early stopping triggered after round {round_num}. Best round: {best_round}, {global_es_monitor}={best_global_val:.6f}")
-                        # Store round data before breaking
-                        round_data = {'round': round_num}
-                        if train_metrics_agg:
-                            for key, value in train_metrics_agg.items():
-                                round_data[key if key.startswith('train_') else f'train_{key}'] = value
-                        if val_metrics_agg:
-                            for key, value in val_metrics_agg.items():
-                                round_data[f'val_{key}'] = value
-                        all_rounds_metrics_data.append(round_data)
-                        break
+                        stopped = True
 
-        # Collect round data
-        round_data = {'round': round_num}
-        if train_metrics_agg:
-            for key, value in train_metrics_agg.items():
-                # Don't add 'train_' prefix if it already exists
-                if key.startswith('train_'):
-                    round_data[key] = value
-                else:
-                    round_data[f'train_{key}'] = value
-        if val_metrics_agg:
-            for key, value in val_metrics_agg.items():
-                round_data[f'val_{key}'] = value
-        all_rounds_metrics_data.append(round_data)
-
-        round_end_time = time.time()
         # Build a compact per-round summary line at INFO level
         _parts = [f"Round {round_num:>3}/{n_rounds}  ({round_end_time - round_start_time:.1f}s)"]
+        if strategy == 'fedgradient':
+            _parts.append(f"steps={round_steps}")
         if train_metrics_agg:
             _rmse = train_metrics_agg.get('rmse', train_metrics_agg.get('train_rmse'))
             if _rmse is not None:
@@ -1384,20 +1461,32 @@ def run_simulation(partitions: Any,
                 _parts.append(f"val_rmse={_vrmse:.4f}")
         logging.info("  ".join(_parts))
 
+        _save_checkpoint(round_num)
+
     end_time = time.time()
     logging.info(f"--- Simulation terminated in {end_time - start_time:.2f} seconds ---")
     ray.shutdown()
 
     # Create metrics DataFrame
     metrics_df = pd.DataFrame(all_rounds_metrics_data)
-    metrics_df = metrics_df.set_index('round')
+    if not metrics_df.empty:
+        metrics_df = metrics_df.set_index('round')
     history['metrics_aggregated'] = metrics_df
+    history['comm_stats'] = comm.to_dict()
+    history['server_steps'] = server_steps
+    history['best_round'] = best_round
+    history['last_round'] = round_num
+    history['early_stopped'] = stopped
+    history['runtime_s'] = end_time - start_time
 
     # Restore best weights if global early stopping was used
     if global_es_enabled and best_global_weights is not None:
         logging.info(f"[Global ES] Restoring best global weights from round {best_round} ({global_es_monitor}={best_global_val:.6f})")
         clients_weights = best_clients_weights
-    else:
+    elif personalize:
         clients_weights = get_clients_weights(client_results)
+    else:
+        final = {k: v.detach().cpu() for k, v in global_weights.items()}
+        clients_weights = {cid: final for cid in client_keys}
 
     return history, clients_weights

@@ -1,4 +1,5 @@
 import ray
+import copy
 import time
 import optuna
 import logging
@@ -9,6 +10,7 @@ from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 
 from . import tools, models
+from .fedgradient import fedgradient_hyperparameters
 
 
 def apply_min_train_len_per_file(prepared_datasets: List[Dict[str, Any]],
@@ -669,6 +671,8 @@ def get_hyperparameters(config: dict,
             if strategy == 'fedadam':
                 hyperparameters['beta_2'] = trial.suggest_float('beta_2', beta_2[0], beta_2[1])
                 hyperparameters['tau'] = trial.suggest_float('tau', tau[0], tau[1], log=True)
+            if strategy == 'fedgradient':
+                hyperparameters.update(_fedgradient_trial(config, trial))
         if is_cnn_type:
             hyperparameters['filters'] = trial.suggest_int('filters', filters[0], filters[1])
             hyperparameters['kernel_size'] = trial.suggest_int('kernel_size', kernel_size[0], kernel_size[1])
@@ -771,7 +775,30 @@ def get_hyperparameters(config: dict,
                 hyperparameters['multi_layer'] = config['model']['stemgnn']['multi_layer']
                 hyperparameters['dropout'] = config['model']['stemgnn']['dropout']
 
+    # fedgradient: server optimizer from fl.fedgradient (keys absent from a trial/study)
+    if config['model'].get('fl', False) and str(config['fl'].get('strategy', '')).lower() == 'fedgradient':
+        hyperparameters['strategy'] = 'fedgradient'
+        for key, value in fedgradient_hyperparameters(config).items():
+            hyperparameters.setdefault(key, value)
+
     return hyperparameters
+
+
+def _fedgradient_trial(config: dict, trial) -> dict:
+    """Optional HPO dimensions of fedgradient (hpo.fl.fedgradient):
+    server_optimizer (list -> categorical), server_lr ([lo, hi], log-uniform).
+    The remaining optimizer settings come from fl.fedgradient, which must therefore hold
+    the keys of every optimizer in the search space (beta_1/beta_2/eps, momentum)."""
+    space = (config['hpo'].get('fl') or {}).get('fedgradient') or {}
+    fl_cfg = copy.deepcopy(config['fl'])
+    if space.get('server_optimizer'):
+        fl_cfg['fedgradient']['server_optimizer'] = trial.suggest_categorical(
+            'server_optimizer', list(space['server_optimizer']))
+    hp = fedgradient_hyperparameters({'fl': fl_cfg, 'model': config['model']})
+    if space.get('server_lr'):
+        lo, hi = space['server_lr']
+        hp['server_lr'] = trial.suggest_float('server_lr', lo, hi, log=True)
+    return hp
 
 def load_hyperparams(study_name: str,
                      config: dict):

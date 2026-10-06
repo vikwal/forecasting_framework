@@ -201,3 +201,6 @@ cython_debug/
 .retrain_skip*
 .testmode_stop
 configs/solar_dcrnn/smoke/
+
+# FL checkpoints (fl.checkpoint)
+checkpoints/

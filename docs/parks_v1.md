@@ -39,3 +39,23 @@ Variante `config_parks_v1_cl_parkid.yaml`: gleich, plus `static_features: [park_
 Numerische Park-Statiken (Nabenhöhe, Rotor, …) sind bewusst nicht drin: ein Park mischt Typen
 und Nabenhöhen. Im `power_col`-Modus werden die alten Turbinen-Statiken übersprungen.
 Tests: `python -m pytest tests/test_parks_v1.py`.
+
+## Föderiert (FL, 80 Parks in 8 Clients)
+
+Clients aus `FL_Contribution/data/mastr/wind_park_selection_v1_1.csv` (Spalte `client`: R0–R3
+regional, N0–N3 überregional, je 10 Parks; `holdout` = 10 Parks). Strategie `fedgradient`
+([fedgradient.md](fedgradient.md)), Daten, Features, Split und Modell wie CL.
+
+| Config | Training | Bewertung |
+|---|---|---|
+| `config_parks_v1_fl_fedgradient.yaml` | 80 Client-Parks | 80 + Holdout (`val_files`, globales Modell) |
+| `config_parks_v1_fl_fedgradient_parkid.yaml` | 80, Park-ID-Embedding (Codes global, zeilenweise Aggregation) | nur die 80 |
+| `config_parks_v1_cl80{,_parkid}.yaml` | CL-Referenz auf denselben 80 Parks | wie FL |
+| `…_smoke.yaml` | 2 Clients × 2 Parks, 2 Runden | |
+
+```bash
+python train_fl.py -c configs/parks_v1/config_parks_v1_fl_fedgradient -m tft   # 8 Clients, je 1 GPU
+python train_cl.py -c configs/parks_v1/config_parks_v1_cl80 -m tft
+```
+Vergleich FedAvg: dieselbe Config mit `fl.strategy: fedavg` (`n_local_epochs: 1`).
+Tests: `python -m pytest tests/test_fedgradient.py`.

@@ -110,6 +110,7 @@ def main() -> None:
     )
 
     config['model']['name'] = args.model
+    federated.check_client_parks(config)
 
     # Get features
     data_dir = config['data']['path']
@@ -162,9 +163,8 @@ def main() -> None:
     for client_id, station_ids in tqdm(config['fl']['clients'].items(), desc="Loading clients", unit="client"):
         logging.debug(f'Loading data for client: {client_id} with stations: {station_ids}')
 
-        # Create client-specific config
-        client_config = copy.deepcopy(config)
-        client_config['data']['files'] = station_ids
+        # Client-specific config: stations under data.client_files, data.files stays global
+        client_config = federated.client_data_config(config, station_ids)
 
         # Log seed assignments for debugging
         if station_to_seed:
@@ -177,7 +177,8 @@ def main() -> None:
             data_dir=data_dir,
             config=client_config,
             freq=freq,
-            features=features
+            features=features,
+            files_key='client_files'
         )
 
         clients_data[client_id] = {

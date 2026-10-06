@@ -60,3 +60,8 @@ Runde 12: val_rmse=0.118  → counter=10  → STOP, Gewichte von Runde 2 werden 
 
 Die Logik liegt vollständig in `utils/federated.py` in der Funktion `run_simulation()`.
 `train_fl.py` benötigt keine Anpassungen — die Funktion gibt automatisch die Gewichte der besten Runde zurück.
+
+Seit 2026-10-06 wird das in der Runde **aggregierte** Modell evaluiert; vorher bewertete der
+Client-Pfad die Gewichte vom Rundenanfang (eine Runde Verzug). Bei `fedgradient` ist eine Runde
+eine Epoche. Der ES-Zustand ist Teil des Checkpoints (`fl.checkpoint`, `--resume`), siehe
+[fedgradient.md](fedgradient.md).

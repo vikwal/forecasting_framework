@@ -264,7 +264,7 @@ fl:
       - 'tcn_proj'
     tcn-gru:
       - 'conv_stack'
-  strategy: 'fedsgd'
+  strategy: 'fedgradient'
   n_rounds: 500
   n_local_epochs: 1
   personalize: false
@@ -292,10 +292,15 @@ fl:
     tau: 0.001
   fedprox:
     mu: 0.0     # 0.0 = disabled (FedAvg behavior). Typical values: 0.001–0.1
-  fedsgd:
-    gradient_weighting: 'uniform'   # 'uniform' | 'weighted' (by batch size)
-    server_optimizer: 'adam'        # 'adam' (FedAdam) | 'sgd' (FedAvgM)
-    gradient_clip: null             # null = disabled; e.g. 7.0 to clip grad norm
-    personal_lr: null               # null = falls back to model.lr; local lr for personal layers
+  fedgradient:                      # docs/fedgradient.md
+    server_optimizer: 'adam'        # adam | adamw | sgd | sgd_momentum
+    server_lr: 0.01
+    beta_1: 0.9
+    beta_2: 0.99
+    eps: 0.001
+    momentum: 0.9                   # sgd_momentum only
+    weight_decay: 0.0
+    clipnorm: null                  # client-side clipping; null = off (key missing -> model.tft.clipnorm)
+    weighting: 'uniform'            # 'batch_size' | 'uniform'
   force_retrain: True
   verbose: True

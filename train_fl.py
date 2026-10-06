@@ -36,6 +36,8 @@ def main() -> None:
     parser.add_argument('-c', '--config', type=str, help='Select config')
     parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix for study name (default: empty)')
     parser.add_argument('--save_model', action='store_true', default=False, help='Save trained model to models directory (default: False)')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Resume the FL simulation from a checkpoint (<fl.checkpoint.dir>/last.pt)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
@@ -88,6 +90,7 @@ def main() -> None:
     # Set model name and FL flag for preprocessing pipeline
     config['model']['name'] = args.model
     config['model']['fl'] = True  # Disable torch.compile in FL mode
+    federated.check_client_parks(config)
 
     # Extract retrain settings with defaults
     retrain_interval = config['data'].get('retrain_interval', 1)
@@ -119,6 +122,14 @@ def main() -> None:
     fl_strategy = config['fl'].get('strategy', 'fedavg')
     study_name = f'fl_a-{fl_strategy}_m-{args.model}_out-{output_dim}_freq-{freq}_{study_name_suffix}'
 
+    # Checkpoints (fl.checkpoint.enabled) default to checkpoints/fl/<study_name>/last.pt
+    ckpt_cfg = config['fl'].get('checkpoint') or {}
+    if ckpt_cfg.get('enabled', False) and not ckpt_cfg.get('dir'):
+        ckpt_cfg['dir'] = os.path.join('checkpoints', 'fl', study_name)
+        config['fl']['checkpoint'] = ckpt_cfg
+    if args.resume:
+        config['fl']['resume'] = args.resume
+
     logging.info(f'Start Federated Learning for Study: {study_name}')
     logging.info(f'Config: {json.dumps(params, indent=2)}')
 
@@ -137,13 +148,13 @@ def main() -> None:
         # Load initial data to get dates (use first client as sample)
         first_client_id = list(config['fl']['clients'].keys())[0]
         first_client_files = config['fl']['clients'][first_client_id]
-        temp_config = copy.deepcopy(config)
-        temp_config['data']['files'] = first_client_files
+        temp_config = federated.client_data_config(config, first_client_files)
         temp_dfs = preprocessing.get_data(
             data_dir=data_dir,
             config=temp_config,
             freq=freq,
-            features=features
+            features=features,
+            files_key='client_files'
         )
 
         for df in temp_dfs.values():
@@ -238,9 +249,8 @@ def main() -> None:
     for client_id, station_ids in tqdm(config['fl']['clients'].items(), desc="Loading clients", unit="client"):
         logging.debug(f'Loading data for client: {client_id} with stations: {station_ids}')
 
-        # Create client-specific config
-        client_config = copy.deepcopy(config)
-        client_config['data']['files'] = station_ids
+        # Client-specific config: stations under data.client_files, data.files stays global
+        client_config = federated.client_data_config(config, station_ids)
 
         # Set the random seeds for this client's stations to match CL training
         # We need to pass the seed to each preprocessing call
@@ -258,7 +268,8 @@ def main() -> None:
             data_dir=data_dir,
             config=client_config,
             freq=freq,
-            features=features
+            features=features,
+            files_key='client_files'
         )
 
         clients_data[client_id] = {
@@ -276,13 +287,12 @@ def main() -> None:
     val_dfs = None
     if config['data'].get('val_files'):
         logging.info("val_files found — loading separate validation/test stations for FL evaluation.")
-        val_config = copy.deepcopy(config)
-        val_config['data']['files'] = config['data']['val_files']
         val_dfs = preprocessing.get_data(
             data_dir=data_dir,
-            config=val_config,
+            config=copy.deepcopy(config),
             freq=freq,
-            features=features
+            features=features,
+            files_key='val_files'
         )
         logging.info(f"Loaded {len(val_dfs)} val stations.")
 
@@ -891,6 +901,23 @@ def main() -> None:
         pickle.dump(results, f)
 
     logging.info(f"\nFederated training completed! Results saved to: {path_to_pkl}")
+
+    # Communication statistics (last training cycle)
+    if all_histories and 'comm_stats' in all_histories[-1]:
+        h = all_histories[-1]
+        comm_stats = {'strategy': fl_strategy, 'study_name': study_name,
+                      'rounds': int(h.get('last_round', 0)), 'best_round': int(h.get('best_round', 0)),
+                      'early_stopped': bool(h.get('early_stopped', False)),
+                      'server_steps': int(h.get('server_steps', 0)),
+                      'runtime_s': float(h.get('runtime_s', 0.0)), **h['comm_stats']}
+        comm_path = path_to_pkl.replace('.pkl', '_comm_stats.json')
+        with open(comm_path, 'w') as f:
+            json.dump(comm_stats, f, indent=2)
+        logging.info(f"Communication: {comm_stats['server_steps']} server steps, "
+                     f"{comm_stats['total_bytes'] / 1e9:.3f} GB in total (up "
+                     f"{comm_stats['total_upload_bytes'] / 1e9:.3f}, down "
+                     f"{comm_stats['total_download_bytes'] / 1e9:.3f}, eval down "
+                     f"{comm_stats['total_eval_download_bytes'] / 1e9:.3f}) -> {comm_path}")
 
     # Save model if requested
     if args.save_model:
