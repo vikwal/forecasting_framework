@@ -1,0 +1,128 @@
+# 1 PARK PER CLIENT: CL reference
+# the same 8 parks as config_parks_v1_1pc_fl_*.yaml, centralized; otherwise as config_parks_v1_cl80.yaml.
+data:
+  use_case: 'wind'
+  path: !ENV '${DATA_ROOT}/synthetic/wind/parks_v1'
+  files: [
+          'SEL976062210315', 'SEL932904298682', 'SEL914452547108', 'SEL961919513626',
+          'SEL973864817858', 'SEL998279633183', 'SEL913997709026', 'SEL960606996902']
+  ecmwf_path: !ENV '${DATA_ROOT}/nwp_ready/ecmwf'
+  ecmwf_layout: 'site_runs'
+  freq: '1h'
+  target_col: 'power'
+  train_frac: 1
+  val_frac: 0.0
+  train_start: '2023-07-24'
+  train_end: '2024-07-31 23:00'
+  test_start: '2024-08-01'
+  test_end: '2025-07-31'
+  data_cutoff: '2025-08-03'
+  retrain_interval: 1
+  eval_interval: 1
+  scale_x: True
+  scale_y: False
+  use_pca: False
+  pca_components: 3
+  lag_in_col: False
+  n_neighbors: 5
+
+params:
+  known_features: ['wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184',
+                   'ecmwf_wind_speed_h100', 'ecmwf_wind_speed_h200']
+  observed_features: ['power']
+  static_features: []
+  nwp_models: ['icon-d2', 'ecmwf']
+  ecmwf_features: ['u_wind100m', 'v_wind100m', 'u_wind200m', 'v_wind200m']
+  next_n_grid_points: 1
+  next_n_grid_ecmwf: 1
+  get_next_grid_points_method: 'geodesic_next'
+  aggregate_nwp_layers: 'not'
+  aggregate_grid_points: False
+  get_density: False
+  next_n_stations: 0
+  extrapolate: null
+  random_seed: 42
+
+model:
+  num_workers: 0
+  epochs: 300             # one epoch is only ~5 batches per park; early stopping decides
+  output_dim: 48
+  lookback: 48
+  horizon: 48
+  step_size: 48
+  batch_size: 64
+  lr: 0.0005
+  optimizer: 'adam'
+  loss: 'mse'
+  metrics: ['mae', 'rmse', 'r^2']
+  shuffle: True
+  callbacks: False
+  force_retrain: True
+  lookup_hpo: False
+  verbose: 1
+  parallelize: False
+  fl: False             # centralized run
+  tft:
+    n_heads: 4
+    hidden_dim: 64
+    dropout: 0.1
+    rnn_type: 'lstm'
+    n_lstm_layers: 1
+    static_embedding_dim: 128
+    quantiles: [0.5]
+    clipnorm: 7.0
+  early_stopping:
+    enabled: True
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
+    restore_best_weights: True
+  # unused architecture sections (hpo.get_hyperparameters reads them)
+  fnn: {units: 128, n_layers: 2}
+  cnn: {filters: 64, kernel_size: 3, n_cnn_layers: 4, increase_filters: False}
+  rnn: {n_rnn_layers: 2, units: 64, dropout: 0.1}
+  attention_heads: 8
+  stemgnn: {units: 32, stack_cnt: 2, multi_layer: 5, dropout: 0.5}
+
+hpo:
+  studies_path: 'studies/optuna.db'
+  objectives:
+    - metric: 'val_rmse'
+      direction: 'minimize'
+  trials: 100
+  kfolds: 3
+  min_train_date: '2023-07-24'
+  pruning: {use_median_pruner: False, n_startup_trials: 10, n_warmup_steps: 2, interval_steps: 1, disable_pruning: True}
+  batch_size: [32, 256]
+  epochs: [10, 100]
+  n_layers: [1, 4]
+  n_cnn_layers: [1, 8]
+  n_rnn_layers: [1, 4]
+  learning_rate: [0.0001, 0.01]
+  attention_heads: [1, 8]
+  fnn: {units: [32, 256]}
+  cnn: {filters: [16, 128], kernel_size: [2, 5], increase_filters: False}
+  rnn: {units: [16, 128], dropout: [0.0, 0.5]}
+  tft:
+    n_heads: [1, 8]
+    hidden_dim: [16, 128]
+    dropout: [0.01, 0.5]
+    n_lstm_layers: [1, 3]
+    static_embedding_dim: [8, 64]
+    num_quantiles: [1]
+    clipnorm: 7.0
+  # read by hpo.get_hyperparameters even for centralized runs
+  fl: {strategy: 'fedavg', personalize: False, n_rounds: [1, 30], server_lr: [0.0001, 0.1],
+       beta_1: [0.0, 1.0], beta_2: [0.0, 1.0], tau: [0.0001, 0.1]}
+
+eval:
+  results_path: 'results/parks_v1'
+  eval_on_all_test_data: True
+  retrain_interval: 0
+  t_0: 0
+
+# read by hpo.get_hyperparameters (strategy); no federated training in this config
+fl:
+  strategy: 'fedavg'
+  n_rounds: 1
