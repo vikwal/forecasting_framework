@@ -6,6 +6,16 @@ data:
   files: [
           'SEL976062210315', 'SEL932904298682', 'SEL914452547108', 'SEL961919513626',
           'SEL973864817858', 'SEL998279633183', 'SEL913997709026', 'SEL960606996902']
+  stations_master: 'data/parks_v1/stations_master.csv'
+  wind_parameter_file: 'data/parks_v1/wind_parameter.csv'
+  turbine_parameter_file: 'data/parks_v1/turbine_parameter.csv'
+  power_curves_path: !ENV '${DATA_ROOT}/synthetic/wind/power_curves'
+  power_col: 'power_park'
+  capacity_col: 'capacity_kw'
+  nwp_path: !ENV '${DATA_ROOT}/nwp_ready/icon-d2'
+  nwp_site_prefix: 'park_'
+  icond2_source: 'csv'
+  forecast_hours: ['09']
   ecmwf_path: !ENV '${DATA_ROOT}/nwp_ready/ecmwf'
   ecmwf_layout: 'site_runs'
   freq: '1h'
