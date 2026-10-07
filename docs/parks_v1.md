@@ -71,5 +71,7 @@ Ergebnisse 2026-10-06 (R² je Park auf 2024-08 … 2025-07, 80 Client-Parks, Mit
 CL80 0,833 / 0,845, FedGradient 0,831 / 0,841, FedAvg 0,831 / 0,841; mit Park-ID CL80 0,861 /
 0,868, FedGradient 0,857 / 0,866, FedAvg 0,843 / 0,850 (nach 100 Runden noch nicht konvergiert).
 Holdout (10 Parks, ohne Park-ID): CL80 0,836, FedGradient 0,839, FedAvg 0,838.
+Lokal je Client (`train_local.py`, 2026-10-07): 0,835 / 0,847, mit Park-ID 0,859 / 0,865 — so gut
+wie FL und CL; Föderation bringt hier keinen messbaren Vorteil (Einordnung im Bericht).
 Bericht: `FL_Contribution/reports/fl_fedgradient_parks_v1.md`.
 Tests: `python -m pytest tests/test_fedgradient.py`.

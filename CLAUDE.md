@@ -80,7 +80,8 @@ FL mit 80 Parks in 8 Clients, FedGradient)
 **Federated Learning** — Clients sind Stationsgruppen (`fl.clients`), Aggregation
 FedAvg/FedAdam oder [fedgradient.md](docs/fedgradient.md) (Gradienten je Batch, Server-Optimizer,
 1 Runde = 1 Epoche, Park-ID zeilenweise, Checkpoint/Resume, Comm-Stats);
-lokale Baseline je Client: [local_training.md](docs/local_training.md).
+lokale Baseline (je Client ein eigenes Modell, parallel über GPUs): `python train_local.py -c <FL-Config>`
+→ [local_training.md](docs/local_training.md).
 [fine_tuning_feature.md](docs/fine_tuning_feature.md),
 [early_stopping_config.md](docs/early_stopping_config.md) (FL vs. Fine-Tuning),
 [global_early_stopping.md](docs/global_early_stopping.md) (über globale Runden)

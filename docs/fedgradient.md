@@ -83,6 +83,15 @@ alle Optimizer im Suchraum dort stehen.
   Wegen der Rundenseeds ist ein fortgesetzter Lauf identisch mit einem durchgelaufenen (Test).
   Nicht mit `fl.personalize`.
 
+## Baselines zum Vergleich
+
+- **Zentral (CL):** `train_cl.py` auf denselben Stationen (parks_v1: `config_parks_v1_cl80{,_parkid}.yaml`,
+  Holdout über `data.holdout_files`).
+- **Lokal je Client:** `train_local.py -c <diese FL-Config> -m tft --gpus 0-7` — leitet aus
+  `fl.clients` je Client einen zentralen Lauf auf dessen Stationen ab und fährt alle parallel,
+  eine GPU je Client ([local_training.md](local_training.md)).
+- **FedAvg:** dieselbe Config mit `fl.strategy: fedavg`.
+
 ## Unterschiede zur früheren `fedsgd`
 
 | | `fedsgd` (bis 2026-10-06) | `fedgradient` |
