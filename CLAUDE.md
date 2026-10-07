@@ -9,7 +9,7 @@ Alle Experimente werden über YAML in `configs/` gesteuert
 
 | Wo | Was |
 |---|---|
-| `train_cl.py`, `train_fl.py` | Training CL bzw. FL (FL nutzt Ray) |
+| `train_cl.py`, `train_fl.py`, `train_local.py` | Training CL bzw. FL (FL nutzt Ray); `train_local.py`: je FL-Client ein lokales Modell, parallel über GPUs ([local_training.md](docs/local_training.md)) |
 | `hpo_cl.py`, `hpo_fl.py` | Optuna-HPO; `launch_multi_gpu.sh` startet parallele Prozesse über mehrere GPUs |
 | `geostatistics/` | **GNN-Pfad**: `train_dcrnn.py`, `train_mtgnn.py`, `train_wavenet.py`, Kriging, Variogramme, `fold_dashboard.py` |
 | `utils/` | `preprocessing.py` (Hauptpipeline, modell- und quellenabhängig), `solar.py` (Solar-Pendant), `models.py` (`get_model()`), `federated.py` (FedAvg, Ray), `fedgradient.py` (FedGradient), `hpo.py`, `eval.py`, `tools.py`, `data_cache.py` (Hash-Keys), `meteo.py` (pvlib), `db_connector.py` (PostGIS) |
@@ -79,7 +79,8 @@ FL mit 80 Parks in 8 Clients, FedGradient)
 
 **Federated Learning** — Clients sind Stationsgruppen (`fl.clients`), Aggregation
 FedAvg/FedAdam oder [fedgradient.md](docs/fedgradient.md) (Gradienten je Batch, Server-Optimizer,
-1 Runde = 1 Epoche, Park-ID zeilenweise, Checkpoint/Resume, Comm-Stats).
+1 Runde = 1 Epoche, Park-ID zeilenweise, Checkpoint/Resume, Comm-Stats);
+lokale Baseline je Client: [local_training.md](docs/local_training.md).
 [fine_tuning_feature.md](docs/fine_tuning_feature.md),
 [early_stopping_config.md](docs/early_stopping_config.md) (FL vs. Fine-Tuning),
 [global_early_stopping.md](docs/global_early_stopping.md) (über globale Runden)

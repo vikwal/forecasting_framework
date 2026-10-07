@@ -57,6 +57,8 @@ regional, N0–N3 überregional, je 10 Parks; `holdout` = 10 Parks). Strategie `
 python train_fl.py -c configs/parks_v1/config_parks_v1_fl_fedgradient -m tft   # 8 Clients, je 1 GPU
 python train_cl.py -c configs/parks_v1/config_parks_v1_cl80 -m tft
 ```
+Lokale Baseline (je Client ein eigenes Modell, [local_training.md](local_training.md)):
+`python train_local.py -c configs/parks_v1/config_parks_v1_fl_fedgradient{,_parkid} -m tft --gpus 0-7`.
 Vergleich FedAvg: `config_parks_v1_fl_fedavg{,_parkid}.yaml` (dieselbe Config, `fl.strategy: fedavg`,
 `n_local_epochs: 1`).
 
