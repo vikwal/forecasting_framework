@@ -73,6 +73,12 @@ def main():
     for i, (cfg, method) in enumerate(todo, 1):
         stem = f'{os.path.basename(cfg)}__{method}'
         done = os.path.join(LOGS, f'{stem}.done')
+        log = os.path.join(LOGS, f'{stem}.out')
+        if not os.path.exists(done) and os.path.exists(log):      # finished before a restart
+            prev = RESULT.findall(open(log, errors='ignore').read())
+            if prev and os.path.exists(os.path.join(REPO, prev[-1])):
+                with open(done, 'w') as f:
+                    f.write(prev[-1] + '\n')
         if os.path.exists(done):
             print(f'[{i}/{len(todo)}] skip {stem} (done)', flush=True)
             continue
@@ -81,7 +87,6 @@ def main():
         if args.dry_run:
             continue
         t0 = time.time()
-        log = os.path.join(LOGS, f'{stem}.out')
         with open(log, 'w') as fh:
             rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, cwd=REPO)
         txt = open(log, errors='ignore').read()
