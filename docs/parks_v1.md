@@ -104,3 +104,18 @@ FedGradient 0,760 / 0,827, FedAvg 0,764 / 0,817, CL80 0,775 / 0,826; x4 lokal 0,
 0,648 / 0,765, FedAvg 0,646 / 0,769, CL80 0,660 / 0,752. Föderation verbessert die Label-Prognose in keiner
 Variante; einziger FL-Vorteil gegen die verfügbare Leistung: FedGradient + Park-ID in x1 (+0,008).
 Bericht: `FL_Contribution/reports/fl_curtailment_v11.md`.
+
+### Statische Parkmerkmale und Variante ohne Leistungshistorie (2026-10-09)
+
+Im `power_col`-Modus (reale Parks) setzt `preprocess_synth_wind_icond2` jetzt park-weite Statiken aus
+`turbine_parameter.csv` (`utils.preprocessing.park_group_statics`): `cut_in`, `cut_out`, `rated_wind_speed`,
+`hub_height` und `park_age`, je mit der installierten Leistung der Turbinengruppen (n × rated_kw) gewichtet;
+`park_age` in Jahren zum Stichtag `data.train_start` (vorher: Inbetriebnahme der ersten Einheit bis heute, also vom
+Laufdatum abhängig). `altitude` wie bisher aus `wind_parameter.csv`. Wirksam nur, wenn sie in
+`params.static_features` stehen; die anderen Pfade (DWD-Stationen, Turbinenzuordnung) sind unverändert.
+
+Configs `config_parks_v1_curt_v11_{fl_fedgradient,fl_fedavg,cl80}_static.yaml`
+(`static_features: [park_age, altitude, hub_height, cut_in, cut_out, rated_wind_speed]`) und `…_static_nolag.yaml`
+(zusätzlich `observed_features: []`, kein Leistungs-Lag). Ergebnis x1 gegen das Label (R² Mittel): lokal 0,795 /
+0,789 (ohne Lag), CL80 0,797 / 0,791, FedGradient 0,779 / 0,779, FedAvg 0,782 / 0,761
+(`FL_Contribution/reports/fl_curtailment_v11.md` §6).
