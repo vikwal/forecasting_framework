@@ -75,3 +75,32 @@ Lokal je Client (`train_local.py`, 2026-10-07): 0,835 / 0,847, mit Park-ID 0,859
 wie FL und CL; Föderation bringt hier keinen messbaren Vorteil (Einordnung im Bericht).
 Bericht: `FL_Contribution/reports/fl_fedgradient_parks_v1.md`.
 Tests: `python -m pytest tests/test_fedgradient.py`.
+
+## Abgeregelte Varianten (parks_v1_curt_v11, 2026-10-09)
+
+Gleiche Parks, Clients, Features, Split und Modelle, aber `data.path` auf die abgeregelten Releases des Generators
+(`${DATA_ROOT}/synthetic/wind/parks_v1_curt_v11` realistisch, `..._x4` Netzabregelung × 4; Bericht
+`FL_Contribution/reports/curtailment_synthesis_v1_1.md`). `power_park` ist dort die abgeregelte Leistung (Label und
+48-h-Lag); die verfügbare steht in `power_park_avail`, `curt_flag` markiert abgeregelte Stunden.
+
+| Config | Lauf |
+|---|---|
+| `config_parks_v1_curt_v11[_x4]_fl_fedgradient[_parkid].yaml` | FedGradient (`train_fl.py`); lokal: `train_local.py -c` dieselbe Config |
+| `config_parks_v1_curt_v11[_x4]_fl_fedavg[_parkid].yaml` | FedAvg |
+| `config_parks_v1_curt_v11[_x4]_cl80[_parkid].yaml` | zentral auf den 80 Client-Parks |
+| `config_parks_v1_curt_v11_cl_smoke.yaml` | 3 Parks, 1 Epoche |
+
+```bash
+python train_fl.py -c configs/parks_v1/config_parks_v1_curt_v11_fl_fedgradient -m tft --save-predictions   # l1, 8 GPUs
+python train_local.py -c configs/parks_v1/config_parks_v1_curt_v11_fl_fedgradient -m tft --gpus 0-3 --per-gpu 2 --save-predictions
+python train_cl.py -c configs/parks_v1/config_parks_v1_curt_v11_cl80 -m tft --save-predictions
+```
+`--save-predictions` (jetzt auch in `train_fl.py`, von `train_local.py` durchgereicht) legt die Vorhersagen ins
+Ergebnis-Pickle. Damit bewertet `FL_Contribution/pipeline/summarize_fl_curtailment.py` zusätzlich gegen die
+verfügbare Leistung und auf Stunden ohne Abregelung.
+
+Ergebnis (R² je Park, Label / verfügbar, Mittel über 80 Client-Parks, ohne Park-ID): x1 lokal 0,771 / 0,827,
+FedGradient 0,760 / 0,827, FedAvg 0,764 / 0,817, CL80 0,775 / 0,826; x4 lokal 0,658 / 0,773, FedGradient
+0,648 / 0,765, FedAvg 0,646 / 0,769, CL80 0,660 / 0,752. Föderation verbessert die Label-Prognose in keiner
+Variante; einziger FL-Vorteil gegen die verfügbare Leistung: FedGradient + Park-ID in x1 (+0,008).
+Bericht: `FL_Contribution/reports/fl_curtailment_v11.md`.
