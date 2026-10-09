@@ -76,6 +76,26 @@ def get_target_cols(config: dict, default: str = 'power') -> List[str]:
     return [str(data_cfg.get('target_col', default))]
 
 
+def park_group_statics(groups: pd.DataFrame, reference_date) -> Dict[str, float]:
+    """Park-level static features of a real park with several turbine groups (power_col mode).
+
+    Weighted by the installed capacity of each group (n_turbines x rated_kw): cut_in, cut_out,
+    rated_wind_speed [m/s], hub_height [m] and park_age [years at reference_date, normally
+    data.train_start, so that the value does not depend on the day of the run].
+    """
+    w = groups['n_turbines'].astype(float).to_numpy() * groups['rated_kw'].astype(float).to_numpy()
+    if not len(w) or w.sum() <= 0:
+        raise ValueError('park without turbine groups or capacity')
+    w = w / w.sum()
+    ref = pd.Timestamp(reference_date).tz_localize(None) if pd.Timestamp(reference_date).tzinfo else pd.Timestamp(reference_date)
+    age = (ref - pd.to_datetime(groups['commissioning_date'])).dt.days.to_numpy() / 365.25
+    return {'park_age': float((w * age).sum()),
+            'hub_height': float((w * groups['hub_height'].astype(float)).sum()),
+            'cut_in': float((w * groups['cut_in'].astype(float)).sum()),
+            'cut_out': float((w * groups['cut_out'].astype(float)).sum()),
+            'rated_wind_speed': float((w * groups['rated'].astype(float)).sum())}
+
+
 def static_categories(config: dict) -> Dict[str, list]:
     """Category lists of the categorical static features (params.static_categorical).
 
@@ -2384,8 +2404,11 @@ def preprocess_synth_wind_icond2(path: str,
             static_data['park_age'] = park_age_years
             static_data['installed_capacity'] = installed_capacity
             static_data['altitude'] = altitude
-            # power_col mode (real parks): several turbine groups per park, so one
-            # hub_height/rotor/cut_in per park does not exist -> no per-turbine statics
+            # power_col mode (real parks): several turbine groups per park -> capacity-weighted
+            # park values (park_group_statics); park_age at data.train_start instead of today
+            if _power_col:
+                static_data.update(park_group_statics(turbines, config['data'].get('train_start')
+                                                      or pd.Timestamp.now()))
             for index, turbine in ([] if _power_col else turbines.iterrows()):
                 turbine_name = turbine['turbine_name']
                 turbine_id = turbine['turbine']

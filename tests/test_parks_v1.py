@@ -99,3 +99,18 @@ def test_ecmwf_site_runs_empty_when_site_missing(tmp_path):
     (tmp_path / 'SL' / '00').mkdir(parents=True)
     assert preprocessing._fetch_ecmwf_data_from_site_runs(
         53.0, 14.0, 1, str(tmp_path), 'park_missing', ['u_wind100m']).empty
+
+
+def test_park_group_statics_capacity_weighted():
+    import pandas as pd
+    from utils.preprocessing import park_group_statics
+    g = pd.DataFrame({'n_turbines': [3, 1], 'rated_kw': [2000.0, 4000.0], 'hub_height': [100.0, 150.0],
+                      'cut_in': [3.0, 2.0], 'cut_out': [25.0, 22.0], 'rated': [12.0, 10.0],
+                      'commissioning_date': ['2004-01-01', '2020-01-01']})
+    s = park_group_statics(g, '2024-01-01')
+    # weights 6000 : 4000 = 0.6 : 0.4
+    assert s['hub_height'] == pytest.approx(0.6 * 100 + 0.4 * 150)
+    assert s['cut_in'] == pytest.approx(2.6) and s['cut_out'] == pytest.approx(23.8)
+    assert s['rated_wind_speed'] == pytest.approx(11.2)
+    assert s['park_age'] == pytest.approx(0.6 * 20.0 + 0.4 * 4.0, abs=0.02)
+    assert park_group_statics(g, pd.Timestamp('2024-01-01', tz='UTC')) == s     # tz-aware reference
