@@ -38,7 +38,9 @@ def local_name(fl_config_path: str, strategy: Optional[str] = None) -> str:
 
 def client_configs(config: Dict[str, Any], clients: Optional[Sequence[str]] = None) -> Dict[str, Dict[str, Any]]:
     """One centralized config per FL client: data.files = that client's stations,
-    held-out/test station lists removed, model.fl False. Everything else unchanged."""
+    held-out/test station lists removed, model.fl False. Everything else unchanged.
+    With fl.client_holdout {client: [stations]} those stations become the client's
+    data.holdout_files (evaluated, never trained on)."""
     mapping = (config.get('fl') or {}).get('clients')
     if not mapping:
         raise ValueError("the config has no fl.clients mapping")
@@ -55,6 +57,11 @@ def client_configs(config: Dict[str, Any], clients: Optional[Sequence[str]] = No
         for key in DROPPED_DATA_KEYS:
             cfg['data'].pop(key, None)
         cfg['model']['fl'] = False
+        # fl.client_holdout: stations of this client that it never trains on (e.g. a new park);
+        # the local model is evaluated on them like the global FL model (train_cl holdout_files)
+        own_holdout = ((config.get('fl') or {}).get('client_holdout') or {}).get(cid)
+        if own_holdout:
+            cfg['data']['holdout_files'] = [str(s) for s in own_holdout]
         out[str(cid)] = cfg
     return out
 

@@ -80,6 +80,7 @@ def main() -> None:
 
     # Load config
     config = tools.load_config(f'{args.config}.yaml')
+    tools.set_seed(config.get('params', {}).get('random_seed', 42))   # reproducible runs and seed replicates
     freq = config['data']['freq']
     params = config['params']
     config = tools.handle_freq(config=config)
@@ -660,7 +661,9 @@ def main() -> None:
                 fine_tuned_weights[client_id] = result['weights']
                 logging.info(f"Fine-tuning completed for client: {client_id}")
 
-            # Replace global weights with fine-tuned weights
+            # Replace global weights with fine-tuned weights (fl.fine_tune_eval_global: keep the
+            # global ones to evaluate the clients with both models in one run)
+            global_clients_weights = clients_weights
             clients_weights = fine_tuned_weights
             logging.info("Fine-tuning completed for all clients.")
 
@@ -670,59 +673,69 @@ def main() -> None:
         logging.info('Start evaluation pipeline...')
 
         # Evaluate each park individually
-        eval_results = []
-        for client_id, client_test_data in tqdm(test_data.items(), desc="Evaluating clients", unit="client"):
-            logging.debug(f'Evaluating client: {client_id}')
+        def _evaluate_clients(weights_by_client, collect):
+            eval_results = []
+            for client_id, client_test_data in tqdm(test_data.items(), desc="Evaluating clients", unit="client"):
+                logging.debug(f'Evaluating client: {client_id}')
 
-            # Create model with client-specific weights (either FL or fine-tuned)
-            model = models.get_model(config=period_config, hyperparameters=hyperparameters)
-            model.load_state_dict(clients_weights[client_id])
-            model = model.to(device)
+                # Create model with client-specific weights (either FL or fine-tuned)
+                model = models.get_model(config=period_config, hyperparameters=hyperparameters)
+                model.load_state_dict(weights_by_client[client_id])
+                model = model.to(device)
 
-            # Evaluate each park in this client
-            for park_key, (X_test_park, y_test_park, index_test_park, scaler_y_park) in client_test_data.items():
-                logging.debug(f'Evaluating park: {park_key} for client: {client_id}')
+                # Evaluate each park in this client
+                for park_key, (X_test_park, y_test_park, index_test_park, scaler_y_park) in client_test_data.items():
+                    logging.debug(f'Evaluating park: {park_key} for client: {client_id}')
 
-                # Get park data
-                park_df = clients_data[client_id]['dfs'][park_key]
+                    # Get park data
+                    park_df = clients_data[client_id]['dfs'][park_key]
 
-                # Determine test_start for evaluation
-                if train_once_eval_multiple:
-                    test_start_str = eval_test_start
-                else:
-                    test_start_str = period_config['data']['test_start']
+                    # Determine test_start for evaluation
+                    if train_once_eval_multiple:
+                        test_start_str = eval_test_start
+                    else:
+                        test_start_str = period_config['data']['test_start']
 
-                t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
+                    t_0 = 0 if period_config['eval']['eval_on_all_test_data'] else period_config['eval']['t_0']
 
-                # Run evaluation pipeline for this park
-                park_eval = eval.evaluation_pipeline(
-                    data=park_df,
-                    model=model,
-                    model_name=f'{args.model.upper()}',
-                    X_test=X_test_park,
-                    y_test=y_test_park,
-                    scaler_y=scaler_y_park,
-                    output_dim=output_dim,
-                    horizon=horizon,
-                    index_test=index_test_park,
-                    test_start=test_start_str,
-                    t_0=t_0,
-                    park_id=park_key,
-                    synth_dir=None,
-                    get_physical_persistence=False,
-                    target_col=preprocessing.get_target_cols(period_config)[0],
-                    target_cols=preprocessing.get_target_cols(period_config),
-                    nwp_baseline_col=period_config.get('params', {}).get('nwp_baseline_col'),
-                    evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
-                    device=device,
-                    collect=_predictions if args.save_predictions else None,
-                )
-                park_eval['key'] = park_key
-                park_eval['client_id'] = client_id
-                eval_results.append(park_eval)
+                    # Run evaluation pipeline for this park
+                    park_eval = eval.evaluation_pipeline(
+                        data=park_df,
+                        model=model,
+                        model_name=f'{args.model.upper()}',
+                        X_test=X_test_park,
+                        y_test=y_test_park,
+                        scaler_y=scaler_y_park,
+                        output_dim=output_dim,
+                        horizon=horizon,
+                        index_test=index_test_park,
+                        test_start=test_start_str,
+                        t_0=t_0,
+                        park_id=park_key,
+                        synth_dir=None,
+                        get_physical_persistence=False,
+                        target_col=preprocessing.get_target_cols(period_config)[0],
+                        target_cols=preprocessing.get_target_cols(period_config),
+                        nwp_baseline_col=period_config.get('params', {}).get('nwp_baseline_col'),
+                        evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
+                        device=device,
+                        collect=collect,
+                    )
+                    park_eval['key'] = park_key
+                    park_eval['client_id'] = client_id
+                    eval_results.append(park_eval)
 
-            del model
-            gc.collect()
+                del model
+                gc.collect()
+            return eval_results
+
+        eval_results = _evaluate_clients(clients_weights, _predictions if args.save_predictions else None)
+        _predictions_global, eval_global = {}, None
+        if period_config['fl'].get('fine_tune', False) and period_config['fl'].get('fine_tune_eval_global', False) \
+                and 'global_clients_weights' in locals():
+            logging.info('Evaluating the clients also with the global (not fine-tuned) model...')
+            eval_global = pd.concat(_evaluate_clients(global_clients_weights,
+                                                     _predictions_global if args.save_predictions else None))
 
         # --- EVALUATE VAL STATIONS (out-of-sample generalisation) ---
         # Uses the global FL model (weights before fine-tuning), since val stations
@@ -885,6 +898,8 @@ def main() -> None:
             'test_dates': test_periods,
             'clients_weights': clients_weights,
             'predictions': _predictions if args.save_predictions else None,
+            'evaluation_global': eval_global,
+            'predictions_global': _predictions_global or None,
         }
     else:
         # Single training run
@@ -898,6 +913,8 @@ def main() -> None:
             'test_dates': test_periods,
             'clients_weights': clients_weights,
             'predictions': _predictions if args.save_predictions else None,
+            'evaluation_global': eval_global,
+            'predictions_global': _predictions_global or None,
         }
 
     # Save results

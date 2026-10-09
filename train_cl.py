@@ -80,6 +80,7 @@ def main() -> None:
     os.makedirs('models', exist_ok=True)
 
     config = tools.load_config(f'{args.config}.yaml')
+    tools.set_seed(config.get('params', {}).get('random_seed', 42))   # reproducible runs and seed replicates
     freq = config['data']['freq']
     params = config['params']
     config = tools.handle_freq(config=config)

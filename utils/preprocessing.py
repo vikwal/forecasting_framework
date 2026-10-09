@@ -76,6 +76,23 @@ def get_target_cols(config: dict, default: str = 'power') -> List[str]:
     return [str(data_cfg.get('target_col', default))]
 
 
+TARGET_MASKS = {
+    # curt_flag: any curtailment layer reduced the power in the hour (operator view)
+    'all': lambda df: df['curt_flag'] > 0,
+    # direct-marketer view: own market curtailment and permit (bat) shut-downs are known,
+    # grid curtailment (redispatch) is not
+    'market_env': lambda df: (df['loss_mkt'] > 0) | (df['loss_env'] > 0),
+    'grid': lambda df: df['loss_grid'] > 0,
+}
+
+
+def target_mask_flags(df: pd.DataFrame, spec: str) -> pd.Series:
+    """Hours whose target is excluded from the loss (data.target_mask, curtailed releases)."""
+    if spec not in TARGET_MASKS:
+        raise ValueError(f"data.target_mask must be one of {sorted(TARGET_MASKS)}, got {spec!r}")
+    return TARGET_MASKS[spec](df)
+
+
 def park_group_statics(groups: pd.DataFrame, reference_date) -> Dict[str, float]:
     """Park-level static features of a real park with several turbine groups (power_col mode).
 
@@ -2358,6 +2375,8 @@ def preprocess_synth_wind_icond2(path: str,
             turbines = turbine_parameter.loc[turbine_parameter.park_id == station_id]
             heights = turbines['hub_height'].values
             df_synth['power'] = df_synth[_power_col]
+            _mask_spec = config['data'].get('target_mask')
+            _target_mask = target_mask_flags(df_synth, _mask_spec) if _mask_spec else None
             df_synth = df_synth[['power']]
         elif 'turbines' in config['params']:
             turbines_list = config['params']['turbines']
@@ -2429,6 +2448,17 @@ def preprocess_synth_wind_icond2(path: str,
 
         # Normalize power
         df_synth['power'] = df_synth['power'] / installed_capacity
+        # data.target_mask (power_col mode): masked training hours get the mask value and are left
+        # out of the loss (tools.make_criterion); the evaluation period keeps the true targets.
+        # Needs params.observed_features without 'power' (the mask value would enter the lag).
+        if _power_col and config['data'].get('target_mask'):
+            if 'power' in (config['params'].get('observed_features') or []):
+                raise ValueError("data.target_mask needs observed_features without 'power' "
+                                 "(masked targets would appear in the power lag)")
+            from .tools import TARGET_MASK_VALUE
+            _train = df_synth.index < pd.Timestamp(config['data']['test_start'], tz='UTC')
+            df_synth.loc[_target_mask.reindex(df_synth.index, fill_value=False).values & _train, 'power'] = \
+                TARGET_MASK_VALUE
         df_synth = df_synth.resample('1H', closed='left', label='left', origin='start').mean()
 
     # Load station coordinates

@@ -142,6 +142,11 @@ class DataCache:
             'static_categorical': (tuple(config['params']['static_categorical'])
                                    if config['params'].get('static_categorical') else None),
             'ecmwf_layout': config['data'].get('ecmwf_layout'),
+            # real parks: the loaded window starts at train_start and park_age is computed at
+            # train_start (park_group_statics) -> part of the key; the target mask changes the
+            # training targets
+            'train_start': config['data'].get('train_start') if config['data'].get('power_col') else None,
+            'target_mask': config['data'].get('target_mask'),
             'ecmwf_path': config['data'].get('ecmwf_path') if config['data'].get('ecmwf_layout') else None,
             'forecast_hours': (tuple(config['data']['forecast_hours'])
                                if config['data'].get('ecmwf_layout') and config['data'].get('forecast_hours')

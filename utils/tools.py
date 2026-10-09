@@ -43,6 +43,50 @@ def _pinball_loss(predictions: torch.Tensor, targets: torch.Tensor, quantiles: l
 
 
 
+# Target mask (data.target_mask): masked training hours carry this value in the target
+# (power is normalised to [0, 1], so it never occurs); they do not enter the loss.
+TARGET_MASK_VALUE = -1.0
+
+
+def set_seed(seed: int) -> None:
+    """Seed python, numpy and torch (CPU and CUDA) for a run (params.random_seed)."""
+    import random as _random
+    _random.seed(int(seed))
+    np.random.seed(int(seed) % (2 ** 32))
+    torch.manual_seed(int(seed))
+    torch.cuda.manual_seed_all(int(seed))
+
+
+def make_criterion(config: dict):
+    """(criterion, median_idx) of a run: pinball loss for model.tft.quantiles, else MSE.
+    With data.target_mask set, targets equal to TARGET_MASK_VALUE are excluded and the loss is
+    the mean over the remaining elements; without it the criterion is exactly the previous one."""
+    quantiles = config['model'].get('tft', {}).get('quantiles', None)
+    if quantiles:
+        base = lambda pred, tgt: _pinball_loss(pred, tgt, quantiles)
+        median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
+    else:
+        base, median_idx = nn.MSELoss(), None
+    if not (config.get('data') or {}).get('target_mask'):
+        return base, median_idx
+
+    def masked(pred, tgt):
+        valid = tgt > TARGET_MASK_VALUE + 0.5
+        n = valid.sum()
+        if n == 0:
+            return (pred * 0.0).sum()
+        if quantiles:
+            losses = []
+            for i, q in enumerate(quantiles):
+                pq = pred if pred.dim() == 2 else pred[..., i]
+                e = tgt - pq
+                losses.append(torch.max((q - 1) * e, q * e)[valid])
+            return torch.stack(losses, dim=-1).mean()
+        return ((pred - tgt) ** 2)[valid].mean()
+
+    return masked, median_idx
+
+
 def _env_var_constructor(loader, node):
     """Resolve the YAML ``!ENV`` tag.
 
@@ -618,12 +662,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
             "Quantil-Vorhersage (model.tft.quantiles) ist noch nicht mit mehreren "
             f"Zielspalten kombinierbar (data.target_cols hat {_n_targets} Einträge)."
         )
-    if quantiles:
-        criterion = lambda pred, tgt: _pinball_loss(pred, tgt, quantiles)
-        median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
-    else:
-        criterion = nn.MSELoss()
-        median_idx = None
+    criterion, median_idx = make_criterion(config)
 
     # Training loop
     # model.epochs aus der Config als Rueckfallebene. get_hyperparameters legt

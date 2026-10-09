@@ -437,13 +437,7 @@ class ClientActor:
         else:
             trainable_params = [p for p in self.model.parameters() if p.requires_grad]
             optimizer = torch.optim.Adam(trainable_params, lr=lr)
-        quantiles = self.config['model'].get('tft', {}).get('quantiles', None)
-        if quantiles:
-            criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
-            median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
-        else:
-            criterion = nn.MSELoss()
-            median_idx = None
+        criterion, median_idx = tools.make_criterion(self.config)
 
         # Training loop
         history = {'train_loss': [], 'val_loss': [], 'train_rmse': [], 'val_rmse': [],
@@ -708,12 +702,7 @@ class ClientActor:
         the actor's device once and keeps them there for the whole run."""
         if getattr(self, '_fg', None) is None:
             hp = self.hyperparameters
-            quantiles = self.config['model'].get('tft', {}).get('quantiles', None)
-            if quantiles:
-                criterion = lambda pred, tgt: tools._pinball_loss(pred, tgt, quantiles)
-                median_idx = min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
-            else:
-                criterion, median_idx = nn.MSELoss(), None
+            criterion, median_idx = tools.make_criterion(self.config)
             clip = hp['client_clipnorm'] if 'client_clipnorm' in hp else \
                 fedgradient.fedgradient_hyperparameters(self.config)['client_clipnorm']
             self._fg = fedgradient.GradientClient(
