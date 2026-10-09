@@ -85,7 +85,7 @@ def main():
         with open(log, 'w') as fh:
             rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, cwd=REPO)
         txt = open(log, errors='ignore').read()
-        hits = RESULT.findall(txt[-20000:])
+        hits = RESULT.findall(txt)          # Ray workers keep logging after the result line
         ok = rc == 0 and hits
         print(f'[{i}/{len(todo)}] end {stem} rc={rc} {time.time() - t0:.0f} s {hits[-1] if hits else "NO RESULT"}',
               flush=True)
