@@ -36,9 +36,12 @@ def main() -> None:
     parser.add_argument('-c', '--config', type=str, help='Select config')
     parser.add_argument('-s', '--suffix', type=str, default='', help='Define suffix for study name (default: empty)')
     parser.add_argument('--save_model', action='store_true', default=False, help='Save trained model to models directory (default: False)')
+    parser.add_argument('--save-predictions', action='store_true', default=False,
+                        help='Store predictions per station/target in the result pickle (as train_cl.py)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume the FL simulation from a checkpoint (<fl.checkpoint.dir>/last.pt)')
     args = parser.parse_args()
+    _predictions: dict = {}   # (park, target) -> pred/true frames, only with --save-predictions
 
     os.makedirs('logs', exist_ok=True)
     suffix = ''
@@ -711,7 +714,8 @@ def main() -> None:
                     target_cols=preprocessing.get_target_cols(period_config),
                     nwp_baseline_col=period_config.get('params', {}).get('nwp_baseline_col'),
                     evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
-                    device=device
+                    device=device,
+                    collect=_predictions if args.save_predictions else None,
                 )
                 park_eval['key'] = park_key
                 park_eval['client_id'] = client_id
@@ -753,7 +757,8 @@ def main() -> None:
                     target_cols=preprocessing.get_target_cols(period_config),
                     nwp_baseline_col=period_config.get('params', {}).get('nwp_baseline_col'),
                     evaluate_on_all_test_data=period_config['eval']['eval_on_all_test_data'],
-                    device=device
+                    device=device,
+                    collect=_predictions if args.save_predictions else None,
                 )
                 park_eval['key'] = park_key
                 park_eval['client_id'] = 'val'
@@ -878,7 +883,8 @@ def main() -> None:
             'evaluation': evaluation,
             'individual_evaluations': all_evaluations,
             'test_dates': test_periods,
-            'clients_weights': clients_weights
+            'clients_weights': clients_weights,
+            'predictions': _predictions if args.save_predictions else None,
         }
     else:
         # Single training run
@@ -890,7 +896,8 @@ def main() -> None:
             'history': history_result,
             'evaluation': evaluation,
             'test_dates': test_periods,
-            'clients_weights': clients_weights
+            'clients_weights': clients_weights,
+            'predictions': _predictions if args.save_predictions else None,
         }
 
     # Save results

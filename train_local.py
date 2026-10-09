@@ -31,6 +31,7 @@ def main() -> int:
     parser.add_argument('--name', default=None,
                         help="Run name (default: FL config name with '_fl_<strategy>' -> '_local')")
     parser.add_argument('--save_model', action='store_true', help='Pass --save_model to train_cl.py')
+    parser.add_argument('--save-predictions', action='store_true', help='Pass --save-predictions to train_cl.py')
     parser.add_argument('--dry-run', action='store_true', help='Write the configs, print the commands, do not run')
     args = parser.parse_args()
 
@@ -51,7 +52,8 @@ def main() -> int:
     jobs = [local_training.Job(
                 name=cid,
                 cmd=[sys.executable, 'train_cl.py', '-c', path, '-m', args.model]
-                    + (['--save_model'] if args.save_model else []),
+                    + (['--save_model'] if args.save_model else [])
+                    + (['--save-predictions'] if args.save_predictions else []),
                 log=os.path.join(run_dir, 'logs', f'{cid}.out'))
             for cid, path in paths.items()]
     logging.info(f"[local] {len(jobs)} clients from {cfg_path} on GPUs {gpus} "
