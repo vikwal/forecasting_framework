@@ -64,11 +64,14 @@ def main():
     ap.add_argument('--gpus', default=None, help="FL/CL: CUDA_VISIBLE_DEVICES; local: train_local --gpus")
     ap.add_argument('--per-gpu', type=int, default=1, help='local only')
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--reverse', action='store_true', help='work the list from the end (second queue)')
     args = ap.parse_args()
     os.chdir(REPO)
     os.makedirs(LOGS, exist_ok=True)
     man = pd.read_csv(os.path.join(REPO, 'configs', 'parks_v1', 'scenarios', 'manifest.csv'))
     todo = jobs(man, args.scenarios, args.methods)
+    if args.reverse:
+        todo = todo[::-1]
     print(f'{len(todo)} runs', flush=True)
     for i, (cfg, method) in enumerate(todo, 1):
         stem = f'{os.path.basename(cfg)}__{method}'
@@ -82,6 +85,13 @@ def main():
         if os.path.exists(done):
             print(f'[{i}/{len(todo)}] skip {stem} (done)', flush=True)
             continue
+        lock = os.path.join(LOGS, f'{stem}.running')
+        if not args.dry_run:
+            try:                                                     # another queue runs it
+                os.close(os.open(lock, os.O_CREAT | os.O_EXCL))
+            except FileExistsError:
+                print(f'[{i}/{len(todo)}] skip {stem} (running elsewhere)', flush=True)
+                continue
         cmd, env = command(cfg, method, args)
         print(f'[{i}/{len(todo)}] start {stem}: {" ".join(cmd)}', flush=True)
         if args.dry_run:
@@ -97,6 +107,7 @@ def main():
         if ok:
             with open(done, 'w') as f:
                 f.write(hits[-1] + '\n')
+        os.remove(lock)
 
 
 if __name__ == '__main__':
