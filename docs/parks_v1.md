@@ -119,3 +119,22 @@ Configs `config_parks_v1_curt_v11_{fl_fedgradient,fl_fedavg,cl80}_static.yaml`
 (zusätzlich `observed_features: []`, kein Leistungs-Lag). Ergebnis x1 gegen das Label (R² Mittel): lokal 0,795 /
 0,789 (ohne Lag), CL80 0,797 / 0,791, FedGradient 0,779 / 0,779, FedAvg 0,782 / 0,761
 (`FL_Contribution/reports/fl_curtailment_v11.md` §6).
+
+### Szenario-Studie: wann lohnt sich Föderation? (2026-10-10)
+
+Bericht `FL_Contribution/reports/fl_scenarios_v1.md`. Neue Schalter:
+
+| Schlüssel | Wirkung |
+|---|---|
+| `data.target_mask: all \| market_env \| grid` | nur `power_col`-Modus auf den abgeregelten Releases: maskierte Trainingsstunden (aus `curt_flag` bzw. `loss_*`) bekommen `tools.TARGET_MASK_VALUE` (−1) und fallen aus dem Verlust (`tools.make_criterion`); der Bewertungszeitraum bleibt unverändert. Verlangt `observed_features` ohne `power`. Ohne den Schlüssel ist der Verlust exakt der bisherige. |
+| `params.random_seed` | jetzt auch in `train_cl.py` wirksam (`tools.set_seed`) |
+| `fl.client_holdout: {client: [stations]}` | Stationen eines Clients, die nie trainiert werden (neue Parks): lokal als `holdout_files` des Clients (`train_local.py`), in FL über `val_files` mit dem globalen Modell |
+| `fl.fine_tune_eval_global: true` | mit `fl.fine_tune`: Clients zusätzlich mit dem globalen Modell bewerten (`evaluation_global`, `predictions_global` im Ergebnis) |
+
+Der Cache-Schlüssel enthält jetzt `train_start` (nur reale Parks; der geladene Zeitraum und `park_age` hängen davon
+ab) und `target_mask`.
+
+Configs: `python scripts/make_fl_scenarios.py` → `configs/parks_v1/scenarios/` (81 Configs + `manifest.csv`);
+Ausführen: `python scripts/run_fl_scenarios.py --scenarios scarce lopo mask --methods fl_fedgradient fl_fedavg cl80 local --gpus …`
+(wiederaufnehmbar, Sperrdateien für parallele Warteschlangen, Logs `logs/scenarios/`). FL-Läufe vertragen sich
+parallel: auf l1 liefen 6 gleichzeitig ohne längere Rundenzeiten.
