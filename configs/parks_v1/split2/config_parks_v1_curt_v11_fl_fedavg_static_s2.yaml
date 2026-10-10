@@ -125,6 +125,7 @@ data:
   pca_components: 3
   lag_in_col: false
   n_neighbors: 5
+  strict_split: true
 params:
   known_features:
   - wind_speed_h78

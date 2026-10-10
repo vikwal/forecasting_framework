@@ -925,6 +925,11 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
             else:
                 scheduler.step()
 
+    # restore_best_weights also when the epoch limit ends training without an early-stopping trigger
+    # (e.g. short fine-tuning runs with epochs < patience): return the best epoch, not the last
+    if use_early_stopping and restore_best_weights and best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
     return history, model
 
 

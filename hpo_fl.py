@@ -74,6 +74,10 @@ def main() -> None:
 
     # Load config
     config = tools.load_config(f'{args.config}.yaml')
+    if (config.get('hpo') or {}).get('fold_boundaries'):
+        # the FL folds here are positional (TimeSeriesSplit) and the val_files folds station-major;
+        # date folds would be silently ignored -> refuse instead
+        raise NotImplementedError("hpo_fl.py does not support hpo.fold_boundaries yet")
 
     # Override verbose settings for HPO
     config['model']['verbose'] = 0

@@ -206,9 +206,18 @@ def main() -> None:
     logging.info(f'Previous trials: {len_trials} total, {completed_trials} completed, {pruned_trials} pruned.')
 
     trial_counter = 0
-    while completed_trials < config['hpo']['trials']:
+    consecutive_failures = 0
+    max_consecutive_failures = int(config['hpo'].get('max_consecutive_failures', 5))
+    seed = config['params'].get('random_seed')
+    while True:
+        # count from the study: correct budget also when another process works on the same study
+        completed_trials = len(study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)))
+        if completed_trials >= config['hpo']['trials']:
+            break
         trial = study.ask()
-        trial_number = len_trials + trial_counter
+        trial_number = trial.number
+        if seed is not None:
+            tools.set_seed(int(seed) + trial_number)    # model init/shuffling reproducible per trial
 
         hyperparameters = hpo.get_hyperparameters(
             config=config,
@@ -353,8 +362,8 @@ def main() -> None:
                         f'{metric_name}: {average_accuracy:.4f}'
                     )
 
-                logging.info(f'Progress: {completed_trials}/{config["hpo"]["trials"]} successful trials completed.')
-                completed_trials += 1
+                logging.info(f'Progress: {completed_trials + 1}/{config["hpo"]["trials"]} successful trials completed.')
+                consecutive_failures = 0
 
         except optuna.TrialPruned:
             logging.info(f'Trial number {trial_number+1} was pruned by Optuna')
@@ -370,7 +379,12 @@ def main() -> None:
             logging.error(f'Trial number {trial_number+1} failed with error: {str(e)}. Marking as failed.')
             logging.exception("Full traceback:")
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
-            raise  # Continue with next trial instead of crashing
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:   # systematic error, not a one-off OOM
+                raise
 
         trial_counter += 1
 

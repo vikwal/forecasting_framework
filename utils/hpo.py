@@ -471,7 +471,10 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
         gamma=lambda x: min(int(0.25 * x), 30),
         multivariate=True,
         group=True,
-        warn_independent_sampling=False
+        warn_independent_sampling=False,
+        # reproducible proposals (one process per study; several processes on one study
+        # with the same seed would propose the same points)
+        seed=(config or {}).get('params', {}).get('random_seed')
     )
 
     pruner = None
@@ -509,7 +512,10 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
         logging.warning("Using deprecated 'direction' parameter. Please provide 'config' instead.")
 
     try:
-        existing_study = optuna.load_study(study_name=study_name, storage=storage)
+        # sampler/pruner are session objects: pass them again, otherwise a resumed study falls
+        # back to Optuna's default (univariate) TPE
+        existing_study = optuna.load_study(study_name=study_name, storage=storage,
+                                           sampler=sampler, pruner=pruner)
         completed_trials = len([t for t in existing_study.trials if t.state == optuna.trial.TrialState.COMPLETE])
         logging.info(f"Loaded existing study '{study_name}' with {completed_trials} completed trials.")
         if pruner is not None and existing_study:
@@ -543,7 +549,10 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
     return study
 
 def load_study(studies_path: str,
-               study_name: str):
+               study_name: str,
+               required: bool = False):
+    """Load a study; None if it does not exist. required=True (model.lookup_hpo) raises instead, so a
+    missing study (wrong name, OPTUNA_STORAGE not set) cannot silently fall back to the config values."""
     # Use OPTUNA_STORAGE environment variable if set, otherwise use studies_path
     storage_url = os.environ.get('OPTUNA_STORAGE')
     
@@ -559,8 +568,10 @@ def load_study(studies_path: str,
             study_name=study_name,
             storage=storage
         )
-    except:
-        #os.remove(f'{path}.db')
+    except Exception as exc:
+        if required:
+            raise RuntimeError(f"model.lookup_hpo: study '{study_name}' not found in {storage.split('@')[-1]} "
+                               f"({exc})") from exc
         study = None
     return study
 
@@ -857,8 +868,7 @@ def _fedgradient_trial(config: dict, trial) -> dict:
 
 def load_hyperparams(study_name: str,
                      config: dict):
-    studies_dir = config['hpo']['studies_dir']
-    study = load_study(studies_dir=studies_dir,
+    study = load_study(studies_path=config['hpo']['studies_path'],
                        study_name=study_name)
     if study:
         return study.best_trial.params

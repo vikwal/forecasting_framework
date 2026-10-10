@@ -213,7 +213,7 @@ def main() -> None:
     study = None
     if config['model'].get('lookup_hpo', False):
         logging.info(f"Looking up hyperparameters for study: {study_name}")
-        study = hpo.load_study(config['hpo']['studies_path'], study_name)
+        study = hpo.load_study(config['hpo']['studies_path'], study_name, required=True)
     hyperparameters = hpo.get_hyperparameters(config=config, study=study)
 
     # Add FL-specific hyperparameters
@@ -582,6 +582,9 @@ def main() -> None:
                 import logging
 
                 logging.info(f"Fine-tuning for client: {client_id}")
+                import zlib
+                tools.set_seed(int(config['params'].get('random_seed', 42)) * 1000
+                               + zlib.crc32(str(client_id).encode()) % 1000)   # reproducible per client
 
                 # Device setup
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

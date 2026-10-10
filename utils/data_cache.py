@@ -150,6 +150,7 @@ class DataCache:
             # training targets
             'train_start': config['data'].get('train_start') if config['data'].get('power_col') else None,
             'target_mask': config['data'].get('target_mask'),
+            'strict_split': True if config['data'].get('strict_split') else None,
             'target_kind': (config['data'].get('target_kind')
                             if config['data'].get('target_kind', 'power') != 'power' else None),
             'station_history_start': (tuple(sorted((config['data'].get('station_history_start') or {}).items()))
@@ -476,7 +477,7 @@ class LazyFoldLoader:
             return info
 
 
-def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
+def _fit_global_scaler_x(dfs, config, logger, fit_until=None, restrict_train_end=False):
     """
     Fit ONE StandardScaler over the training rows of ALL training stations.
 
@@ -484,7 +485,9 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
         fit_until: Optional cutoff (anything pd.Timestamp() accepts) used INSTEAD of
             config['data']['test_start'] as the train/not-train boundary passed to
             split_data(). Additive, defaults to None (= old behaviour, cutoff at
-            test_start unchanged). Used by create_or_load_preprocessed_data_spatial for
+            test_start unchanged). restrict_train_end=True also ends the training rows at
+            fit_until when data.train_end is set (hpo.fold_boundaries: fit on the data before
+            the first validation fold only). Used by create_or_load_preprocessed_data_spatial for
             cv_mode='spatial': there the scaler must be fit only on data strictly before
             data.val_start (the fold's val chunk starts there), not before test_start —
             otherwise the val chunk would leak into the very scaler used to transform it.
@@ -552,13 +555,19 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None):
         if is_nwp and cutoff is not None:
             cutoff = cutoff - pd.Timedelta(hours=history_length)
 
+        train_end, test_end = preprocessing.split_bounds(config)
+        if restrict_train_end and fit_until is not None:
+            # fit only on rows issued before fit_until (split_data takes train_end, not test_start,
+            # as the end of the training rows when train_end is set)
+            limit = pd.Timestamp(fit_until) - pd.Timedelta(hours=1)
+            train_end = limit if pd.isna(train_end) else min(train_end, limit)
         df_train, _ = preprocessing.split_data(
             data=df,
             train_frac=config['data']['train_frac'],
             train_start=pd.Timestamp(config['data'].get('train_start', None)),
-            train_end=pd.Timestamp(config['data'].get('train_end', None)),
+            train_end=train_end,
             test_start=cutoff,
-            test_end=pd.Timestamp(config['data'].get('test_end', None)),
+            test_end=test_end,
             t_0=t_0,
         )
         if len(df_train) == 0:
@@ -906,7 +915,10 @@ def create_or_load_preprocessed_data(config: Dict,
         # switches to its GLOBAL SCALING branch (preprocessing.py:3749) when it is set,
         # and _replace_val_with_val_files below reuses the same config, so the val
         # stations are transformed with this scaler instead of fitting their own.
-        config['scaler_x'] = _fit_global_scaler_x(dfs, config, logger)
+        # hpo.fold_boundaries: the scaler sees only the data before the first validation fold
+        _b = (config.get('hpo') or {}).get('fold_boundaries')
+        config['scaler_x'] = _fit_global_scaler_x(dfs, config, logger, fit_until=_b[0] if _b else None,
+                                                  restrict_train_end=bool(_b))
 
         # Pass 2: preprocess each dataset with the shared scaler
         prepared_datasets = []

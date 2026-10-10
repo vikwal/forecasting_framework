@@ -447,6 +447,27 @@ def get_data(data_dir: str,
     else:
         raise ValueError(f'Unknown data dir: {data_dir}. Please check the data directory or add a new preprocessing function.')
 
+def split_bounds(config: dict) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """(train_end, test_end) passed to split_data for the TFT path.
+
+    data.strict_split (opt-in, default off = unchanged behaviour):
+      - training samples must have their whole horizon before test_start
+        (issue <= test_start - horizon), so no training target lies in the test period;
+      - a date-only test_end ('2025-07-31') includes that whole day.
+    """
+    d = config['data']
+    train_end = pd.Timestamp(d.get('train_end', None))
+    test_end = pd.Timestamp(d.get('test_end', None))
+    if not d.get('strict_split'):
+        return train_end, test_end
+    horizon = pd.Timedelta(d.get('freq', '1h')) * int(config['model']['horizon'])
+    limit = pd.Timestamp(d['test_start']) - horizon
+    train_end = limit if pd.isna(train_end) else min(train_end, limit)
+    if d.get('test_end') is not None and ':' not in str(d['test_end']):
+        test_end = test_end + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    return train_end, test_end
+
+
 def split_data(data: pd.DataFrame,
                train_frac: float = 0.75,
                train_start: pd.Timestamp = None,
@@ -562,9 +583,9 @@ def pipeline(data: pd.DataFrame,
                                              static_cols=static_cols,
                                              train_frac=config['data']['train_frac'],
                                              train_start=pd.Timestamp(config['data'].get('train_start', None)),
-                                             train_end=pd.Timestamp(config['data'].get('train_end', None)),
+                                             train_end=split_bounds(config)[0],
                                              test_start=pd.Timestamp(config['data'].get('test_start', None)),
-                                             test_end=pd.Timestamp(config['data'].get('test_end', None)),
+                                             test_end=split_bounds(config)[1],
                                              t_0=t_0,
                                              target_col=target_col,
                                              scale_target=scale_target,

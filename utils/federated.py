@@ -334,12 +334,16 @@ class ClientActor:
         cuda_count = torch.cuda.device_count()
         logging.info(f"[ClientActor {self.client_id}] device={self.device}  CUDA_VISIBLE_DEVICES={cuda_visible}  cuda_device_count={cuda_count}")
 
-    def train(self, global_weights: Dict[str, torch.Tensor]):
-        """Performs model training for a communication round using PyTorch."""
+    def train(self, global_weights: Dict[str, torch.Tensor], seed: int = None):
+        """Performs model training for a communication round using PyTorch.
+        seed: round seed (FedAvg); the actor seeds shuffling/dropout with seed + client_index."""
         from . import tools
         import copy
         import os
         from torch.utils.data import TensorDataset, DataLoader
+
+        if seed is not None:
+            tools.set_seed(int(seed) + int(self.client_index))
 
         _train_start = time.time()
         _phys_gpu = os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')
@@ -1326,7 +1330,8 @@ def run_simulation(partitions: Any,
         else:
             # FedAvg / FedAdam / FedAvgM: clients return updated weights after local training
             logging.debug(f"[Server] Start train jobs on clients (batch_size={max_concurrent}).")
-            client_results = _call(list(range(n_clients)), 'train', global_weights_cpu)
+            client_results = _call(list(range(n_clients)), 'train', global_weights_cpu,
+                                   fedgradient.round_seed(config['params'].get('random_seed', 42), round_num))
             logging.debug(f"[Server] All clients trained. Start aggregation.")
             aggregated_weights = aggregate_weights(client_results, config, row_owners=row_owners,
                                                    reference_weights=global_weights_cpu)

@@ -295,7 +295,7 @@ def main() -> None:
     study = None
     if config['model']['lookup_hpo']:
         logging.info(f"Looking up hyperparameters for study: {study_name}")
-        study = hpo.load_study(config['hpo']['studies_path'], study_name)
+        study = hpo.load_study(config['hpo']['studies_path'], study_name, required=True)
     hyperparameters = hpo.get_hyperparameters(config=config,
                                                 study=study)
     logging.info(f"Hyperparameters: {json.dumps(hyperparameters, indent=2)}")

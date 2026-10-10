@@ -347,7 +347,7 @@ def split2(rows: list) -> None:
     global OUT
     OUT = os.path.join(BASE, 'split2')
     for meth, cfg in bases('static').items():
-        cfg['data'].update(SPLIT2)
+        cfg['data'].update(SPLIT2, strict_split=True)        # no training target in the test period
         cfg['hpo'].update(fold_boundaries=list(SPLIT2_FOLDS), objective_reduction='best', kfolds=3,
                           weight_decay=[1e-6, 1e-3])                      # float, log
         cfg['hpo']['tft'].update(n_lstm_layers=[1, 2], static_embedding_dim=[8, 64],   # int

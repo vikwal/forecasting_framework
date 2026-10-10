@@ -140,3 +140,24 @@ def test_kfolds_by_dates_expanding_without_target_overlap():
     assert len(folds[0][0][1]) < len(folds[1][0][1]) < len(folds[2][0][1])   # expanding
     # last training issue before the first boundary: 2024-07-30 09:00 + 48 h > 2024-08-01 -> 07-29
     assert t[folds[0][0][1][:, 0] % 1000].max() == pd.Timestamp('2024-07-29 09:00', tz='UTC')
+
+
+def test_split_bounds_strict_and_default():
+    from utils.preprocessing import split_bounds
+    cfg = {'data': {'train_end': '2025-07-31 23:00', 'test_start': '2025-08-01', 'test_end': '2026-07-31',
+                    'freq': '1h'}, 'model': {'horizon': 48}}
+    tr, te = split_bounds(cfg)                                            # default: unchanged
+    assert tr == pd.Timestamp('2025-07-31 23:00') and te == pd.Timestamp('2026-07-31')
+    cfg['data']['strict_split'] = True
+    tr, te = split_bounds(cfg)
+    assert tr == pd.Timestamp('2025-07-30 00:00')                         # issue + 48 h <= test_start
+    assert te == pd.Timestamp('2026-07-31 23:59:59')                      # whole last day
+
+
+def test_load_study_required_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv('OPTUNA_STORAGE', raising=False)
+    from utils import hpo as _hpo
+    path = str(tmp_path / 's.db')
+    assert _hpo.load_study(path, 'missing') is None
+    with pytest.raises(RuntimeError):
+        _hpo.load_study(path, 'missing', required=True)
