@@ -138,3 +138,21 @@ Configs: `python scripts/make_fl_scenarios.py` → `configs/parks_v1/scenarios/`
 Ausführen: `python scripts/run_fl_scenarios.py --scenarios scarce lopo mask --methods fl_fedgradient fl_fedavg cl80 local --gpus …`
 (wiederaufnehmbar, Sperrdateien für parallele Warteschlangen, Logs `logs/scenarios/`). FL-Läufe vertragen sich
 parallel: auf l1 liefen 6 gleichzeitig ohne längere Rundenzeiten.
+
+### Szenario-Studie Teil 2 und Fine-Tuning-Fix (2026-10-10)
+
+**Fix:** `fl.fine_tune` hat bis `e1fd65b` nie vom globalen Modell aus nachtrainiert — `tools.training_pipeline` baute
+ein neues Modell, die übergebenen Gewichte wurden ignoriert. Jetzt: `training_pipeline(..., initial_weights=…,
+trainable=[prefixes])`; `train_fl.py` übergibt die globalen Gewichte. Ältere `fine_tune`-Ergebnisse sind lokales
+Training von null.
+
+| Schlüssel | Wirkung |
+|---|---|
+| `fl.fine_tune_variants: [{name, epochs, lr_factor, trainable}]` | mehrere Nachtrainings desselben globalen Modells in einem Lauf (`results['fine_tune_variants'][name]` mit `evaluation`/`predictions`); `trainable` = Parameter-Präfixe, Rest eingefroren (TFT-Kopf: `positionwise_grn`, `output_gate`, `output_ln`, `output_layer`) |
+| `data.station_history_start: {station: date}` | die Station hat im Trainingszeitraum erst ab diesem Datum Daten (neuer Park mit kurzer Historie); im Cache-Schlüssel |
+| `data.target_mask: market_env_grid50` | Direktvermarkter-Maske plus die Hälfte der Netzereignisse (deterministisch je `grid_event_id`) |
+
+Configs Teil 2: `python scripts/make_fl_scenarios.py --part 2` → `configs/parks_v1/scenarios2/`. Mehrere Rechner
+arbeiten eine Liste ab, wenn `--log-dir` auf ein gemeinsames NFS-Verzeichnis zeigt (Sperrdateien
+`*.running`, Fertig-Marken `*.done`), z. B. l2 `${DATA_ROOT}/runs/fl_scenarios2`, l1 `/mnt/nvme1/runs/fl_scenarios2`.
+Bericht: `FL_Contribution/reports/fl_scenarios_v2.md`.
