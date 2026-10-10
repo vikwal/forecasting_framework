@@ -114,6 +114,9 @@ class DataCache:
         # cv_mode is truly 'spatial' (a key absent from every existing temporal config),
         # so every existing temporal-mode hash_data dict — and therefore every existing
         # cache_id — is unchanged bit-for-bit.
+        # hpo.fold_boundaries only hashed when set (existing cache ids unchanged)
+        if config.get('hpo', {}).get('fold_boundaries'):
+            hash_data['hpo']['fold_boundaries'] = [str(x) for x in config['hpo']['fold_boundaries']]
         cv_mode = str(config.get('hpo', {}).get('cv_mode', 'temporal')).lower()
         if cv_mode == 'spatial':
             hash_data['cv_mode'] = 'spatial'
@@ -924,13 +927,22 @@ def create_or_load_preprocessed_data(config: Dict,
             )
             prepared_datasets.append(prepared_data)
 
-        # Create k-folds
+        # Create k-folds; hpo.fold_boundaries: expanding window with fixed validation dates
         min_train_date = config['hpo'].get('min_train_date', None)
-        combined_kfolds = hpo.kfolds_with_per_file_min_train_len(
-            prepared_datasets=prepared_datasets,
-            n_splits=config['hpo']['kfolds'],
-            min_train_date=min_train_date
-        )
+        if config['hpo'].get('fold_boundaries'):
+            if config['data'].get('val_files'):
+                raise ValueError("hpo.fold_boundaries cannot be combined with data.val_files")
+            combined_kfolds = hpo.kfolds_by_dates(
+                prepared_datasets=prepared_datasets,
+                boundaries=config['hpo']['fold_boundaries'],
+                horizon_hours=int(config['model']['horizon'])
+            )
+        else:
+            combined_kfolds = hpo.kfolds_with_per_file_min_train_len(
+                prepared_datasets=prepared_datasets,
+                n_splits=config['hpo']['kfolds'],
+                min_train_date=min_train_date
+            )
 
         # If val_files is specified, replace each fold's val portion with data from val stations.
         # Val stations are processed for the training period (before test_start) so their

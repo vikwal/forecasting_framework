@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 import torch
 
-from utils import local_training, tools
+from utils import hpo, local_training, tools
 from utils.preprocessing import park_hub_wind, target_mask_flags
 
 
@@ -121,3 +121,22 @@ def test_park_hub_wind_is_capacity_weighted():
     assert np.allclose(park_hub_wind(df, groups).to_numpy(), [4.5, 8.5])
     with pytest.raises(ValueError):
         park_hub_wind(df[['wind_speed_hub_t1']], groups)
+
+
+def test_kfolds_by_dates_expanding_without_target_overlap():
+    t = pd.date_range('2023-07-26 09:00', '2025-07-31 09:00', freq='D', tz='UTC')
+    n = len(t)
+    ds = [{'X_train': {'known': np.arange(n)[:, None] + 1000 * s, 'observed': np.zeros((n, 1))},
+           'y_train': np.arange(n)[:, None] + 1000 * s, 'index_train': t} for s in range(2)]
+    b = ['2024-08-01', '2024-12-01', '2025-04-01', '2025-08-01']
+    folds = hpo.kfolds_by_dates(ds, b, horizon_hours=48)
+    assert len(folds) == 3
+    for i, ((Xt, yt), (Xv, yv)) in enumerate(folds):
+        lo, hi = pd.Timestamp(b[i], tz='UTC'), pd.Timestamp(b[i + 1], tz='UTC')
+        tt, tv = t[yt[:, 0] % 1000], t[yv[:, 0] % 1000]
+        assert (tt + pd.Timedelta(hours=48) <= lo).all() and (tv >= lo).all() and (tv < hi).all()
+        assert len(yv) == 2 * ((t >= lo) & (t < hi)).sum()                 # both stations
+        assert np.array_equal(Xt['known'], yt) and np.array_equal(Xv['known'], yv)
+    assert len(folds[0][0][1]) < len(folds[1][0][1]) < len(folds[2][0][1])   # expanding
+    # last training issue before the first boundary: 2024-07-30 09:00 + 48 h > 2024-08-01 -> 07-29
+    assert t[folds[0][0][1][:, 0] % 1000].max() == pd.Timestamp('2024-07-29 09:00', tz='UTC')

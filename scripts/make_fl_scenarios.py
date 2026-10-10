@@ -38,6 +38,10 @@ parks) into groups of k parks (k = 1: one model per park, 90 models), k = 20 / 4
 (R0+R1, R2+R3, N0+N1, N2+N3 / R0-R3, N0-N3); seeds 42-44. k = 10 (local) and 80 (central) are the 12-month runs
 of part 1, the holdout operator's own model (k = 10) is scenarios_holdout.
 
+Split 2 (--part split2, configs/parks_v1/split2/): base configs (x1 statics, with lag) for HPO and final
+test on the later data: training data 2023-07-24..2025-07-31, test 2025-08..2026-07; HPO with three
+expanding folds validating Aug-Nov 2024, Dec 2024-Mar 2025, Apr-Jul 2025 (hpo.fold_boundaries).
+
   python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
   python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
 Holdout parks (--part holdout, configs/parks_v1/scenarios_holdout/): the 10 holdout parks scored by every
@@ -51,6 +55,7 @@ same setup are the 12-month runs of part 1 (scen_scarce_m12_*).
   python scripts/make_fl_scenarios.py --part holdout  # holdout parks: scenarios_holdout/
   python scripts/make_fl_scenarios.py --part noecmwf  # ICON-D2 only: scenarios_noecmwf/
   python scripts/make_fl_scenarios.py --part poolsize  # parks per model: scenarios_poolsize/
+  python scripts/make_fl_scenarios.py --part split2    # split 2 base configs: split2/
 """
 
 import copy
@@ -333,6 +338,32 @@ def pool_size(rows: list) -> None:
                                          f'{k} parks per model (train_local), seed {seed}')})
 
 
+SPLIT2 = {'train_start': '2023-07-24', 'train_end': '2025-07-31 23:00', 'test_start': '2025-08-01',
+          'test_end': '2026-07-31', 'data_cutoff': '2026-08-03'}
+SPLIT2_FOLDS = ['2024-08-01', '2024-12-01', '2025-04-01', '2025-08-01']
+
+
+def split2(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'split2')
+    for meth, cfg in bases('static').items():
+        cfg['data'].update(SPLIT2)
+        cfg['hpo'].update(fold_boundaries=list(SPLIT2_FOLDS), objective_reduction='best', kfolds=3,
+                          weight_decay=[1e-6, 1e-3])                      # float, log
+        cfg['hpo']['tft'].update(n_lstm_layers=[1, 2], static_embedding_dim=[8, 64],   # int
+                                 clipnorm=[1.0, 10.0])                    # float, linear
+        cfg['eval']['results_path'] = 'results/parks_v1_split2'
+        name = f'parks_v1_curt_v11_{meth}_static_s2'
+        path = write(cfg, name, f'split 2 (train data 2023-07-24..2025-07, test 2025-08..2026-07, HPO folds '
+                                f'{SPLIT2_FOLDS}), x1 statics, {meth}')
+        rows.append({'scenario': 'split2', 'method': meth, 'config': path})
+    # write() sets eval.results_path to the scenario folder; keep the split-2 folder
+    for r in rows:
+        p = os.path.join(REPO, r['config'] + '.yaml')
+        txt = open(p).read().replace(f'results_path: {RESULTS}', 'results_path: results/parks_v1_split2')
+        open(p, 'w').write(txt)
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
@@ -346,6 +377,8 @@ def main():
         no_ecmwf(rows)
     elif part == 'poolsize':
         pool_size(rows)
+    elif part == 'split2':
+        split2(rows)
     else:
         scarce(rows)
         lopo(rows)

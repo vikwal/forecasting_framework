@@ -1,0 +1,4 @@
+scenario,method,config
+split2,fl_fedgradient,configs/parks_v1/split2/config_parks_v1_curt_v11_fl_fedgradient_static_s2
+split2,fl_fedavg,configs/parks_v1/split2/config_parks_v1_curt_v11_fl_fedavg_static_s2
+split2,cl80,configs/parks_v1/split2/config_parks_v1_curt_v11_cl80_static_s2

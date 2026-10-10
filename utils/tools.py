@@ -660,6 +660,9 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
     # Setup optimizer and loss
     lr = hyperparameters.get('learning_rate', hyperparameters.get('lr', 0.001))
     weight_decay = hyperparameters.get('weight_decay', 0.0)
+    clipnorm = hyperparameters.get('clipnorm')
+    if clipnorm is None:
+        clipnorm = config['model'].get('tft', {}).get('clipnorm')
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     quantiles = config['model'].get('tft', {}).get('quantiles', None)
     _n_targets = len(config.get('data', {}).get('target_cols') or [None])
@@ -784,9 +787,10 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
             optimizer.zero_grad()
             loss.backward()
 
-            # Gradient clipping
-            if 'clipnorm' in config['model'].get('tft', {}):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config['model']['tft']['clipnorm'])
+            # Gradient clipping: tuned value (hyperparameters, e.g. hpo.tft.clipnorm range) before
+            # model.tft.clipnorm; without either no clipping
+            if clipnorm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clipnorm)
 
             optimizer.step()
 

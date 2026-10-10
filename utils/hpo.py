@@ -316,6 +316,61 @@ def kfolds_with_per_file_min_train_len(prepared_datasets: List[Dict[str, Any]],
 
 
 
+def _sample_times(index) -> pd.DatetimeIndex:
+    """Issue times of the samples (index_train: DatetimeIndex or MultiIndex with 'starttime'), UTC."""
+    t = index.get_level_values('starttime') if isinstance(index, pd.MultiIndex) else index
+    t = pd.DatetimeIndex(t)
+    return t.tz_localize('UTC') if t.tz is None else t.tz_convert('UTC')
+
+
+def _take(X, mask):
+    if isinstance(X, dict):
+        return {k: v[mask] for k, v in X.items() if len(v) > 0}
+    return X[mask]
+
+
+def kfolds_by_dates(prepared_datasets: List[Dict[str, Any]],
+                    boundaries: List[str],
+                    horizon_hours: int) -> List:
+    """Expanding-window folds with fixed dates (hpo.fold_boundaries [b_0, ..., b_k]).
+
+    Fold i validates on the samples issued in [b_i, b_i+1) and trains on every sample whose
+    forecast horizon ends before b_i (issue time + horizon_hours <= b_i), so no training target
+    lies in the validation period. Applied per station, then concatenated (same layout as
+    kfolds_with_per_file_min_train_len).
+    """
+    b = [pd.Timestamp(x) for x in boundaries]
+    b = [x.tz_localize('UTC') if x.tz is None else x.tz_convert('UTC') for x in b]
+    if len(b) < 2 or any(x >= y for x, y in zip(b, b[1:])):
+        raise ValueError(f"hpo.fold_boundaries must be >= 2 increasing dates, got {boundaries}")
+    horizon = pd.Timedelta(hours=horizon_hours)
+    folds = []
+    for i in range(len(b) - 1):
+        tr_X, tr_y, va_X, va_y = [], [], [], []
+        for d in prepared_datasets:
+            t = _sample_times(d['index_train'])
+            tr = np.asarray(t + horizon <= b[i])
+            va = np.asarray((t >= b[i]) & (t < b[i + 1]))
+            if tr.any():
+                tr_X.append(_take(d['X_train'], tr))
+                tr_y.append(d['y_train'][tr])
+            if va.any():
+                va_X.append(_take(d['X_train'], va))
+                va_y.append(d['y_train'][va])
+        if not tr_y or not va_y:
+            raise ValueError(f"fold {i}: no training or validation samples for boundaries {boundaries}")
+        X_tr, X_va = tr_X[0], va_X[0]
+        for x in tr_X[1:]:
+            X_tr = tools.concatenate_data(old=X_tr, new=x)
+        for x in va_X[1:]:
+            X_va = tools.concatenate_data(old=X_va, new=x)
+        y_tr, y_va = np.concatenate(tr_y), np.concatenate(va_y)
+        logging.info(f"Date fold {i + 1}: train issue + {horizon_hours} h <= {b[i].date()} ({len(y_tr)} samples), "
+                     f"val [{b[i].date()}, {b[i + 1].date()}) ({len(y_va)} samples)")
+        folds.append(((X_tr, y_tr), (X_va, y_va)))
+    return folds
+
+
 def get_objectives_from_config(config: dict) -> tuple:
     """
     Extract optimization objectives from config.
