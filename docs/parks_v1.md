@@ -166,3 +166,28 @@ Bericht: `FL_Contribution/reports/fl_scenarios_v2.md`.
 Die Abregelung wirkt nicht auf die Windgeschwindigkeit, das Ziel ist auf x1 und x4 identisch. Configs:
 `python scripts/make_fl_scenarios.py --part wind` → `configs/parks_v1/scenarios_wind/` (FedGradient, FedAvg mit
 Fine-Tune-Varianten, CL80; lokal = `train_local.py` auf der FedGradient-Config; mit/ohne Lag; Seeds 42–44).
+
+### HPO-Vorbereitung und Review-Korrekturen (2026-10-11)
+
+| Schlüssel / Werkzeug | Wirkung |
+|---|---|
+| `hpo.fold_boundaries: [b0, b1, …]` | Folds mit festen Datumsgrenzen und wachsendem Fenster (`hpo.kfolds_by_dates`): Fold i validiert die Läufe mit Ausgabe in [b_i, b_i+1) und trainiert auf allen Läufen mit Ausgabe + Horizont ≤ b_i (keine Ziel-Überlappung). Der x-Skalierer wird dann nur auf Daten vor b0 angepasst. Nicht mit `val_files` kombinierbar; `hpo_fl.py` lehnt den Schlüssel ab (FL-Folds noch positionsbasiert). Im Cache-Schlüssel. |
+| `data.strict_split: true` | opt-in (`preprocessing.split_bounds`): Trainingsstichproben brauchen Ausgabe + Horizont ≤ `test_start` (kein Trainingsziel im Testzeitraum); ein reines Datum als `test_end` schließt den ganzen Tag ein. Ohne den Schlüssel unverändert. Im Cache-Schlüssel. |
+| `data.train_forecast_hours: ['09']` | trainiert nur auf den Stichproben dieser ICON-Läufe (Ausgabestunde UTC); der Test behält alle Läufe aus `data.forecast_hours` (`preprocessing.filter_train_runs`). Im Cache-Schlüssel. |
+| `hpo_local.py -c <FL-Config>` | eine Optuna-Studie je FL-Client (`hpo_cl.py` auf der Client-Config von `train_local.py`); danach `train_local.py --lookup-hpo`. Die Studiennamen stimmen mit dem Lookup überein (`cl_m-tft_out-48_freq-1h_<lokaler Name>_<Client>`). |
+| `model.lookup_hpo` | bricht jetzt ab, wenn die Studie fehlt (vorher stiller Rückfall auf die Config-Werte). |
+
+Korrekturen aus dem Review (Commit `130054c`):
+- Eine fortgesetzte Studie behält den multivariaten TPE-Sampler; der Sampler hat einen Seed.
+- HPO-Trials sind geseedet (`random_seed + trial.number`).
+- Das Trial-Budget wird aus der Studie gezählt.
+- Ein einzelner fehlgeschlagener Trial beendet die Studie nicht mehr; erst 5 Fehler in Folge (`hpo.max_consecutive_failures`).
+- `restore_best_weights` greift auch, wenn die Epochengrenze erreicht wird (vorher nur bei ausgelöstem Early Stopping).
+- Ein gesuchter `clipnorm` wird im Training verwendet; ohne gesuchten Wert gilt weiter `model.tft.clipnorm`.
+- FedAvg-Clients und die Fine-Tuning-Clients in Ray sind geseedet.
+
+Bekannte, bewusst belassene Punkte:
+- Early Stopping im Endtraining läuft auf dem Testzeitraum (alle Methoden).
+- Lokal skaliert je Client, FL und zentral global.
+- FedGradient und FedAvg haben strategieeigene Optimierer und Clipping.
+- ECMWF 12 UTC wird den ICON-Läufen 12 und 15 UTC zugeordnet (Annahme: verfügbar).
