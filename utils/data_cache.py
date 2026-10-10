@@ -147,6 +147,8 @@ class DataCache:
             # training targets
             'train_start': config['data'].get('train_start') if config['data'].get('power_col') else None,
             'target_mask': config['data'].get('target_mask'),
+            'target_kind': (config['data'].get('target_kind')
+                            if config['data'].get('target_kind', 'power') != 'power' else None),
             'station_history_start': (tuple(sorted((config['data'].get('station_history_start') or {}).items()))
                                       or None),
             'ecmwf_path': config['data'].get('ecmwf_path') if config['data'].get('ecmwf_layout') else None,

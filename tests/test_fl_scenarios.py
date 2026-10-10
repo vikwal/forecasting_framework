@@ -1,5 +1,5 @@
 """FL scenario extensions: masked loss (data.target_mask), mask flags of the curtailed
-releases, seeding, per-client holdout of the local baseline, cache key."""
+releases, seeding, per-client holdout of the local baseline, cache key, hub wind target."""
 
 import numpy as np
 import pandas as pd
@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from utils import local_training, tools
-from utils.preprocessing import target_mask_flags
+from utils.preprocessing import park_hub_wind, target_mask_flags
 
 
 def _cfg(mask=None, quantiles=(0.5,)):
@@ -112,3 +112,12 @@ def test_cache_key_station_history(monkeypatch):
     k = lambda c: dc._get_config_hash(c, {'known': [], 'observed': [], 'static': []}, 'tft')  # noqa: E731
     c2 = copy.deepcopy(base); c2['data']['station_history_start'] = {'SEL976062210315': '2024-07-18'}
     assert k(base) != k(c2)
+
+
+def test_park_hub_wind_is_capacity_weighted():
+    df = pd.DataFrame({'wind_speed_hub_t1': [4.0, 8.0], 'wind_speed_hub_t2': [6.0, 10.0],
+                       'wind_speed_hub_t3': [99.0, 99.0]})
+    groups = pd.DataFrame({'turbine': ['t1', 't2'], 'n_turbines': [3, 1], 'rated_kw': [2000.0, 2000.0]})
+    assert np.allclose(park_hub_wind(df, groups).to_numpy(), [4.5, 8.5])
+    with pytest.raises(ValueError):
+        park_hub_wind(df[['wind_speed_hub_t1']], groups)

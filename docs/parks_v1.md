@@ -156,3 +156,13 @@ Configs Teil 2: `python scripts/make_fl_scenarios.py --part 2` → `configs/park
 arbeiten eine Liste ab, wenn `--log-dir` auf ein gemeinsames NFS-Verzeichnis zeigt (Sperrdateien
 `*.running`, Fertig-Marken `*.done`), z. B. l2 `${DATA_ROOT}/runs/fl_scenarios2`, l1 `/mnt/nvme1/runs/fl_scenarios2`.
 Bericht: `FL_Contribution/reports/fl_scenarios_v2.md`.
+
+### Windgeschwindigkeit auf Nabenhöhe als Ziel (2026-10-10)
+
+| Schlüssel | Wirkung |
+|---|---|
+| `data.target_kind: wind_speed_hub` | nur `power_col`-Modus: Ziel ist die Nabenhöhen-Windgeschwindigkeit des Parks statt der Leistung — Mittel der Gruppenspalten `wind_speed_hub_<turbine>` des Releases, gewichtet mit `n_turbines × rated_kw` (`preprocessing.park_hub_wind`), geteilt durch `WIND_TARGET_SCALE` = 25 m/s statt durch die Leistung. Der Lag (`observed_features: ['power']`) ist dann die vergangene Windgeschwindigkeit. Nicht mit `target_mask` kombinierbar; im Cache-Schlüssel. Standard `power` = bisheriges Verhalten. |
+
+Die Abregelung wirkt nicht auf die Windgeschwindigkeit, das Ziel ist auf x1 und x4 identisch. Configs:
+`python scripts/make_fl_scenarios.py --part wind` → `configs/parks_v1/scenarios_wind/` (FedGradient, FedAvg mit
+Fine-Tune-Varianten, CL80; lokal = `train_local.py` auf der FedGradient-Config; mit/ohne Lag; Seeds 42–44).

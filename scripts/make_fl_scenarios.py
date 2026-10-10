@@ -24,8 +24,14 @@ ft_head: only the output head trainable).
           events known to the direct marketer; seeds 42-44)
   scarce2 1 and 3 months, seeds 42-44, FL only (local/central of part 1 are the references)
 
-  python scripts/make_fl_scenarios.py            # part 1: configs and scenarios/manifest.csv
-  python scripts/make_fl_scenarios.py --part 2   # part 2: scenarios2/
+Hub wind (--part wind, configs/parks_v1/scenarios_wind/): target = capacity-weighted park hub wind
+speed (data.target_kind wind_speed_hub, unaffected by curtailment) instead of power; base comparison
+FedGradient / FedAvg (with fine-tune variants) / CL80 / local, with and without the target lag
+(static / static_nolag), seeds 42-44.
+
+  python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
+  python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
+  python scripts/make_fl_scenarios.py --part wind  # hub wind target: scenarios_wind/
 """
 
 import copy
@@ -220,10 +226,30 @@ def part2(rows: list) -> None:
                              'config': write(cfg, name, f'A scarce {m} months, seed {seed}, {meth} (fine-tune variants)')})
 
 
+def hub_wind(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_wind')
+    for lag, suffix in ((True, 'static'), (False, 'static_nolag')):
+        for seed in SEEDS:
+            for meth, cfg0 in bases(suffix).items():
+                cfg = copy.deepcopy(cfg0)
+                cfg['data']['target_kind'] = 'wind_speed_hub'
+                cfg['params']['random_seed'] = seed
+                if meth.startswith('fl_'):
+                    fine_tune(cfg, variants=True)
+                name = f'scen_wind_{"lag" if lag else "nolag"}_s{seed}_{meth}'
+                rows.append({'scenario': 'wind', 'lag': lag, 'seed': seed, 'method': meth,
+                             'config': write(cfg, name, f'hub wind target, {"with" if lag else "without"} '
+                                                        f'target lag, seed {seed}, {meth}')})
+
+
 def main():
     rows = []
-    if '--part' in sys.argv and sys.argv[sys.argv.index('--part') + 1] == '2':
+    part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
+    if part == '2':
         part2(rows)
+    elif part == 'wind':
+        hub_wind(rows)
     else:
         scarce(rows)
         lopo(rows)

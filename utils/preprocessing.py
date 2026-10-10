@@ -125,6 +125,24 @@ def park_group_statics(groups: pd.DataFrame, reference_date) -> Dict[str, float]
             'rated_wind_speed': float((w * groups['rated'].astype(float)).sum())}
 
 
+TARGET_KINDS = ('power', 'wind_speed_hub')
+WIND_TARGET_SCALE = 25.0   # m/s; hub wind target / scale keeps it in the range of normalised power
+
+
+def park_hub_wind(df: pd.DataFrame, groups: pd.DataFrame) -> pd.Series:
+    """Park hub-height wind speed [m/s] (data.target_kind 'wind_speed_hub', power_col mode).
+
+    Mean of the group columns wind_speed_hub_<turbine> of the release, weighted by the installed
+    capacity of each group (n_turbines x rated_kw), the same weights as park_group_statics.
+    """
+    w = groups['n_turbines'].astype(float).to_numpy() * groups['rated_kw'].astype(float).to_numpy()
+    cols = [f"wind_speed_hub_{t}" for t in groups['turbine']]
+    missing = [c for c in cols if c not in df.columns]
+    if missing or not len(w) or w.sum() <= 0:
+        raise ValueError(f'hub wind target: missing group columns {missing} or no capacity')
+    return pd.Series(df[cols].to_numpy() @ (w / w.sum()), index=df.index)
+
+
 def static_categories(config: dict) -> Dict[str, list]:
     """Category lists of the categorical static features (params.static_categorical).
 
@@ -2386,6 +2404,16 @@ def preprocess_synth_wind_icond2(path: str,
             installed_capacity = float(_wp_row[config['data'].get('capacity_col', 'capacity_kw')].values[0]) * 1000.0
             turbines = turbine_parameter.loc[turbine_parameter.park_id == station_id]
             heights = turbines['hub_height'].values
+            # data.target_kind 'wind_speed_hub': the target is the park hub wind speed instead of
+            # the power column, scaled by WIND_TARGET_SCALE instead of the capacity
+            _kind = config['data'].get('target_kind', 'power')
+            if _kind not in TARGET_KINDS:
+                raise ValueError(f"data.target_kind must be one of {TARGET_KINDS}, got {_kind!r}")
+            if _kind == 'wind_speed_hub':
+                if config['data'].get('target_mask'):
+                    raise ValueError("data.target_mask applies to the power target only")
+                df_synth[_power_col] = park_hub_wind(df_synth, turbines)
+                installed_capacity = WIND_TARGET_SCALE
             df_synth['power'] = df_synth[_power_col]
             # data.station_history_start {station: date}: the station has no data before that date in
             # the training period (a new park with a short own history); rows dropped below (dropna)
