@@ -83,7 +83,19 @@ TARGET_MASKS = {
     # grid curtailment (redispatch) is not
     'market_env': lambda df: (df['loss_mkt'] > 0) | (df['loss_env'] > 0),
     'grid': lambda df: df['loss_grid'] > 0,
+    # direct marketer who learns of half of the grid events (deterministic per event id)
+    'market_env_grid50': lambda df: (df['loss_mkt'] > 0) | (df['loss_env'] > 0)
+                                    | ((df['loss_grid'] > 0) & _known_events(df['grid_event_id'], 0.5)),
 }
+
+
+def _known_events(event_ids: pd.Series, share: float) -> pd.Series:
+    """Deterministic subset of grid events (md5 of the event id) known to the direct marketer."""
+    import hashlib
+    ids = event_ids.fillna('').astype(str)
+    lut = {e: (int(hashlib.md5(e.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF) < share
+           for e in ids.unique() if e}
+    return ids.map(lambda e: lut.get(e, False)).astype(bool)
 
 
 def target_mask_flags(df: pd.DataFrame, spec: str) -> pd.Series:
@@ -2375,6 +2387,13 @@ def preprocess_synth_wind_icond2(path: str,
             turbines = turbine_parameter.loc[turbine_parameter.park_id == station_id]
             heights = turbines['hub_height'].values
             df_synth['power'] = df_synth[_power_col]
+            # data.station_history_start {station: date}: the station has no data before that date in
+            # the training period (a new park with a short own history); rows dropped below (dropna)
+            _hist = (config['data'].get('station_history_start') or {}).get(str(station_id))
+            if _hist:
+                _cut = (df_synth.index < pd.Timestamp(_hist, tz='UTC')) & \
+                       (df_synth.index < pd.Timestamp(config['data']['test_start'], tz='UTC'))
+                df_synth.loc[_cut, [_power_col, 'power']] = np.nan
             _mask_spec = config['data'].get('target_mask')
             _target_mask = target_mask_flags(df_synth, _mask_spec) if _mask_spec else None
             df_synth = df_synth[['power']]

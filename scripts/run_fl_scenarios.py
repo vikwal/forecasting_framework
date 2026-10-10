@@ -65,10 +65,15 @@ def main():
     ap.add_argument('--per-gpu', type=int, default=1, help='local only')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--reverse', action='store_true', help='work the list from the end (second queue)')
+    ap.add_argument('--manifest', default='configs/parks_v1/scenarios/manifest.csv')
+    ap.add_argument('--log-dir', default=None, help='markers/logs; a shared NFS directory lets several hosts '
+                                                    'work one list (default logs/scenarios)')
     args = ap.parse_args()
     os.chdir(REPO)
+    global LOGS
+    LOGS = os.path.expandvars(args.log_dir) if args.log_dir else LOGS
     os.makedirs(LOGS, exist_ok=True)
-    man = pd.read_csv(os.path.join(REPO, 'configs', 'parks_v1', 'scenarios', 'manifest.csv'))
+    man = pd.read_csv(os.path.join(REPO, args.manifest))
     todo = jobs(man, args.scenarios, args.methods)
     if args.reverse:
         todo = todo[::-1]
@@ -79,7 +84,7 @@ def main():
         log = os.path.join(LOGS, f'{stem}.out')
         if not os.path.exists(done) and os.path.exists(log):      # finished before a restart
             prev = RESULT.findall(open(log, errors='ignore').read())
-            if prev and os.path.exists(os.path.join(REPO, prev[-1])):
+            if prev and (os.path.exists(os.path.join(REPO, prev[-1])) or args.log_dir):
                 with open(done, 'w') as f:
                     f.write(prev[-1] + '\n')
         if os.path.exists(done):

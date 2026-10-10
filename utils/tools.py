@@ -590,9 +590,13 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
                       hyperparameters: dict,
                       config: dict,
                       val: Tuple[np.ndarray, np.ndarray] = None,
-                      device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+                      device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+                      initial_weights: Optional[dict] = None,
+                      trainable: Optional[list] = None):
     """
     PyTorch training pipeline.
+    initial_weights: state dict to start from (fine-tuning a global FL model); default: fresh model.
+    trainable: parameter-name prefixes that are trained, all others frozen; default: all.
     Returns: history (dict), model (nn.Module)
     """
     X_train, y_train = train
@@ -602,6 +606,11 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
 
     # Create model
     model = models.get_model(config=config, hyperparameters=hyperparameters)
+    if initial_weights is not None:
+        model.load_state_dict(initial_weights)
+    if trainable:
+        for _n, _p in model.named_parameters():
+            _p.requires_grad = any(_n.startswith(t) for t in trainable)
     model = model.to(device)
 
     # Compile model if not in federated mode (torch.compile causes state_dict key mismatch in FL)

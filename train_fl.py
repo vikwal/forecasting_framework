@@ -574,7 +574,7 @@ def main() -> None:
             # Create Ray remote function for fine-tuning
             @ray.remote(num_gpus=gpu_per_actor)
             def fine_tune_client(client_id, X_train, y_train, X_val, y_val,
-                                global_weights, config, hyperparameters):
+                                global_weights, config, hyperparameters, variant=None):
                 """Fine-tune a single client in parallel."""
                 import torch
                 from utils import models, tools
@@ -613,16 +613,30 @@ def main() -> None:
                 # Use fine_tune_epochs from config or default
                 fine_tune_hyperparams = copy.deepcopy(hyperparameters)
                 fine_tune_hyperparams['epochs'] = config['fl'].get('fine_tune_epochs', 50)
+                # fl.fine_tune_variants: epochs, learning-rate factor and trainable parameter
+                # prefixes per variant (others frozen), e.g. only the output head
+                variant = variant or {}
+                if variant.get('epochs'):
+                    fine_tune_hyperparams['epochs'] = int(variant['epochs'])
+                if variant.get('lr_factor') is not None:
+                    for _k in ('learning_rate', 'lr'):
+                        if _k in fine_tune_hyperparams:
+                            fine_tune_hyperparams[_k] = fine_tune_hyperparams[_k] * float(variant['lr_factor'])
+                    if 'lr' not in fine_tune_hyperparams and 'learning_rate' not in fine_tune_hyperparams:
+                        fine_tune_hyperparams['lr'] = config['model']['lr'] * float(variant['lr_factor'])
 
                 logging.debug(f"Fine-tuning client {client_id} with {fine_tune_hyperparams['epochs']} epochs max")
 
-                # Fine-tune model
+                # Fine-tune model: start from the global weights (before 2026-10-10 training_pipeline
+                # built a fresh model here, so "fine-tuning" was local training from scratch)
                 _, fine_tuned_model = tools.training_pipeline(
                     train=(X_train, y_train),
                     val=(X_val, y_val),
                     hyperparameters=fine_tune_hyperparams,
                     config=fine_tune_config,
-                    device=device
+                    device=device,
+                    initial_weights=global_weights,
+                    trainable=variant.get('trainable'),
                 )
 
                 # Return state_dict (must be on CPU for serialization)
@@ -631,35 +645,45 @@ def main() -> None:
                     'weights': {k: v.cpu() for k, v in fine_tuned_model.state_dict().items()}
                 }
 
-            # Launch fine-tuning jobs in parallel
-            fine_tune_jobs = []
-            for client_id, client_info in clients_data.items():
-                # Get client's training data
-                X_train_client, y_train_client, X_val_client, y_val_client = partitions[client_id]
+            def _run_fine_tune(variant):
+              # Launch fine-tuning jobs in parallel
+              fine_tune_jobs = []
+              for client_id, client_info in clients_data.items():
+                  # Get client's training data
+                  X_train_client, y_train_client, X_val_client, y_val_client = partitions[client_id]
 
-                # Launch Ray job
-                job = fine_tune_client.remote(
-                    client_id=client_id,
-                    X_train=X_train_client,
-                    y_train=y_train_client,
-                    X_val=X_val_client,
-                    y_val=y_val_client,
-                    global_weights=clients_weights[client_id],
-                    config=period_config,
-                    hyperparameters=hyperparameters
-                )
-                fine_tune_jobs.append(job)
+                  # Launch Ray job
+                  job = fine_tune_client.remote(
+                      client_id=client_id,
+                      X_train=X_train_client,
+                      y_train=y_train_client,
+                      X_val=X_val_client,
+                      y_val=y_val_client,
+                      global_weights=clients_weights[client_id],
+                      config=period_config,
+                      hyperparameters=hyperparameters,
+                      variant=variant
+                  )
+                  fine_tune_jobs.append(job)
 
-            # Wait for all fine-tuning jobs to complete
-            logging.info(f"Waiting for {len(fine_tune_jobs)} fine-tuning jobs to complete...")
-            fine_tune_results = ray.get(fine_tune_jobs)
+              # Wait for all fine-tuning jobs to complete
+              logging.info(f"Waiting for {len(fine_tune_jobs)} fine-tuning jobs to complete...")
+              fine_tune_results = ray.get(fine_tune_jobs)
 
-            # Collect fine-tuned weights
-            fine_tuned_weights = {}
-            for result in fine_tune_results:
-                client_id = result['client_id']
-                fine_tuned_weights[client_id] = result['weights']
-                logging.info(f"Fine-tuning completed for client: {client_id}")
+              # Collect fine-tuned weights
+              fine_tuned_weights = {}
+              for result in fine_tune_results:
+                  client_id = result['client_id']
+                  fine_tuned_weights[client_id] = result['weights']
+                  logging.info(f"Fine-tuning completed for client: {client_id}")
+              return fine_tuned_weights
+
+            _variants = period_config['fl'].get('fine_tune_variants') or [{'name': 'ft'}]
+            fine_tuned_by_variant = {}
+            for _v in _variants:
+                logging.info(f"Fine-tuning variant {_v.get('name')}: {_v}")
+                fine_tuned_by_variant[_v['name']] = _run_fine_tune(_v)
+            fine_tuned_weights = fine_tuned_by_variant[_variants[0]['name']]
 
             # Replace global weights with fine-tuned weights (fl.fine_tune_eval_global: keep the
             # global ones to evaluate the clients with both models in one run)
@@ -731,6 +755,14 @@ def main() -> None:
 
         eval_results = _evaluate_clients(clients_weights, _predictions if args.save_predictions else None)
         _predictions_global, eval_global = {}, None
+        ft_variant_results = {}
+        if period_config['fl'].get('fine_tune', False) and 'fine_tuned_by_variant' in locals():
+            for _name, _w in fine_tuned_by_variant.items():
+                _pred = {}
+                logging.info(f'Evaluating the clients with fine-tune variant {_name}...')
+                ft_variant_results[_name] = {
+                    'evaluation': pd.concat(_evaluate_clients(_w, _pred if args.save_predictions else None)),
+                    'predictions': _pred or None}
         if period_config['fl'].get('fine_tune', False) and period_config['fl'].get('fine_tune_eval_global', False) \
                 and 'global_clients_weights' in locals():
             logging.info('Evaluating the clients also with the global (not fine-tuned) model...')
@@ -900,6 +932,7 @@ def main() -> None:
             'predictions': _predictions if args.save_predictions else None,
             'evaluation_global': eval_global,
             'predictions_global': _predictions_global or None,
+            'fine_tune_variants': ft_variant_results or None,
         }
     else:
         # Single training run
@@ -915,6 +948,7 @@ def main() -> None:
             'predictions': _predictions if args.save_predictions else None,
             'evaluation_global': eval_global,
             'predictions_global': _predictions_global or None,
+            'fine_tune_variants': ft_variant_results or None,
         }
 
     # Save results

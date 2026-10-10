@@ -14,7 +14,18 @@ train_local.py on the FedGradient config.
   C  mask     x1 and x4, no power lag; data.target_mask all | market_env (direct-marketer view:
               grid curtailment unknown) | none (x4 reference; x1 reference = *_static_nolag)
 
-  python scripts/make_fl_scenarios.py            # writes the configs and scenarios/manifest.csv
+Part 2 (--part 2, configs/parks_v1/scenarios2/, after the fine-tuning fix of 2026-10-10): FL runs
+evaluate three fine-tune variants of the global model (ft_full, ft_gentle: lr x 0.1 and few epochs,
+ft_head: only the output head trainable).
+  lopo2   new parks, seeds 43/44, folds 0-4
+  warm    the new park is trained with only 2 weeks of own history (data.station_history_start
+          2024-07-18); folds 0-9 seed 42, folds 0-4 seeds 43/44
+  mask2   x4, no lag: none / market_env (seeds 43, 44) and market_env_grid50 (half of the grid
+          events known to the direct marketer; seeds 42-44)
+  scarce2 1 and 3 months, seeds 42-44, FL only (local/central of part 1 are the references)
+
+  python scripts/make_fl_scenarios.py            # part 1: configs and scenarios/manifest.csv
+  python scripts/make_fl_scenarios.py --part 2   # part 2: scenarios2/
 """
 
 import copy
@@ -27,6 +38,8 @@ import yaml
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 BASE = os.path.join(REPO, 'configs', 'parks_v1')
 OUT = os.path.join(BASE, 'scenarios')
+HEAD = ['positionwise_grn', 'output_gate', 'output_ln', 'output_layer']
+WARM_START = '2024-07-18'
 RESULTS = 'results/fl_scenarios'
 DATASETS = {'x1': 'parks_v1_curt_v11', 'x4': 'parks_v1_curt_v11_x4'}
 MONTHS = {1: '2024-07-01', 3: '2024-05-01', 6: '2024-02-01', 12: '2023-07-24'}
@@ -65,8 +78,12 @@ def dataset(cfg: dict, ds: str) -> dict:
     return cfg
 
 
-def fine_tune(cfg: dict, factor: int = 1) -> dict:
+def fine_tune(cfg: dict, factor: int = 1, variants: bool = False) -> dict:
     cfg['fl'].update(fine_tune=True, fine_tune_eval_global=True, fine_tune_epochs=50 * factor)
+    if variants:
+        cfg['fl']['fine_tune_variants'] = [{'name': 'ft_full'},
+                                           {'name': 'ft_gentle', 'epochs': 5 * factor, 'lr_factor': 0.1},
+                                           {'name': 'ft_head', 'trainable': HEAD}]
     return cfg
 
 
@@ -140,11 +157,77 @@ def mask(rows: list) -> None:
                              'config': write(cfg, name, f'C mask {spec or "none"} on {DATASETS[ds]} (no power lag), {meth}')})
 
 
+def part2(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios2')
+    b = bases('static')
+    clients = b['fl_fedgradient']['fl']['clients']
+    holdout = list(b['fl_fedgradient']['data']['val_files'])
+    runs = [(k, s) for s in (43, 44) for k in range(5)]
+    for k, seed in runs:                                            # lopo2: cold start with seeds
+        new = {c: [p[k]] for c, p in clients.items()}
+        keep = {c: [x for i, x in enumerate(p) if i != k] for c, p in clients.items()}
+        files = [x for c in keep for x in keep[c]]
+        newparks = [new[c][0] for c in clients]
+        for meth, cfg0 in b.items():
+            cfg = copy.deepcopy(cfg0)
+            cfg['params']['random_seed'] = seed
+            cfg['data']['files'] = files
+            if meth.startswith('fl_'):
+                cfg['fl']['clients'] = keep
+                cfg['fl']['client_holdout'] = new
+                cfg['data']['val_files'] = newparks + holdout
+                fine_tune(cfg, variants=True)
+            else:
+                cfg['data']['holdout_files'] = newparks + holdout
+            name = f'scen2_lopo_k{k}_s{seed}_{meth.replace("cl80", "cl72")}'
+            rows.append({'scenario': 'lopo', 'fold': k, 'seed': seed, 'method': meth,
+                         'config': write(cfg, name, f'B lopo fold {k}, seed {seed}, {meth}')})
+    for k, seed in [(k, 42) for k in range(10)] + runs:             # warm: 2 weeks own history
+        newparks = [p[k] for p in clients.values()]
+        for meth, cfg0 in b.items():
+            cfg = copy.deepcopy(cfg0)
+            cfg['params']['random_seed'] = seed
+            cfg['data']['station_history_start'] = {p: WARM_START for p in newparks}
+            if meth.startswith('fl_'):
+                fine_tune(cfg, variants=True)
+            name = f'scen2_warm_k{k}_s{seed}_{meth}'
+            rows.append({'scenario': 'warm', 'fold': k, 'seed': seed, 'method': meth,
+                         'config': write(cfg, name, f'B warm fold {k}: new parks with 2 weeks history, seed {seed}, {meth}')})
+    bn = bases('static_nolag')
+    for spec, seeds in (('none', (43, 44)), ('market_env', (43, 44)), ('market_env_grid50', (42, 43, 44))):
+        for seed in seeds:
+            for meth, cfg0 in bn.items():
+                cfg = dataset(copy.deepcopy(cfg0), 'x4')
+                cfg['params']['random_seed'] = seed
+                if spec != 'none':
+                    cfg['data']['target_mask'] = spec
+                if meth.startswith('fl_'):
+                    fine_tune(cfg, variants=True)
+                name = f'scen2_mask_x4_{spec}_s{seed}_{meth}'
+                rows.append({'scenario': 'mask', 'dataset': 'x4', 'mask': spec, 'seed': seed, 'method': meth,
+                             'config': write(cfg, name, f'C mask {spec} on x4 (no lag), seed {seed}, {meth}')})
+    for m in (1, 3):
+        f = 12 // m
+        for seed in SEEDS:
+            for meth in ('fl_fedgradient', 'fl_fedavg'):
+                cfg = scale(copy.deepcopy(b[meth]), f)
+                cfg['data']['train_start'] = MONTHS[m]
+                cfg['params']['random_seed'] = seed
+                fine_tune(cfg, f, variants=True)
+                name = f'scen2_scarce_m{m}_s{seed}_{meth}'
+                rows.append({'scenario': 'scarce', 'months': m, 'seed': seed, 'method': meth,
+                             'config': write(cfg, name, f'A scarce {m} months, seed {seed}, {meth} (fine-tune variants)')})
+
+
 def main():
     rows = []
-    scarce(rows)
-    lopo(rows)
-    mask(rows)
+    if '--part' in sys.argv and sys.argv[sys.argv.index('--part') + 1] == '2':
+        part2(rows)
+    else:
+        scarce(rows)
+        lopo(rows)
+        mask(rows)
     man = pd.DataFrame(rows)
     man.to_csv(os.path.join(OUT, 'manifest.csv'), index=False)
     print(man.groupby(['scenario', 'method']).size().to_string())

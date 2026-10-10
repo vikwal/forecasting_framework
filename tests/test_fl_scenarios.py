@@ -81,3 +81,34 @@ def test_cache_key_has_train_start_and_mask_for_real_parks(monkeypatch):
     c5 = copy.deepcopy(c4); c5['data']['train_start'] = '2024-07-01'
     assert len({k(base), k(c2), k(c3)}) == 3
     assert k(c4) == k(c5)          # other paths: key unchanged by train_start (as before)
+
+
+def test_grid50_mask_is_deterministic_half():
+    from utils.preprocessing import _known_events
+    ids = pd.Series([f'N{i}:2024' for i in range(2000)] + ['', None])
+    a, b = _known_events(ids, 0.5), _known_events(ids, 0.5)
+    assert a.equals(b) and 0.45 < a[:2000].mean() < 0.55 and not a.iloc[-1] and not a.iloc[-2]
+    df = pd.DataFrame({'curt_flag': [1, 1, 1], 'loss_mkt': [1, 0, 0], 'loss_env': [0, 0, 0],
+                       'loss_grid': [0, 5, 5], 'grid_event_id': ['', 'A', 'B']})
+    m = target_mask_flags(df, 'market_env_grid50')
+    assert m.iloc[0] and m.iloc[1] == _known_events(pd.Series(['A']), 0.5).iloc[0]
+
+
+def test_training_pipeline_starts_from_initial_weights():
+    """Fine-tuning must start from the given weights; with lr 0 they stay unchanged."""
+    import inspect
+    sig = inspect.signature(tools.training_pipeline)
+    assert 'initial_weights' in sig.parameters and 'trainable' in sig.parameters
+    src = open('train_fl.py').read()
+    assert 'initial_weights=global_weights' in src
+
+
+def test_cache_key_station_history(monkeypatch):
+    import copy
+    from utils.data_cache import DataCache
+    monkeypatch.setenv('DATA_ROOT', '/data')
+    base = tools.load_config('configs/parks_v1/config_parks_v1_curt_v11_cl80_static.yaml')
+    dc = DataCache.__new__(DataCache)
+    k = lambda c: dc._get_config_hash(c, {'known': [], 'observed': [], 'static': []}, 'tft')  # noqa: E731
+    c2 = copy.deepcopy(base); c2['data']['station_history_start'] = {'SEL976062210315': '2024-07-18'}
+    assert k(base) != k(c2)
