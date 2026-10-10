@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the FL scenario configs (configs/parks_v1/scenarios/manifest.csv) sequentially on one host.
 
-  python scripts/run_fl_scenarios.py --scenarios scarce lopo --methods fl_fedgradient fl_fedavg --gpus 0-7
+  python scripts/run_fl_scenarios.py --scenarios scarce lopo --methods fl_fedgradient fl_fedavg
   python scripts/run_fl_scenarios.py --scenarios mask --methods local --gpus 2 --per-gpu 8
 
 Methods: fl_fedgradient, fl_fedavg (train_fl.py), cl80 (train_cl.py), local (train_local.py on the
@@ -40,7 +40,9 @@ def command(cfg: str, method: str, args) -> tuple:
     if method == 'local':
         return [py, 'train_local.py', '-c', cfg, '-m', 'tft', '--gpus', args.gpus, '--per-gpu',
                 str(args.per_gpu), '--save-predictions'], env
-    if args.gpus:
+    # FL: federated.run_simulation clears CUDA_VISIBLE_DEVICES and Ray places the actors from GPU 0 on,
+    # so a pinned subset would stack every FL run on GPU 0 -> FL always sees all GPUs
+    if args.gpus and method == 'cl80':
         env['CUDA_VISIBLE_DEVICES'] = expand(args.gpus)
     script = 'train_cl.py' if method == 'cl80' else 'train_fl.py'
     return [py, script, '-c', cfg, '-m', 'tft', '--save-predictions'], env
@@ -61,7 +63,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--scenarios', nargs='+', required=True)
     ap.add_argument('--methods', nargs='+', required=True)
-    ap.add_argument('--gpus', default=None, help="FL/CL: CUDA_VISIBLE_DEVICES; local: train_local --gpus")
+    ap.add_argument('--gpus', default=None, help="CL: CUDA_VISIBLE_DEVICES; local: train_local --gpus; ignored for FL (all GPUs)")
     ap.add_argument('--per-gpu', type=int, default=1, help='local only')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--reverse', action='store_true', help='work the list from the end (second queue)')
