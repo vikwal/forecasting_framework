@@ -1,0 +1,7 @@
+scenario,model,seed,method,config
+holdout,foreign_local,42,fl_fedgradient,configs/parks_v1/scenarios_holdout/config_scen_hold_foreign_s42_fl_fedgradient
+holdout,own,42,cl80,configs/parks_v1/scenarios_holdout/config_scen_hold_own_s42_cl10
+holdout,foreign_local,43,fl_fedgradient,configs/parks_v1/scenarios_holdout/config_scen_hold_foreign_s43_fl_fedgradient
+holdout,own,43,cl80,configs/parks_v1/scenarios_holdout/config_scen_hold_own_s43_cl10
+holdout,foreign_local,44,fl_fedgradient,configs/parks_v1/scenarios_holdout/config_scen_hold_foreign_s44_fl_fedgradient
+holdout,own,44,cl80,configs/parks_v1/scenarios_holdout/config_scen_hold_own_s44_cl10

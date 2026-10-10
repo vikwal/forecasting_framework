@@ -1,0 +1,10 @@
+scenario,seed,method,config
+noecmwf,42,fl_fedgradient,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s42_fl_fedgradient
+noecmwf,42,fl_fedavg,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s42_fl_fedavg
+noecmwf,42,cl80,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s42_cl80
+noecmwf,43,fl_fedgradient,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s43_fl_fedgradient
+noecmwf,43,fl_fedavg,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s43_fl_fedavg
+noecmwf,43,cl80,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s43_cl80
+noecmwf,44,fl_fedgradient,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s44_fl_fedgradient
+noecmwf,44,fl_fedavg,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s44_fl_fedavg
+noecmwf,44,cl80,configs/parks_v1/scenarios_noecmwf/config_scen_noecmwf_s44_cl80

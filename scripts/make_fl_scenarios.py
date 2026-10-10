@@ -29,9 +29,21 @@ speed (data.target_kind wind_speed_hub, unaffected by curtailment) instead of po
 FedGradient / FedAvg (with fine-tune variants) / CL80 / local, with and without the target lag
 (static / static_nolag), seeds 42-44.
 
+ICON only (--part noecmwf, configs/parks_v1/scenarios_noecmwf/): base comparison without the ECMWF features
+(nwp_models [icon-d2], known features = ICON-D2 h78/h127/h184 only), statics, with lag, seeds 42-44.
+
+  python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
+  python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
+Holdout parks (--part holdout, configs/parks_v1/scenarios_holdout/): the 10 holdout parks scored by every
+client's local model (fl.client_holdout = the 10 parks for each client; run with method local) and by the own
+model of the holdout operator (CL on the 10 parks, run with method cl80); seeds 42-44. The global models of the
+same setup are the 12-month runs of part 1 (scen_scarce_m12_*).
+
   python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
   python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
   python scripts/make_fl_scenarios.py --part wind  # hub wind target: scenarios_wind/
+  python scripts/make_fl_scenarios.py --part holdout  # holdout parks: scenarios_holdout/
+  python scripts/make_fl_scenarios.py --part noecmwf  # ICON-D2 only: scenarios_noecmwf/
 """
 
 import copy
@@ -243,6 +255,45 @@ def hub_wind(rows: list) -> None:
                                                         f'target lag, seed {seed}, {meth}')})
 
 
+def holdout_parks(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_holdout')
+    b = bases('static')
+    hold = [str(p) for p in b['fl_fedgradient']['data']['val_files']]
+    for seed in SEEDS:
+        cfg = copy.deepcopy(b['fl_fedgradient'])                    # local models of the 8 clients
+        cfg['params']['random_seed'] = seed
+        cfg['fl']['client_holdout'] = {c: list(hold) for c in cfg['fl']['clients']}
+        rows.append({'scenario': 'holdout', 'model': 'foreign_local', 'seed': seed, 'method': 'fl_fedgradient',
+                     'config': write(cfg, f'scen_hold_foreign_s{seed}_fl_fedgradient',
+                                     f'holdout parks scored by every client local model, seed {seed} (run: local)')})
+        cfg = copy.deepcopy(b['cl80'])                              # own model of the holdout operator
+        cfg['params']['random_seed'] = seed
+        cfg['data']['files'] = list(hold)
+        cfg['data'].pop('holdout_files', None)
+        cfg['data'].pop('val_files', None)
+        rows.append({'scenario': 'holdout', 'model': 'own', 'seed': seed, 'method': 'cl80',
+                     'config': write(cfg, f'scen_hold_own_s{seed}_cl10',
+                                     f'own model of the holdout operator (CL on its 10 parks), seed {seed}')})
+
+
+def no_ecmwf(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_noecmwf')
+    for seed in SEEDS:
+        for meth, cfg0 in bases('static').items():
+            cfg = copy.deepcopy(cfg0)
+            cfg['params']['nwp_models'] = ['icon-d2']
+            cfg['params']['known_features'] = [f for f in cfg['params']['known_features'] if not f.startswith('ecmwf_')]
+            cfg['params'].pop('ecmwf_features', None)
+            cfg['params']['random_seed'] = seed
+            if meth.startswith('fl_'):
+                fine_tune(cfg, variants=True)
+            rows.append({'scenario': 'noecmwf', 'seed': seed, 'method': meth,
+                         'config': write(cfg, f'scen_noecmwf_s{seed}_{meth}',
+                                         f'ICON-D2 only (no ECMWF features), seed {seed}, {meth}')})
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
@@ -250,6 +301,10 @@ def main():
         part2(rows)
     elif part == 'wind':
         hub_wind(rows)
+    elif part == 'holdout':
+        holdout_parks(rows)
+    elif part == 'noecmwf':
+        no_ecmwf(rows)
     else:
         scarce(rows)
         lopo(rows)
