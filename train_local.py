@@ -5,6 +5,7 @@ model on its own stations only (train_cl.py, one process per GPU slot, in parall
 
     python train_local.py -c configs/parks_v1/config_parks_v1_fl_fedgradient -m tft --gpus 0-7
     python train_local.py -c ... --clients R0 R1 --gpus 0,1 --dry-run
+    python train_local.py -c ... --lookup-hpo     # best trial of each client's hpo_local.py study
 
 Derived client configs, per-client logs and a manifest go to runs/local/<name>_<timestamp>/;
 the merged result (evaluation per station with client_id, same layout as train_fl.py) to
@@ -32,6 +33,8 @@ def main() -> int:
                         help="Run name (default: FL config name with '_fl_<strategy>' -> '_local')")
     parser.add_argument('--save_model', action='store_true', help='Pass --save_model to train_cl.py')
     parser.add_argument('--save-predictions', action='store_true', help='Pass --save-predictions to train_cl.py')
+    parser.add_argument('--lookup-hpo', action='store_true',
+                        help='Train every client with the best trial of its hpo_local.py study (model.lookup_hpo)')
     parser.add_argument('--dry-run', action='store_true', help='Write the configs, print the commands, do not run')
     args = parser.parse_args()
 
@@ -47,6 +50,9 @@ def main() -> int:
                                   logging.StreamHandler()])
 
     configs = local_training.client_configs(config, args.clients)
+    if args.lookup_hpo:
+        for cfg in configs.values():
+            cfg['model']['lookup_hpo'] = True
     paths = local_training.write_configs(configs, os.path.join(run_dir, 'configs'), name)
     gpus = local_training.parse_gpus(args.gpus, _n_gpus())
     jobs = [local_training.Job(
