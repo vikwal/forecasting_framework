@@ -32,6 +32,12 @@ FedGradient / FedAvg (with fine-tune variants) / CL80 / local, with and without 
 ICON only (--part noecmwf, configs/parks_v1/scenarios_noecmwf/): base comparison without the ECMWF features
 (nwp_models [icon-d2], known features = ICON-D2 h78/h127/h184 only), statics, with lag, seeds 42-44.
 
+Pool size (--part poolsize, configs/parks_v1/scenarios_poolsize/): models trained on k parks, run with
+train_local.py (method local) on a redefined fl.clients: k = 1 / 2 / 5 split every client (and the 10 holdout
+parks) into groups of k parks (k = 1: one model per park, 90 models), k = 20 / 40 merge clients of the same kind
+(R0+R1, R2+R3, N0+N1, N2+N3 / R0-R3, N0-N3); seeds 42-44. k = 10 (local) and 80 (central) are the 12-month runs
+of part 1, the holdout operator's own model (k = 10) is scenarios_holdout.
+
   python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
   python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
 Holdout parks (--part holdout, configs/parks_v1/scenarios_holdout/): the 10 holdout parks scored by every
@@ -44,6 +50,7 @@ same setup are the 12-month runs of part 1 (scen_scarce_m12_*).
   python scripts/make_fl_scenarios.py --part wind  # hub wind target: scenarios_wind/
   python scripts/make_fl_scenarios.py --part holdout  # holdout parks: scenarios_holdout/
   python scripts/make_fl_scenarios.py --part noecmwf  # ICON-D2 only: scenarios_noecmwf/
+  python scripts/make_fl_scenarios.py --part poolsize  # parks per model: scenarios_poolsize/
 """
 
 import copy
@@ -294,6 +301,38 @@ def no_ecmwf(rows: list) -> None:
                                          f'ICON-D2 only (no ECMWF features), seed {seed}, {meth}')})
 
 
+POOL_MERGE = {20: [('R0', 'R1'), ('R2', 'R3'), ('N0', 'N1'), ('N2', 'N3')],
+              40: [('R0', 'R1', 'R2', 'R3'), ('N0', 'N1', 'N2', 'N3')]}
+
+
+def pool_clients(clients: dict, holdout: list, k: int) -> dict:
+    """fl.clients with k parks per model: split (k < 10, holdout parks included) or merge (k > 10)."""
+    if k in POOL_MERGE:
+        return {'_'.join(g): [p for c in g for p in clients[c]] for g in POOL_MERGE[k]}
+    if 10 % k:
+        raise ValueError(f'k must divide 10, got {k}')
+    out = {}
+    for cid, parks in list(clients.items()) + [('H', holdout)]:
+        for i in range(0, len(parks), k):
+            out[f'{cid}_g{i // k}'] = list(parks[i:i + k])
+    return out
+
+
+def pool_size(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_poolsize')
+    b = bases('static')['fl_fedgradient']
+    hold = [str(p) for p in b['data']['val_files']]
+    for k in (1, 2, 5, 20, 40):
+        for seed in SEEDS:
+            cfg = copy.deepcopy(b)
+            cfg['params']['random_seed'] = seed
+            cfg['fl']['clients'] = pool_clients(b['fl']['clients'], hold, k)
+            rows.append({'scenario': 'poolsize', 'k': k, 'seed': seed, 'method': 'fl_fedgradient',
+                         'config': write(cfg, f'scen_pool_k{k}_s{seed}_fl_fedgradient',
+                                         f'{k} parks per model (train_local), seed {seed}')})
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
@@ -305,6 +344,8 @@ def main():
         holdout_parks(rows)
     elif part == 'noecmwf':
         no_ecmwf(rows)
+    elif part == 'poolsize':
+        pool_size(rows)
     else:
         scarce(rows)
         lopo(rows)
