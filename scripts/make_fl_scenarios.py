@@ -42,6 +42,12 @@ Split 2 (--part split2, configs/parks_v1/split2/): base configs (x1 statics, wit
 test on the later data: training data 2023-07-24..2025-07-31, test 2025-08..2026-07; HPO with three
 expanding folds validating Aug-Nov 2024, Dec 2024-Mar 2025, Apr-Jul 2025 (hpo.fold_boundaries).
 
+Forecast runs (--part runs, configs/parks_v1/scenarios_runs/): local models (train_local, method local) on
+split 1 with the ICON-D2 runs 06/09/12/15 loaded (data.forecast_hours) and trained on one run or on all
+(data.train_forecast_hours); the test split keeps all four runs, so every model is scored on every run.
+With ECMWF (06/09 -> 00 UTC, 12/15 -> 12 UTC run, assumed available) and ICON-D2 only; strict_split;
+seeds 42-44.
+
   python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
   python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
 Holdout parks (--part holdout, configs/parks_v1/scenarios_holdout/): the 10 holdout parks scored by every
@@ -56,6 +62,7 @@ same setup are the 12-month runs of part 1 (scen_scarce_m12_*).
   python scripts/make_fl_scenarios.py --part noecmwf  # ICON-D2 only: scenarios_noecmwf/
   python scripts/make_fl_scenarios.py --part poolsize  # parks per model: scenarios_poolsize/
   python scripts/make_fl_scenarios.py --part split2    # split 2 base configs: split2/
+  python scripts/make_fl_scenarios.py --part runs      # forecast runs: scenarios_runs/
 """
 
 import copy
@@ -364,6 +371,33 @@ def split2(rows: list) -> None:
         open(p, 'w').write(txt)
 
 
+RUNS = ['06', '09', '12', '15']
+
+
+def forecast_runs(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_runs')
+    b = bases('static')['fl_fedgradient']
+    for feat in ('ecmwf', 'icon'):
+        for train in RUNS + ['all']:
+            for seed in SEEDS:
+                cfg = copy.deepcopy(b)
+                cfg['params']['random_seed'] = seed
+                cfg['data']['forecast_hours'] = list(RUNS)
+                cfg['data']['train_forecast_hours'] = list(RUNS) if train == 'all' else [train]
+                cfg['data']['strict_split'] = True
+                if feat == 'icon':
+                    cfg['params']['nwp_models'] = ['icon-d2']
+                    cfg['params']['known_features'] = [f for f in cfg['params']['known_features']
+                                                       if not f.startswith('ecmwf_')]
+                    cfg['params'].pop('ecmwf_features', None)
+                rows.append({'scenario': 'runs', 'features': feat, 'train_runs': train, 'seed': seed,
+                             'method': 'fl_fedgradient',
+                             'config': write(cfg, f'scen_runs_{feat}_tr{train}_s{seed}_fl_fedgradient',
+                                             f'local models, NWP {feat}, trained on run(s) {train}, all runs '
+                                             f'tested, seed {seed}')})
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
@@ -379,6 +413,8 @@ def main():
         pool_size(rows)
     elif part == 'split2':
         split2(rows)
+    elif part == 'runs':
+        forecast_runs(rows)
     else:
         scarce(rows)
         lopo(rows)

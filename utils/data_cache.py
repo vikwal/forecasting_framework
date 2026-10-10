@@ -151,6 +151,8 @@ class DataCache:
             'train_start': config['data'].get('train_start') if config['data'].get('power_col') else None,
             'target_mask': config['data'].get('target_mask'),
             'strict_split': True if config['data'].get('strict_split') else None,
+            'train_forecast_hours': (tuple(str(h) for h in config['data']['train_forecast_hours'])
+                                     if config['data'].get('train_forecast_hours') else None),
             'target_kind': (config['data'].get('target_kind')
                             if config['data'].get('target_kind', 'power') != 'power' else None),
             'station_history_start': (tuple(sorted((config['data'].get('station_history_start') or {}).items()))

@@ -161,3 +161,16 @@ def test_load_study_required_raises(tmp_path, monkeypatch):
     assert _hpo.load_study(path, 'missing') is None
     with pytest.raises(RuntimeError):
         _hpo.load_study(path, 'missing', required=True)
+
+
+def test_filter_train_runs_keeps_issue_hours():
+    from utils.preprocessing import filter_train_runs
+    t = pd.DatetimeIndex([f'2024-01-0{d} {h}:00' for d in (1, 2) for h in ('06', '09', '12', '15')], tz='UTC')
+    n = len(t)
+    prep = {'X_train': {'known': np.arange(n)[:, None], 'static': np.zeros((n, 2))}, 'y_train': np.arange(n)[:, None],
+            'index_train': t, 'X_test': None}
+    out = filter_train_runs(prep, ['09'])
+    assert list(out['index_train'].hour) == [9, 9] and out['y_train'][:, 0].tolist() == [1, 5]
+    assert out['X_train']['known'][:, 0].tolist() == [1, 5] and len(out['X_train']['static']) == 2
+    with pytest.raises(ValueError):
+        filter_train_runs(prep, ['03'])

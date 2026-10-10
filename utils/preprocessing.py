@@ -660,9 +660,31 @@ def pipeline(data: pd.DataFrame,
                                      scaler_x=config.get('scaler_x', None),
                                      scaler_y=config.get('scaler_y', None))
 
+    # data.train_forecast_hours: train only on the samples of these NWP runs (issue hour UTC);
+    # the test split keeps every run of data.forecast_hours
+    if config['data'].get('train_forecast_hours'):
+        prepared_data = filter_train_runs(prepared_data, config['data']['train_forecast_hours'])
+
     # MEMORY CLEANUP: Force garbage collection after processing
     gc.collect()
     return prepared_data, df
+
+
+def filter_train_runs(prepared: dict, hours) -> dict:
+    """Keep the training samples whose issue time (index_train, 'starttime' level) has one of the
+    given UTC hours ('06', 9, ...); X_train (array or dict of arrays), y_train, index_train."""
+    keep_hours = {int(h) for h in hours}
+    idx = prepared['index_train']
+    t = idx.get_level_values('starttime') if isinstance(idx, pd.MultiIndex) else pd.DatetimeIndex(idx)
+    mask = np.isin(pd.DatetimeIndex(t).hour, list(keep_hours))
+    if not mask.any():
+        raise ValueError(f"data.train_forecast_hours {sorted(keep_hours)}: no training samples left")
+    out = dict(prepared)
+    X = prepared['X_train']
+    out['X_train'] = {k: v[mask] if len(v) == len(mask) else v for k, v in X.items()} if isinstance(X, dict) else X[mask]
+    out['y_train'] = prepared['y_train'][mask]
+    out['index_train'] = idx[mask]
+    return out
 
 
 def _process_files(target_dir: str, preprocess_func, preprocess_kwargs: dict, file_filter):
