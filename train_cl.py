@@ -28,7 +28,7 @@ import torch.multiprocessing
 torch.set_float32_matmul_precision('high')
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-from utils import preprocessing, tools, hpo, eval
+from utils import preprocessing, tools, hpo, eval, vsn
 
 
 def main() -> None:
@@ -50,6 +50,7 @@ def main() -> None:
     os.makedirs('logs', exist_ok=True)
     # Sammelbehaelter fuer --save-predictions: {(station, zielgroesse): {pred/true/baselines}}
     _predictions: dict = {}
+    _vsn: list = []          # eval.vsn_weights: mean TFT variable selection weights per park
     suffix = ''
     if args.suffix:
         suffix = f'_{args.suffix}'
@@ -670,6 +671,9 @@ def main() -> None:
                 )
             park_eval['key'] = park_key
             eval_results.append(park_eval)
+            if period_config.get('eval', {}).get('vsn_weights') and args.model == 'tft':
+                _vsn.append(vsn.mean_weights(model, X_test_park, device, vsn.input_names(park_df.columns, features))
+                            .assign(key=park_key, period=period_idx))
 
         if eval_results:
             period_evaluation = pd.concat(eval_results, ignore_index=False)
@@ -790,6 +794,7 @@ def main() -> None:
             'individual_evaluations': all_evaluations,
             'test_dates': test_periods,
             'predictions': _predictions if args.save_predictions else None,
+            'vsn_weights': pd.concat(_vsn, ignore_index=True) if _vsn else None,
         }
     else:
         # Single training run (backward compatible)
@@ -802,6 +807,7 @@ def main() -> None:
             'evaluation': evaluation,
             'test_dates': test_periods,
             'predictions': _predictions if args.save_predictions else None,
+            'vsn_weights': pd.concat(_vsn, ignore_index=True) if _vsn else None,
         }
 
     # Save results

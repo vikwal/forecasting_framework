@@ -48,6 +48,12 @@ split 1 with the ICON-D2 runs 06/09/12/15 loaded (data.forecast_hours) and train
 With ECMWF (06/09 -> 00 UTC, 12/15 -> 12 UTC run, assumed available) and ICON-D2 only; strict_split;
 seeds 42-44.
 
+Features (--part features, configs/parks_v1/scenarios_features/): split 1, 09 UTC run, strict_split, seeds 42-44,
+eval.vsn_weights (mean TFT selection weights in the result). base = x1 statics, ICON-D2 h78/h127/h184 + ECMWF;
+h247 = + ICON-D2 layer 213-281 m (wind_speed_h247); coast = + static dist_coast_km (park centre, Natural Earth
+coastline, scripts/parks_v1_dist_coast.py). base/h247/coast with the power lag for local and CL80; base/h247 without
+the lag for local.
+
   python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
   python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
 Holdout parks (--part holdout, configs/parks_v1/scenarios_holdout/): the 10 holdout parks scored by every
@@ -398,6 +404,35 @@ def forecast_runs(rows: list) -> None:
                                              f'tested, seed {seed}')})
 
 
+FEATURE_VARIANTS = {'base': ([], []), 'h247': (['wind_speed_h247'], []), 'coast': ([], ['dist_coast_km'])}
+
+
+def features(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_features')
+    for lag, suffix in ((True, 'static'), (False, 'static_nolag')):
+        b = bases(suffix)
+        for var, (known, static) in FEATURE_VARIANTS.items():
+            for meth in ('fl_fedgradient', 'cl80'):                  # fl_fedgradient config -> train_local
+                if not lag and (var == 'coast' or meth == 'cl80'):
+                    continue
+                for seed in SEEDS:
+                    cfg = copy.deepcopy(b[meth])
+                    cfg['params']['random_seed'] = seed
+                    icon = [f for f in cfg['params']['known_features'] if not f.startswith('ecmwf_')]
+                    ecmwf = [f for f in cfg['params']['known_features'] if f.startswith('ecmwf_')]
+                    cfg['params']['known_features'] = icon + known + ecmwf
+                    cfg['params']['static_features'] = cfg['params']['static_features'] + static
+                    cfg['data']['strict_split'] = True
+                    cfg['eval']['vsn_weights'] = True
+                    tag = f'{var}_{"lag" if lag else "nolag"}'
+                    rows.append({'scenario': 'features', 'variant': var, 'lag': lag, 'seed': seed,
+                                 'method': meth,
+                                 'config': write(cfg, f'scen_feat_{tag}_s{seed}_{meth}',
+                                                 f'feature test {var}, {"with" if lag else "without"} power lag, '
+                                                 f'seed {seed}, {meth}')})
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
@@ -415,6 +450,8 @@ def main():
         split2(rows)
     elif part == 'runs':
         forecast_runs(rows)
+    elif part == 'features':
+        features(rows)
     else:
         scarce(rows)
         lopo(rows)

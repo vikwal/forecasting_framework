@@ -2518,6 +2518,11 @@ def preprocess_synth_wind_icond2(path: str,
             if _power_col:
                 static_data.update(park_group_statics(turbines, config['data'].get('train_start')
                                                       or pd.Timestamp.now()))
+                # further park columns of wind_parameter.csv by name (e.g. dist_coast_km)
+                _park_row = wind_parameter.loc[wind_parameter.park_id == station_id].iloc[0]
+                for _f in static_features:
+                    if _f not in static_data and _f in wind_parameter.columns:
+                        static_data[_f] = float(_park_row[_f])
             for index, turbine in ([] if _power_col else turbines.iterrows()):
                 turbine_name = turbine['turbine_name']
                 turbine_id = turbine['turbine']
