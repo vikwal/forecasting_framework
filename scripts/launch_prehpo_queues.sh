@@ -33,5 +33,13 @@ case "$1" in
     $P $Q $TRI --scenarios trianel_base $FL
     $P $Q $TRI --scenarios trianel_lopo --methods cl80 --gpus 2-3
     $P $Q $TRI --scenarios trianel_lopo $FL ;;
-  *) echo "usage: $0 l2|l1a|l1b|trianel"; exit 1 ;;
+  newcomer_l1)   # onboarding curve (make_fl_scenarios.py --part newcomer): FL on l1
+    $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer $FL ;;
+  newcomer_l2)   # local (16 clients) and central on l2
+    $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer \
+          --methods local cl80 --gpus 0-3 --per-gpu 4 ;;
+  largebatch)    # central x4 with the FedGradient optimisation regime (--part largebatch)
+    $P $Q --manifest configs/parks_v1/scenarios_regular/manifest.csv --log-dir $D/fl_regular --scenarios largebatch \
+          --methods cl80 --gpus 1 ;;
+  *) echo "usage: $0 l2|l1a|l1b|trianel|newcomer_l1|newcomer_l2|largebatch"; exit 1 ;;
 esac

@@ -1,0 +1,13 @@
+scenario,mask,batch,seed,method,config
+largebatch,none,512,42,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_none_b512_s42_cl80
+largebatch,none,64,42,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_none_b64_s42_cl80
+largebatch,none,512,43,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_none_b512_s43_cl80
+largebatch,none,64,43,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_none_b64_s43_cl80
+largebatch,none,512,44,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_none_b512_s44_cl80
+largebatch,none,64,44,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_none_b64_s44_cl80
+largebatch,market_env,512,42,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_market_env_b512_s42_cl80
+largebatch,market_env,64,42,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_market_env_b64_s42_cl80
+largebatch,market_env,512,43,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_market_env_b512_s43_cl80
+largebatch,market_env,64,43,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_market_env_b64_s43_cl80
+largebatch,market_env,512,44,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_market_env_b512_s44_cl80
+largebatch,market_env,64,44,cl80,configs/parks_v1/scenarios_regular/config_scen_reg_x4_market_env_b64_s44_cl80

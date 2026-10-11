@@ -625,10 +625,75 @@ def trianel(rows: list) -> None:
         open(p, 'w').write(txt)
 
 
+def large_batch(rows: list) -> None:
+    """Central x4 runs with the FedGradient optimisation regime (effective batch 8 x 64 = 512, Adam lr 0.01,
+    clipnorm 1.0, no lag): is the FL gain against the available power (fl_scenarios_v2 C) an aggregation effect
+    or a large-batch / few-steps optimisation effect reproducible centrally? masks none / market_env, seeds 42-44."""
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_regular')
+    b = bases('static_nolag')['cl80']
+    for spec in ('none', 'market_env'):
+        for seed in SEEDS:
+            for bs, lr in ((512, 0.01), (64, 0.0005)):
+                cfg = dataset(copy.deepcopy(b), 'x4')
+                cfg['params']['random_seed'] = seed
+                if spec != 'none':
+                    cfg['data']['target_mask'] = spec
+                cfg['model']['batch_size'] = bs
+                cfg['model']['lr'] = lr
+                cfg['model']['tft']['clipnorm'] = 1.0 if bs == 512 else cfg['model']['tft']['clipnorm']
+                if bs == 512:
+                    cfg['model']['epochs'] = 300
+                    cfg['model']['early_stopping']['patience'] = 30     # ~58 steps/epoch as in FedGradient
+                rows.append({'scenario': 'largebatch', 'mask': spec, 'batch': bs, 'seed': seed, 'method': 'cl80',
+                             'config': write(cfg, f'scen_reg_x4_{spec}_b{bs}_s{seed}_cl80',
+                                             f'central x4 no lag, mask {spec}, batch {bs}, lr {lr}, seed {seed}')})
+
+
+NEWCOMER_HISTORY = {'2w': '2024-07-18', '1m': '2024-07-01', '2m': '2024-06-01', '3m': '2024-05-01', '6m': '2024-02-01'}
+
+
+def newcomer(rows: list) -> None:
+    """Onboarding curve of a small operator: park 0 of every client becomes its own one-park client with a
+    short history (data.station_history_start), the 8 established clients keep their other 9 parks with the
+    full year. 16 clients; local = train_local (the newcomer's own model on its few weeks), FL global and
+    fine-tuned (newcomer fine-tunes on its own data), central with the same data. Histories 2 weeks .. 6 months,
+    seeds 42-44, with lag. Question: how much own history does a one-park operator need before federation
+    stops paying off?"""
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_newcomer')
+    b = bases('static')
+    clients = b['fl_fedgradient']['fl']['clients']
+    new = {f'{c}_new': [p[0]] for c, p in clients.items()}
+    keep = {c: list(p[1:]) for c, p in clients.items()}
+    for tag, start in NEWCOMER_HISTORY.items():
+        for seed in SEEDS:
+            for meth, cfg0 in b.items():
+                cfg = copy.deepcopy(cfg0)
+                cfg['params']['random_seed'] = seed
+                cfg['data']['station_history_start'] = {p[0]: start for p in new.values()}
+                cfg['model']['epochs'] = 1000                      # local newcomer models / fine-tuning: few samples
+                cfg['model']['early_stopping']['patience'] = 100
+                if meth.startswith('fl_'):
+                    cfg['fl']['clients'] = {**keep, **new}
+                    cfg['fl']['n_rounds'] = 200
+                    cfg['fl']['global_early_stopping']['patience'] = 20
+                    cfg['fl']['max_concurrent_actors'] = 16
+                    cfg['fl']['drift_metrics'] = True
+                    fine_tune(cfg, 10, variants=True)
+                rows.append({'scenario': 'newcomer', 'history': tag, 'seed': seed, 'method': meth,
+                             'config': write(cfg, f'scen_new_h{tag}_s{seed}_{meth}',
+                                             f'newcomer one-park clients with {tag} history, seed {seed}, {meth}')})
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
-    if part == 'trianel':
+    if part == 'newcomer':
+        newcomer(rows)
+    elif part == 'largebatch':
+        large_batch(rows)
+    elif part == 'trianel':
         trianel(rows)
     elif part == 'drift':
         drift(rows)
