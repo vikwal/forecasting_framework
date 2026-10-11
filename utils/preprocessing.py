@@ -143,6 +143,66 @@ def park_hub_wind(df: pd.DataFrame, groups: pd.DataFrame) -> pd.Series:
     return pd.Series(df[cols].to_numpy() @ (w / w.sum()), index=df.index)
 
 
+PHYSICS_FEATURES = ('nwp_power_curve', 'nwp_wind_hub')
+
+
+def _layer_wind_columns(columns) -> Dict[int, str]:
+    """{layer height: column} of the ICON layer winds of the nearest grid point
+    (wind_speed_h<height>_<label>; the first label in sorted order is the nearest point)."""
+    found: Dict[str, Dict[int, str]] = {}
+    for c in columns:
+        m = re.match(r'^wind_speed_h(\d+)_([A-Za-z0-9]+)$', str(c))
+        if m:
+            found.setdefault(m.group(2), {})[int(m.group(1))] = c
+    if not found:
+        return {}
+    label = sorted(found, key=lambda s: (len(s), s))[0]
+    return dict(sorted(found[label].items()))
+
+
+def hub_wind_from_layers(df: pd.DataFrame, layers: Dict[int, str], hub_height: float) -> np.ndarray:
+    """Layer winds interpolated to the hub height, linear in log(height) between the two bracketing
+    layer midpoints (hub heights outside the layer range are clipped to it)."""
+    hs = np.array(sorted(layers), dtype=float)
+    hub = float(np.clip(hub_height, hs.min(), hs.max()))
+    i = int(np.clip(np.searchsorted(hs, hub, side='right') - 1, 0, len(hs) - 2))
+    lo, hi = hs[i], hs[i + 1]
+    f = np.log(hub / lo) / np.log(hi / lo)
+    return df[layers[int(lo)]].to_numpy(float) * (1.0 - f) + df[layers[int(hi)]].to_numpy(float) * f
+
+
+def add_physics_features(df: pd.DataFrame, groups: pd.DataFrame, curves: pd.DataFrame,
+                         capacity_kw: float, names) -> pd.DataFrame:
+    """params.known_features 'nwp_wind_hub' / 'nwp_power_curve' (power_col mode, real parks).
+
+    The ICON layer winds of the nearest grid point are interpolated to every turbine group's hub
+    height: nwp_wind_hub = capacity-weighted park hub wind [m/s]; nwp_power_curve = sum over the
+    groups of n_turbines x library power curve(hub wind) / registered capacity, clipped to [0, 1] -
+    the physics prior of the park power from the NWP alone (no wakes, ageing or curtailment). The
+    same hub-height harmonisation for every park is a heterogeneity treatment for the global model.
+    """
+    layers = _layer_wind_columns(df.columns)
+    if len(layers) < 2:
+        raise ValueError('physics features need at least two ICON layer wind columns (wind_speed_h<h>_<label>)')
+    cap = groups['n_turbines'].astype(float).to_numpy() * groups['rated_kw'].astype(float).to_numpy()
+    if not len(cap) or cap.sum() <= 0 or capacity_kw <= 0:
+        raise ValueError('physics features: park without turbine groups or capacity')
+    ws = curves['wind_speed'].to_numpy(float)
+    wind = np.zeros(len(df))
+    power = np.zeros(len(df))
+    for (_, g), c in zip(groups.iterrows(), cap):
+        v = hub_wind_from_layers(df, layers, float(g['hub_height']))
+        wind += c / cap.sum() * v
+        curve = curves[g['turbine_name']].to_numpy(float)
+        ok = np.isfinite(curve)
+        power += float(g['n_turbines']) * np.interp(v, ws[ok], curve[ok], left=0.0, right=0.0)
+    if 'nwp_wind_hub' in names:
+        df['nwp_wind_hub'] = wind
+    if 'nwp_power_curve' in names:
+        df['nwp_power_curve'] = np.clip(power / float(capacity_kw), 0.0, 1.0)
+    return df
+
+
 def static_categories(config: dict) -> Dict[str, list]:
     """Category lists of the categorical static features (params.static_categorical).
 
@@ -3050,6 +3110,14 @@ def preprocess_synth_wind_icond2(path: str,
                 source_col_prefix=extrapolate_col,
                 hub_height=hub_height_val
             )
+
+    # params.known_features nwp_power_curve / nwp_wind_hub: NWP layer winds at the turbine groups'
+    # hub heights and the library power curves (add_physics_features; power_col mode only)
+    _phys = [f for f in PHYSICS_FEATURES if f in rel_features]
+    if _phys:
+        if raw_station_mode or not config['data'].get('power_col'):
+            raise ValueError(f'{_phys}: the physics features need the power_col mode (real parks)')
+        df_merged = add_physics_features(df_merged, turbines, power_curves, installed_capacity / 1000.0, _phys)
 
     # Add Icon-D2 features
     if rel_features:

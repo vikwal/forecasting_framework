@@ -686,10 +686,40 @@ def newcomer(rows: list) -> None:
                                              f'newcomer one-park clients with {tag} history, seed {seed}, {meth}')})
 
 
+PHYSICS = ['nwp_power_curve', 'nwp_wind_hub']
+
+
+def physics(rows: list) -> None:
+    """Physics-harmonised inputs as a heterogeneity treatment (G5): the NWP layer winds interpolated to the
+    turbine groups' hub heights and the library power curve applied (preprocessing.add_physics_features).
+    add = base ICON layers + physics + ECMWF; only = physics + ECMWF (no raw ICON layers). x1 statics with lag,
+    FedGradient / FedAvg (fine-tune variants, drift metrics) / CL80 / local, seeds 42-44."""
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_physics')
+    b = bases('static')
+    for var in ('add', 'only'):
+        for seed in SEEDS:
+            for meth, cfg0 in b.items():
+                cfg = copy.deepcopy(cfg0)
+                cfg['params']['random_seed'] = seed
+                icon = [f for f in cfg['params']['known_features'] if not f.startswith('ecmwf_')]
+                ecmwf = [f for f in cfg['params']['known_features'] if f.startswith('ecmwf_')]
+                cfg['params']['known_features'] = (icon if var == 'add' else []) + PHYSICS + ecmwf
+                if meth.startswith('fl_'):
+                    cfg['fl']['drift_metrics'] = True
+                    fine_tune(cfg, variants=True)
+                rows.append({'scenario': 'physics', 'variant': var, 'seed': seed, 'method': meth,
+                             'config': write(cfg, f'scen_phys_{var}_s{seed}_{meth}',
+                                             f'physics features ({var}: {cfg["params"]["known_features"]}), '
+                                             f'seed {seed}, {meth}')})
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
-    if part == 'newcomer':
+    if part == 'physics':
+        physics(rows)
+    elif part == 'newcomer':
         newcomer(rows)
     elif part == 'largebatch':
         large_batch(rows)
