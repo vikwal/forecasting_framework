@@ -42,6 +42,10 @@ sudo systemctl restart optuna-dashboard.service
 
 **Hinweis:** `.bashrc`-Exports werden von systemd-Services nicht eingelesen — die Variable muss zwingend über die Unit-Datei gesetzt werden.
 
+### Datenbank-Auswahl
+
+`OPTUNA_STORAGE` bestimmt Server, Zugangsdaten und die Standard-Datenbank. Bei PostgreSQL bietet die Sidebar ein Dropdown mit allen Datenbanken dieses Servers, die das Optuna-Schema enthalten (Tabellen `studies`, `trials`, `version_info`; `optuna_dbs.list_optuna_databases`, 5 min gecacht). Ein Wechsel verwirft die geladenen Studies. `?db=<name>` in der URL wählt eine Datenbank vor (Lesezeichen); ohne Parameter gilt die Datenbank aus `OPTUNA_STORAGE`. Eine neue Datenbank erscheint, sobald Optuna ihr Schema angelegt hat (erste Studie oder `optuna.storages.RDBStorage(url)`). Löschen wirkt auf die gewählte Datenbank.
+
 Fallback: Wenn `OPTUNA_STORAGE` nicht gesetzt ist, wird automatisch `studies/optuna_studies.db` (SQLite) verwendet.
 
 ## Study löschen

@@ -16,6 +16,8 @@ from datetime import datetime
 import seaborn as sns
 from dotenv import load_dotenv
 
+import optuna_dbs
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -66,6 +68,36 @@ def get_storage_url():
         # Fallback to SQLite if OPTUNA_STORAGE not set
         default_path = os.path.join(os.path.dirname(__file__), "studies", "optuna_studies.db")
         return f"sqlite:///{default_path}"
+
+@st.cache_data(ttl=300)
+def get_optuna_databases(storage_url):
+    """Optuna databases on the server of OPTUNA_STORAGE (cached for 5 minutes)"""
+    return optuna_dbs.list_optuna_databases(storage_url)
+
+def select_storage(storage_url):
+    """Sidebar picker for the Optuna database (PostgreSQL only). The default is the database of
+    OPTUNA_STORAGE, '?db=<name>' in the URL preselects another one. Switching drops the cached studies."""
+    if not storage_url.startswith('postgresql'):
+        st.sidebar.info("📁 Database: SQLite (studies/optuna_studies.db)")
+        return storage_url
+
+    default = optuna_dbs.database_name(storage_url)
+    dbs = get_optuna_databases(storage_url)
+    # The widget state lives under a fixed key (an index argument that changes would recreate the widget)
+    if st.session_state.get('selected_db') not in dbs:
+        requested = st.query_params.get('db', default)
+        st.session_state.selected_db = requested if requested in dbs else default
+    db = st.sidebar.selectbox("📁 Optuna database (PostgreSQL)", dbs, key='selected_db')
+    if st.session_state.get('loaded_db') not in (None, db):
+        st.session_state.cached_studies_data = None
+        st.session_state.cached_available_studies = None
+        st.session_state.current_study = None
+    st.session_state.loaded_db = db
+    if db != default:
+        st.query_params.db = db
+    elif 'db' in st.query_params:
+        del st.query_params.db
+    return optuna_dbs.with_database(storage_url, db)
 
 @st.cache_data(ttl=30)  # Cache für 30 Sekunden
 def get_available_studies(storage_url):
@@ -663,14 +695,8 @@ def main():
     # Sidebar for configuration
     st.sidebar.header("⚙️ Configuration")
 
-    # Get storage URL from environment or use default
-    storage_url = get_storage_url()
-
-    # Display storage info
-    if storage_url.startswith('postgresql'):
-        st.sidebar.info(f"📁 Database: PostgreSQL (from OPTUNA_STORAGE)")
-    else:
-        st.sidebar.info(f"📁 Database: SQLite (studies/optuna_studies.db)")
+    # Storage URL from the environment; on PostgreSQL the database is picked in the sidebar
+    storage_url = select_storage(get_storage_url())
 
     # UI elements for refresh control
     auto_refresh = st.sidebar.checkbox("Auto Refresh (5min)", value=True)
