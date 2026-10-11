@@ -604,6 +604,17 @@ def trianel(rows: list) -> None:
                              'config': write(cfg, f'trianel_{tag}_s{seed}_{meth.replace("cl80", "cl12")}',
                                              f'Trianel real parks, {"with" if lag else "without"} power lag, '
                                              f'seed {seed}, {meth} (local: train_local on the FedGradient config)')})
+    for seed in SEEDS:                        # park-id embedding: the pooled model knows which park it predicts
+        for meth in ('fl_fedgradient', 'fl_fedavg', 'cl80'):
+            cfg = scale(trianel_base(meth, True), 2 if meth == 'cl80' else 10)
+            cfg['params']['random_seed'] = seed
+            cfg['params']['static_features'] = cfg['params']['static_features'] + ['park_id']
+            cfg['params']['static_categorical'] = ['park_id']
+            if meth.startswith('fl_'):
+                fine_tune(cfg, 10, variants=True)
+            rows.append({'scenario': 'trianel_parkid', 'lag': True, 'seed': seed, 'method': meth,
+                         'config': write(cfg, f'trianel_lag_parkid_s{seed}_{meth.replace("cl80", "cl12")}',
+                                         f'Trianel real parks, with lag and park-id embedding, seed {seed}, {meth}')})
     for k, park in enumerate(TRIANEL_PARKS):
         keep = [p for p in TRIANEL_PARKS if p != park]
         for meth in ('fl_fedgradient', 'fl_fedavg', 'cl80'):

@@ -3874,6 +3874,12 @@ def preprocess_trianel_tft(park_id: str,
                                           if len(park_turbines) > 0 else 25.0)
         static_data['rated_wind_speed'] = (float(park_turbines['rated'].mean())
                                            if len(park_turbines) > 0 else 12.0)
+        # categorical park id (params.static_categorical), code as in the synth path (static_categories)
+        _cats = static_categories(config)
+        if 'park_id' in _cats:
+            if park_id not in _cats['park_id']:
+                raise ValueError(f"park {park_id} missing in the park_id categories")
+            static_data['park_id'] = _cats['park_id'].index(park_id)
 
     # ------------------------------------------------------------------ #
     # 3. Installed capacity — always derived from synthetic CSV
