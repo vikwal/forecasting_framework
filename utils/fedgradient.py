@@ -156,6 +156,11 @@ def rowwise_average(tensors: Sequence[torch.Tensor], weights: Sequence[float],
     return out.to(tensors[0].dtype), has
 
 
+def client_weights(results: List[Dict[str, Any]], weighting: str = 'batch_size') -> List[float]:
+    """Aggregation weight of every participating client (batch size or uniform)."""
+    return [float(r['n_samples']) if weighting == 'batch_size' else 1.0 for r in results]
+
+
 def aggregate_gradients(results: List[Dict[str, Any]],
                         row_owners: Optional[Dict[Any, Dict[str, torch.Tensor]]] = None,
                         weighting: str = 'batch_size'
@@ -166,7 +171,7 @@ def aggregate_gradients(results: List[Dict[str, Any]],
     Embedding tables listed in ``row_owners``: per row only over the participants owning it.
     Returns (gradients, row_masks) where row_masks marks the rows with a contribution.
     """
-    weights = [float(r['n_samples']) if weighting == 'batch_size' else 1.0 for r in results]
+    weights = client_weights(results, weighting)
     total = sum(weights)
     first_owners = (row_owners or {}).get(results[0]['client_id'], {})
     grads, row_masks = {}, {}
@@ -408,12 +413,14 @@ def run_round(dispatch: Callable[[str, List[int], Any], List[Dict[str, Any]]],
               optimizer: torch.optim.Optimizer, seed: int,
               row_owners: Optional[Dict[Any, Dict[str, torch.Tensor]]] = None,
               weighting: str = 'batch_size',
-              comm: Optional[CommStats] = None) -> Tuple[List[Dict[str, Any]], int]:
+              comm: Optional[CommStats] = None,
+              drift: Optional[Any] = None) -> Tuple[List[Dict[str, Any]], int]:
     """One FedGradient round (= one epoch over every client's training windows).
 
     ``dispatch(method, client_indices, arg)`` calls ``method`` ('prepare_round' with
     (seed, state_dict), 'step' with the parameter dict, 'round_metrics' without argument)
     on the given clients and returns their results in order.
+    ``drift``: optional ``fl_drift.DriftLog`` fed with the clients' batch gradients of every step.
     Returns (per-client round metrics, number of server steps).
     """
     state = {k: v.detach().to('cpu', copy=True) for k, v in global_model.state_dict().items()}
@@ -426,6 +433,9 @@ def run_round(dispatch: Callable[[str, List[int], Any], List[Dict[str, Any]]],
         weights = params_cpu(global_model)
         results = dispatch('step', active, weights)
         grads, masks = aggregate_gradients(results, row_owners, weighting)
+        if drift is not None:
+            drift.add([client_ids[i] for i in active], [drift.flatten(r['gradients']) for r in results],
+                      client_weights(results, weighting))
         server_step(global_model, optimizer, grads, masks)
         steps += 1
         if comm is not None:

@@ -61,6 +61,18 @@ client's local model (fl.client_holdout = the 10 parks for each client; run with
 model of the holdout operator (CL on the 10 parks, run with method cl80); seeds 42-44. The global models of the
 same setup are the 12-month runs of part 1 (scen_scarce_m12_*).
 
+Drift (--part drift, configs/parks_v1/scenarios_drift/, fl.drift_metrics on, x1 statics with lag, seeds 42-44):
+  clients  k = 10 / 5 / 2 / 1 parks per client (8 / 16 / 40 / 80 clients, consecutive split of every client's
+           list as in poolsize; local references = poolsize k < 10, part-1 scen_scarce_m12 for k = 10), FedGradient
+           and FedAvg, rounds/patience scaled by 10/k (same number of optimizer steps); FedAvg also with
+           5 local epochs per round (local_epochs 5) for k = 10 and k = 1
+  skew     one partition with 25/15/12/10/8/5/3/2 parks per client (seeded random assignment of the 80 parks,
+           clients S0_25 .. S7_2), FedGradient / FedAvg; local = train_local on the FedGradient config
+No lag (--part nolag, configs/parks_v1/scenarios_nolag/): the pure NWP-driven setting (observed_features [],
+static_nolag bases) for the scenarios where federation mattered with the lag:
+  scarce_nolag  1 and 3 months of history, seeds 42-44, FL with fine-tune variants / CL80 / local
+  lopo_nolag    new parks (folds 0-4, seed 42), FL with fine-tune variants / CL72 / local
+
   python scripts/make_fl_scenarios.py              # part 1: configs and scenarios/manifest.csv
   python scripts/make_fl_scenarios.py --part 2     # part 2: scenarios2/
   python scripts/make_fl_scenarios.py --part wind  # hub wind target: scenarios_wind/
@@ -69,6 +81,9 @@ same setup are the 12-month runs of part 1 (scen_scarce_m12_*).
   python scripts/make_fl_scenarios.py --part poolsize  # parks per model: scenarios_poolsize/
   python scripts/make_fl_scenarios.py --part split2    # split 2 base configs: split2/
   python scripts/make_fl_scenarios.py --part runs      # forecast runs: scenarios_runs/
+  python scripts/make_fl_scenarios.py --part features  # feature test: scenarios_features/
+  python scripts/make_fl_scenarios.py --part drift     # client count, skew, drift metrics: scenarios_drift/
+  python scripts/make_fl_scenarios.py --part nolag     # scarce / new parks without the power lag: scenarios_nolag/
 """
 
 import copy
@@ -433,10 +448,117 @@ def features(rows: list) -> None:
                                                  f'seed {seed}, {meth}')})
 
 
+DRIFT_K = (10, 5, 2, 1)
+SKEW_SIZES = (25, 15, 12, 10, 8, 5, 3, 2)
+
+
+def fl_pool_clients(clients: dict, k: int) -> dict:
+    """fl.clients with k parks per client: consecutive split of every client's list (poolsize split
+    without the holdout groups, so the local poolsize models are the references)."""
+    if k == 10:
+        return {c: list(p) for c, p in clients.items()}
+    if 10 % k:
+        raise ValueError(f'k must divide 10, got {k}')
+    return {f'{cid}_g{i // k}': list(parks[i:i + k])
+            for cid, parks in clients.items() for i in range(0, len(parks), k)}
+
+
+def skew_clients(clients: dict, sizes=SKEW_SIZES, seed: int = 0) -> dict:
+    """Quantity-skewed partition of the 80 parks (sizes sum to 80), seeded random assignment."""
+    import numpy as np
+    parks = [p for c in clients for p in clients[c]]
+    if sum(sizes) != len(parks):
+        raise ValueError(f'sizes sum to {sum(sizes)}, {len(parks)} parks')
+    order = np.random.default_rng(seed).permutation(len(parks))
+    out, pos = {}, 0
+    for i, n in enumerate(sizes):
+        out[f'S{i}_{n}'] = [parks[j] for j in order[pos:pos + n]]
+        pos += n
+    return out
+
+
+def drift(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_drift')
+    b = bases('static')
+    clients = b['fl_fedgradient']['fl']['clients']
+    for k in DRIFT_K:
+        f = 10 // k
+        for seed in SEEDS:
+            for meth, local_epochs in (('fl_fedgradient', 1), ('fl_fedavg', 1), ('fl_fedavg', 5)):
+                if local_epochs > 1 and k not in (10, 1):
+                    continue
+                cfg = scale(copy.deepcopy(b[meth]), f)
+                cfg['params']['random_seed'] = seed
+                cfg['fl']['clients'] = fl_pool_clients(clients, k)
+                cfg['fl']['drift_metrics'] = True
+                cfg['fl']['n_local_epochs'] = local_epochs
+                cfg['fl']['max_concurrent_actors'] = max(8, len(cfg['fl']['clients']))
+                tag = f'k{k}_e{local_epochs}' if local_epochs > 1 else f'k{k}'
+                rows.append({'scenario': 'clients', 'k': k, 'n_clients': len(cfg['fl']['clients']),
+                             'local_epochs': local_epochs, 'seed': seed, 'method': meth,
+                             'config': write(cfg, f'scen_drift_{tag}_s{seed}_{meth}',
+                                             f'{k} parks per client ({len(cfg["fl"]["clients"])} clients), '
+                                             f'{local_epochs} local epoch(s), drift metrics, seed {seed}, {meth}')})
+    for seed in SEEDS:
+        for meth in ('fl_fedgradient', 'fl_fedavg'):
+            cfg = copy.deepcopy(b[meth])
+            cfg['params']['random_seed'] = seed
+            cfg['fl']['clients'] = skew_clients(clients)
+            cfg['fl']['drift_metrics'] = True
+            rows.append({'scenario': 'skew', 'k': None, 'n_clients': 8, 'local_epochs': 1, 'seed': seed,
+                         'method': meth,
+                         'config': write(cfg, f'scen_drift_skew_s{seed}_{meth}',
+                                         f'quantity skew {SKEW_SIZES} parks per client, drift metrics, '
+                                         f'seed {seed}, {meth} (local: train_local on the FedGradient config)')})
+
+
+def no_lag(rows: list) -> None:
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_nolag')
+    b = bases('static_nolag')
+    for m in (1, 3):
+        f = 12 // m
+        for seed in SEEDS:
+            for meth, cfg0 in b.items():
+                cfg = scale(copy.deepcopy(cfg0), f)
+                cfg['data']['train_start'] = MONTHS[m]
+                cfg['params']['random_seed'] = seed
+                if meth.startswith('fl_'):
+                    fine_tune(cfg, f, variants=True)
+                rows.append({'scenario': 'scarce_nolag', 'months': m, 'seed': seed, 'method': meth,
+                             'config': write(cfg, f'scen_nolag_scarce_m{m}_s{seed}_{meth}',
+                                             f'{m} months history, no power lag, seed {seed}, {meth}')})
+    clients = b['fl_fedgradient']['fl']['clients']
+    holdout = list(b['fl_fedgradient']['data']['val_files'])
+    for k in range(5):
+        new = {c: [p[k]] for c, p in clients.items()}
+        keep = {c: [x for i, x in enumerate(p) if i != k] for c, p in clients.items()}
+        files = [x for c in keep for x in keep[c]]
+        newparks = [new[c][0] for c in clients]
+        for meth, cfg0 in b.items():
+            cfg = copy.deepcopy(cfg0)
+            cfg['data']['files'] = files
+            if meth.startswith('fl_'):
+                cfg['fl']['clients'] = keep
+                cfg['fl']['client_holdout'] = new
+                cfg['data']['val_files'] = newparks + holdout
+                fine_tune(cfg, variants=True)
+            else:
+                cfg['data']['holdout_files'] = newparks + holdout
+            rows.append({'scenario': 'lopo_nolag', 'fold': k, 'seed': 42, 'method': meth,
+                         'config': write(cfg, f'scen_nolag_lopo_k{k}_{meth.replace("cl80", "cl72")}',
+                                         f'lopo fold {k}: park {k} of every client is new, no power lag, {meth}')})
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
-    if part == '2':
+    if part == 'drift':
+        drift(rows)
+    elif part == 'nolag':
+        no_lag(rows)
+    elif part == '2':
         part2(rows)
     elif part == 'wind':
         hub_wind(rows)

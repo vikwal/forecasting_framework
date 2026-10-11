@@ -83,6 +83,23 @@ alle Optimizer im Suchraum dort stehen.
   Wegen der Rundenseeds ist ein fortgesetzter Lauf identisch mit einem durchgelaufenen (Test).
   Nicht mit `fl.personalize`.
 
+## Drift-Diagnostik (`fl.drift_metrics: true`, alle Strategien)
+
+`utils/fl_drift.py`. Der Server sieht je Aggregationsschritt einen Vektor je Client: den Batch-Gradienten
+(FedGradient) bzw. das Runden-Update `w_client − w_global` (FedAvg/FedAvgM/FedAdam), flach über alle
+trainierbaren Parameter ohne die zeilenweise aggregierten Embedding-Tabellen (Park-ID). Daraus je Schritt:
+Kosinus jedes Clients zum (gewichteten) Mittelvektor und seine Norm, mittlerer paarweiser Kosinus der
+Clients und das Alignment `‖Mittel‖ / Σ wᵢ‖vᵢ‖` ∈ [0, 1] (1 = alle zeigen in dieselbe Richtung, 0 = sie
+heben sich auf). Je Runde gemittelt (FedGradient über die Schritte der Runde, nur Schritte mit ≥ 2 Clients
+für den paarweisen Kosinus). Bei Client-seitiger Bewertung kommt die `val_rmse` jedes Clients je Runde dazu
+(„für wen versagt das globale Modell in dieser Runde“, Nachtigall et al. 2024).
+
+Ergebnis in `history['drift_clients']` (round, client, cos_mean, norm_mean, n_steps, val_rmse) und
+`history['drift_rounds']` (round, pairwise_cos, alignment, mean_norm, n_steps); beide im Checkpoint, Resume
+hängt an. Ohne den Schlüssel ändert sich nichts. Kosten: eine Matrixmultiplikation (n_clients × n_params) je
+Schritt auf der CPU. Tests: `tests/test_fl_drift.py`. Verwandt: Gradient Diversity (Yin et al. 2018), Update-
+Kosinus unter Vortraining („Where to Begin?“, ICLR 2023).
+
 ## Baselines zum Vergleich
 
 - **Zentral (CL):** `train_cl.py` auf denselben Stationen (parks_v1: `config_parks_v1_cl80{,_parkid}.yaml`,

@@ -10,7 +10,7 @@ from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 
-from . import tools, models, preprocessing, fedgradient
+from . import tools, models, preprocessing, fedgradient, fl_drift
 
 
 def aggregate_scalers(client_stats):
@@ -1200,6 +1200,14 @@ def run_simulation(partitions: Any,
                 logging.info(f"[Server] Row-wise aggregation of '{name}': {int((owned > 0).sum())}/"
                              f"{owned.numel()} rows owned, max owners per row {int(owned.max())}")
 
+    # Client-drift diagnostics (fl.drift_metrics): gradient / update vectors over the trainable
+    # parameters without the row-wise tables (utils/fl_drift.py)
+    drift = None
+    if config['fl'].get('drift_metrics', False):
+        skip = set(next(iter(row_owners.values()))) if row_owners else set()
+        drift = fl_drift.DriftLog(fl_drift.trainable_keys(global_model, skip=skip))
+        logging.info(f"[Server] Drift diagnostics on {len(drift.keys)} parameter tensors")
+
     # Initialize server optimizer if needed
     server_optimizer = None
     fg_optimizer = None
@@ -1281,6 +1289,8 @@ def run_simulation(partitions: Any,
         server_steps = ck.get('server_steps', 0)
         start_round = ck['round'] + 1
         stopped = ck.get('stopped', False)
+        if drift is not None and ck.get('drift'):
+            drift = fl_drift.DriftLog.from_dict(ck['drift'])
         logging.info(f"[Checkpoint] Resumed from {resume_path} after round {ck['round']}"
                      f"{' (early stopping had already triggered)' if stopped else ''}")
 
@@ -1295,6 +1305,7 @@ def run_simulation(partitions: Any,
             'early_stopping': {'best_val': best_global_val, 'counter': global_es_counter,
                                'best_round': best_round, 'best_weights': best_global_weights},
             'metrics': all_rounds_metrics_data, 'comm': comm.to_dict(), 'server_steps': server_steps,
+            'drift': drift.to_dict() if drift is not None else None,
         })
 
     fg_methods = {'prepare_round': 'fg_prepare_round', 'step': 'fg_step',
@@ -1323,7 +1334,7 @@ def run_simulation(partitions: Any,
             seed = fedgradient.round_seed(config['params'].get('random_seed', 42), round_num)
             client_results, round_steps = fedgradient.run_round(
                 _fg_dispatch, client_keys, global_model, fg_optimizer, seed,
-                row_owners=row_owners, weighting=fg_hp['gradient_weighting'], comm=comm)
+                row_owners=row_owners, weighting=fg_hp['gradient_weighting'], comm=comm, drift=drift)
             server_steps += round_steps
             train_metrics_agg = aggregate_metrics(client_results)
             global_weights = global_model.state_dict()
@@ -1335,6 +1346,11 @@ def run_simulation(partitions: Any,
             logging.debug(f"[Server] All clients trained. Start aggregation.")
             aggregated_weights = aggregate_weights(client_results, config, row_owners=row_owners,
                                                    reference_weights=global_weights_cpu)
+            if drift is not None:        # client update of the round = w_client - w_global
+                drift.add([r['client_id'] for r in client_results],
+                          [drift.flatten({k: r['weights'][k].detach().cpu() - global_weights_cpu[k]
+                                          for k in drift.keys}) for r in client_results],
+                          [float(r['n_samples']) for r in client_results])
             train_metrics_agg = aggregate_metrics(client_results)
             round_steps = 1
             server_steps += 1
@@ -1396,6 +1412,8 @@ def run_simulation(partitions: Any,
                                  strategy != 'fedgradient')
             comm.add_eval(client_keys, state_bytes)
             val_metrics_agg = aggregate_metrics(eval_results)
+            if drift is not None:
+                drift.add_val({r['client_id']: r['metrics']['rmse'] for r in eval_results if r.get('metrics')})
             if personalize:
                 client_results = eval_results
             logging.debug(f'[Server] Evaluation metrics aggregated.')
@@ -1453,6 +1471,8 @@ def run_simulation(partitions: Any,
                 _parts.append(f"val_rmse={_vrmse:.4f}")
         logging.info("  ".join(_parts))
 
+        if drift is not None:
+            drift.end_round(round_num)
         _save_checkpoint(round_num)
         if stopped:
             break
@@ -1472,6 +1492,8 @@ def run_simulation(partitions: Any,
     history['last_round'] = round_num
     history['early_stopped'] = stopped
     history['runtime_s'] = end_time - start_time
+    if drift is not None:
+        history['drift_clients'], history['drift_rounds'] = drift.frames()
 
     # Restore best weights if global early stopping was used
     if global_es_enabled and best_global_weights is not None:
