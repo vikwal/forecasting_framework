@@ -304,7 +304,8 @@ class GradientClient:
         if weights is not None:
             self.model.load_state_dict({k: v for k, v in weights.items()}, strict=True)
         self.batches = [b.to(self.device) for b in
-                        epoch_batches(self.n, self.batch_size, seed, drop_last=True, shuffle=self.shuffle)]
+                        epoch_batches(self.n, self.batch_size, seed, drop_last=self.n >= self.batch_size,
+                                      shuffle=self.shuffle)]
         self.cursor = 0
         torch.manual_seed(int(seed) + self.dropout_seed_offset)   # dropout masks
         self._reset_stats()

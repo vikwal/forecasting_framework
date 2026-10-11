@@ -38,6 +38,10 @@ case "$1" in
   newcomer_l2)   # local (16 clients) and central on l2
     $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer \
           --methods local cl80 --gpus 0-3 --per-gpu 4 ;;
+  physics)       # physics features nwp_power_curve / nwp_wind_hub (--part physics): FL, central and local on one host
+    PHY="--manifest configs/parks_v1/scenarios_physics/manifest.csv --log-dir $D/fl_physics"
+    $P $Q $PHY --scenarios physics --methods local cl80 --gpus 0-3 --per-gpu 2
+    $P $Q $PHY --scenarios physics $FL ;;
   largebatch)    # central x4 with the FedGradient optimisation regime (--part largebatch)
     $P $Q --manifest configs/parks_v1/scenarios_regular/manifest.csv --log-dir $D/fl_regular --scenarios largebatch \
           --methods cl80 --gpus 1 ;;

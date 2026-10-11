@@ -634,7 +634,7 @@ def training_pipeline(train: Tuple[np.ndarray, np.ndarray],
         shuffle=config['model']['shuffle'],
         device=device,
         num_workers=config['model']['num_workers'],
-        drop_last=True  # Drop incomplete batches for training
+        drop_last=len(y_train) >= batch_size  # drop the incomplete batch, unless the data are smaller than one batch
     )
 
     val_loader = None

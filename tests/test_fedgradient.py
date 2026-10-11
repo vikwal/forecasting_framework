@@ -490,3 +490,13 @@ def test_last_round_is_the_stopping_round(cpu_only):
     # round 1 improves on inf, round 2 cannot beat it by min_delta -> stop after round 2
     assert history['early_stopped'] and history['last_round'] == 2 and history['best_round'] == 1
     assert list(history['metrics_aggregated'].index) == [1, 2]
+
+
+def test_client_smaller_than_one_batch_still_serves_a_partial_batch():
+    """A client with fewer windows than the batch size (e.g. a new park with two weeks of history)
+    contributes one partial batch per round instead of dropping out."""
+    X, y = _data(12, [0, 1], seed=3)
+    c = _client(_tft(seed=1), X, y, bs=64, cid='tiny')
+    assert c.prepare_round(seed=1) == 1
+    r = c.step()
+    assert r['n_samples'] == 12 and r['remaining'] == 0

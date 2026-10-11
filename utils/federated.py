@@ -402,7 +402,7 @@ class ClientActor:
 
         train_loader = DataLoader(train_dataset, batch_size=batch_size,
                                   shuffle=self.config['model'].get('shuffle', True),
-                                  drop_last=True, pin_memory=True)
+                                  drop_last=len(train_dataset) >= batch_size, pin_memory=True)
 
         val_loader = None
         if self.X_val is not None and self.y_val is not None:
