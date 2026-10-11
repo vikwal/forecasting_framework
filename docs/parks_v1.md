@@ -191,3 +191,12 @@ Bekannte, bewusst belassene Punkte:
 - Lokal skaliert je Client, FL und zentral global.
 - FedGradient und FedAvg haben strategieeigene Optimierer und Clipping.
 - ECMWF 12 UTC wird den ICON-Läufen 12 und 15 UTC zugeordnet (Annahme: verfügbar).
+
+Optuna-Datenbank: Die Studien dieses Projekts liegen in einer eigenen Postgres-DB `optuna_fl` (auf l2, angelegt am 2026-10-11) und nicht in `optuna_db` (Windgeschwindigkeits-Studien). `.bashrc` bleibt unverändert; HPO und `--lookup-hpo` werden mit umgebogener Variable gestartet:
+
+```bash
+export OPTUNA_STORAGE=${OPTUNA_STORAGE%/*}/optuna_fl    # gleicher Server, andere DB
+python hpo_local.py -c configs/parks_v1/split2/config_parks_v1_curt_v11_fl_fedgradient_static_s2 -m tft --gpus 0-7
+```
+
+Damit l1 zugreifen kann, braucht `pg_hba.conf` auf l2 einen Eintrag für `optuna_fl` (die Freigabe gilt je Datenbank). Die Dashboards (8504, 8510) zeigen weiter `optuna_db`.
