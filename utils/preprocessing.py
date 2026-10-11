@@ -231,6 +231,17 @@ def _get_data_from_config_files(config: dict,
 
     def _process_file(file_idx_file):
         file_idx, file = file_idx_file
+        if _use_case == 'trianel':
+            # real Trianel wind parks (preprocess_trianel_tft resolves its own files); park_age at train_start
+            try:
+                df = preprocess_trianel_tft(park_id=str(file), config=copy.deepcopy(config), freq=freq,
+                                            features=features.copy() if features else None,
+                                            fold_start=pd.Timestamp(data_config['train_start']),
+                                            use_real=not data_config.get('trianel_synthetic', False))
+                return file, df
+            except Exception as e:
+                logging.error(f"Error loading Trianel park {file}: {e}")
+                return file, None
         if _raw_station_mode:
             file_path = os.path.join(base_path, f"Station_{file}.parquet")
             if not os.path.exists(file_path):
@@ -3565,7 +3576,7 @@ def _ensure_parquet_exists(csv_file_path: str, force: bool = False) -> str:
     raise FileNotFoundError(f"No parquet or CSV file found for park '{park_id}' in '{data_path}'")
 
 
-def _load_ecmwf_for_park(park_id: str, config: dict) -> pd.DataFrame | None:
+def _load_ecmwf_for_park(park_id: str, config: dict, per_run: bool = False) -> pd.DataFrame | None:
     """
     Load ECMWF single-level forecast data for one park.
 
@@ -3577,6 +3588,8 @@ def _load_ecmwf_for_park(park_id: str, config: dict) -> pd.DataFrame | None:
     the feature columns listed in config['data']['ecmwf_features'].
     When multiple ECMWF runs cover the same validtime, the one with the shortest
     forecasttime (= most recently issued run) is kept.
+    ``per_run=True`` instead returns every run as rows (starttime, validtime, features), so the
+    caller can pick the run by issue time (_merge_ecmwf_by_issue_time).
 
     Returns None when ecmwf_path is not configured or no file is found.
     """
@@ -3634,12 +3647,40 @@ def _load_ecmwf_for_park(park_id: str, config: dict) -> pd.DataFrame | None:
             df.sort_values('validtime', inplace=True)
             df[col] = df[col].interpolate(method='linear').ffill().bfill()
 
+    if per_run:
+        feats = [c for c in ecmwf_feature_cols if c in df.columns]
+        starts = df['validtime'] - pd.to_timedelta(df['forecasttime'], unit='h')
+        return df.assign(starttime=starts)[['starttime', 'validtime'] + feats].reset_index(drop=True)
+
     # For each validtime keep the row with the shortest forecasttime (= most recent ECMWF run).
     df.sort_values(['validtime', 'forecasttime'], inplace=True)
     df = df.drop_duplicates(subset='validtime', keep='first')
 
     df.set_index('validtime', inplace=True)
     df.drop(columns=['forecasttime'], inplace=True)
+    return df
+
+
+def _merge_ecmwf_by_issue_time(df_icon: pd.DataFrame, runs: pd.DataFrame) -> pd.DataFrame:
+    """ECMWF features of the run issued at or before the ICON issue time, joined on the valid time:
+    ICON 00-11 UTC -> ECMWF 00 UTC of the same day, ICON 12-23 UTC -> ECMWF 12 UTC (the same
+    assignment as the parks_v1 site_runs layout). ICON runs without a complete ECMWF match are
+    dropped (logged), never filled from other runs."""
+    feats = [c for c in runs.columns if c not in ('starttime', 'validtime')]
+    df = df_icon.copy()
+    start = pd.to_datetime(df['starttime'], utc=True)
+    key = pd.DataFrame({'ecmwf_start': start.dt.floor('12h').to_numpy(),
+                        'timestamp': pd.to_datetime(df['timestamp'], utc=True).to_numpy()})
+    r = runs.rename(columns={'starttime': 'ecmwf_start', 'validtime': 'timestamp'})
+    r = r.assign(ecmwf_start=pd.to_datetime(r['ecmwf_start'], utc=True),
+                 timestamp=pd.to_datetime(r['timestamp'], utc=True)).drop_duplicates(['ecmwf_start', 'timestamp'])
+    m = key.merge(r, on=['ecmwf_start', 'timestamp'], how='left')
+    for c in feats:
+        df[c] = m[c].to_numpy()
+    bad = df.loc[df[feats].isna().any(axis=1), 'starttime'].unique()
+    if len(bad):
+        logging.warning(f'ECMWF by issue time: {len(bad)} ICON runs without a complete ECMWF match dropped')
+        df = df[~df['starttime'].isin(bad)]
     return df
 
 
@@ -3963,9 +4004,11 @@ def preprocess_trianel_tft(park_id: str,
     # 6c. Merge ECMWF features (optional)
     # ------------------------------------------------------------------ #
     if config['data'].get('ecmwf_path'):
-        df_ecmwf = _load_ecmwf_for_park(park_id, config)
+        # ECMWF run issued at or before the ICON issue time (no look-ahead); the former
+        # "most recent run per valid time" merge used runs issued after the ICON run.
+        df_ecmwf = _load_ecmwf_for_park(park_id, config, per_run=True)
         if df_ecmwf is not None:
-            df_final = _merge_ecmwf_onto_icon(df_final, df_ecmwf)
+            df_final = _merge_ecmwf_by_issue_time(df_final, df_ecmwf)
 
     # Inner-join: only keep NWP rows whose validtime (starttime + forecasttime) has a SCADA match.
     # Left-join would produce NaN for NWP timestamps beyond the SCADA measurement period.

@@ -551,10 +551,86 @@ def no_lag(rows: list) -> None:
                                          f'lopo fold {k}: park {k} of every client is new, no power lag, {meth}')})
 
 
+TRIANEL_PARKS = ['eisleben', 'trendelburg', 'mattenberg', 'twv_windpark', 'eggstedt', 'lintern', 'kengen',
+                 'barlt_west', 'jettebruch', 'rheurdt', 'jessin_grimmen', 'hoeheinoed']   # vogelsberg: 51 % gaps, no ECMWF
+TRIANEL_ROOT = '${DATA_ROOT}/../nvme2'          # l1 nvme2 (l2: /mnt/lambda1/nvme2, l1: /mnt/nvme2)
+
+
+def trianel_base(meth: str, lag: bool) -> dict:
+    """parks_v1 model/fl/hpo sections with the Trianel data section (real SCADA, 12 parks, 09 UTC)."""
+    cfg = bases('static' if lag else 'static_nolag')[meth]
+    cfg['data'] = {
+        'use_case': 'trianel',
+        'path': _Env(f'{TRIANEL_ROOT}/synthetic/trianel_parks'),
+        'real_data_path': _Env(f'{TRIANEL_ROOT}/trianel_hourly'),
+        'real_synthetic_data_path': _Env(f'{TRIANEL_ROOT}/synthetic/trianel_parks'),
+        'wind_parameter_file': _Env(f'{TRIANEL_ROOT}/synthetic/trianel_parks/wind_parameter.csv'),
+        'turbine_parameter_file': _Env(f'{TRIANEL_ROOT}/synthetic/trianel_parks/turbine_parameter.csv'),
+        'nwp_path': _Env(f'{TRIANEL_ROOT}/icon-d2/trianel_parks'),
+        'ecmwf_path': _Env(f'{TRIANEL_ROOT}/ecmwf/parquet/SL'),
+        'ecmwf_features': ['wind_speed_h100', 'wind_speed_h200'],
+        'files': list(TRIANEL_PARKS), 'icond2_source': 'csv', 'forecast_hours': ['09'],
+        'freq': '1h', 'target_col': 'power', 'train_frac': 1, 'val_frac': 0.0,
+        'train_start': '2023-07-24', 'train_end': '2024-02-29 23:00', 'test_start': '2024-03-01',
+        'test_end': '2024-05-31', 'data_cutoff': '2024-06-01', 'strict_split': True,
+        'retrain_interval': 1, 'eval_interval': 1, 'scale_x': True, 'scale_y': False, 'use_pca': False,
+        'pca_components': 3, 'lag_in_col': False, 'n_neighbors': 5}
+    cfg['params'].update(known_features=['wind_speed_h78', 'wind_speed_h127', 'wind_speed_h184',
+                                         'wind_speed_h100', 'wind_speed_h200'],
+                         static_features=['altitude', 'park_age', 'hub_height', 'rotor_diameter', 'cut_in',
+                                          'cut_out', 'rated_wind_speed'],
+                         nwp_models=['icon-d2'])
+    cfg['params'].pop('ecmwf_features', None)
+    if meth.startswith('fl_'):
+        cfg['fl']['clients'] = {p: [p] for p in TRIANEL_PARKS}
+        cfg['fl']['drift_metrics'] = True
+        cfg['fl']['max_concurrent_actors'] = len(TRIANEL_PARKS)
+    return cfg
+
+
+def trianel(rows: list) -> None:
+    """Real parks: base comparison (lag / no lag, seeds) and new parks (leave-one-park-out, seed 42)."""
+    global OUT
+    OUT = os.path.join(BASE, '..', 'trianel')
+    for lag in (True, False):
+        for seed in SEEDS:
+            for meth in ('fl_fedgradient', 'fl_fedavg', 'cl80'):
+                cfg = scale(trianel_base(meth, lag), 2 if meth == 'cl80' else 10)   # ~220 samples per park
+                cfg['params']['random_seed'] = seed
+                if meth.startswith('fl_'):
+                    fine_tune(cfg, 10, variants=True)
+                tag = 'lag' if lag else 'nolag'
+                rows.append({'scenario': 'trianel_base', 'lag': lag, 'seed': seed, 'method': meth,
+                             'config': write(cfg, f'trianel_{tag}_s{seed}_{meth.replace("cl80", "cl12")}',
+                                             f'Trianel real parks, {"with" if lag else "without"} power lag, '
+                                             f'seed {seed}, {meth} (local: train_local on the FedGradient config)')})
+    for k, park in enumerate(TRIANEL_PARKS):
+        keep = [p for p in TRIANEL_PARKS if p != park]
+        for meth in ('fl_fedgradient', 'fl_fedavg', 'cl80'):
+            cfg = scale(trianel_base(meth, True), 2 if meth == 'cl80' else 10)
+            cfg['data']['files'] = keep
+            if meth.startswith('fl_'):
+                cfg['fl']['clients'] = {p: [p] for p in keep}
+                cfg['fl']['max_concurrent_actors'] = len(keep)
+                cfg['data']['val_files'] = [park]
+            else:
+                cfg['data']['holdout_files'] = [park]
+            rows.append({'scenario': 'trianel_lopo', 'fold': k, 'seed': 42, 'method': meth,
+                         'config': write(cfg, f'trianel_lopo_k{k}_{meth.replace("cl80", "cl11")}',
+                                         f'Trianel new park {park} (never trained), with lag, {meth}')})
+    # write() sets eval.results_path to the scenario folder; keep a Trianel folder
+    for r in rows:
+        p = os.path.join(REPO, r['config'] + '.yaml')
+        txt = open(p).read().replace(f'results_path: {RESULTS}', 'results_path: results/trianel')
+        open(p, 'w').write(txt)
+
+
 def main():
     rows = []
     part = sys.argv[sys.argv.index('--part') + 1] if '--part' in sys.argv else '1'
-    if part == 'drift':
+    if part == 'trianel':
+        trianel(rows)
+    elif part == 'drift':
         drift(rows)
     elif part == 'nolag':
         no_lag(rows)

@@ -27,5 +27,11 @@ case "$1" in
   l1b)
     $P $Q $DRIFT --scenarios clients skew $FL --reverse
     $P $Q $NOLAG --scenarios scarce_nolag lopo_nolag $FL --reverse ;;
-  *) echo "usage: $0 l2|l1a|l1b"; exit 1 ;;
+  trianel)   # real Trianel parks (configs/trianel, make_fl_scenarios.py --part trianel), small runs: one host
+    TRI="--manifest configs/trianel/manifest.csv --log-dir $D/trianel"
+    $P $Q $TRI --scenarios trianel_base --methods local cl80 --gpus 2-3 --per-gpu 6
+    $P $Q $TRI --scenarios trianel_base $FL
+    $P $Q $TRI --scenarios trianel_lopo --methods cl80 --gpus 2-3
+    $P $Q $TRI --scenarios trianel_lopo $FL ;;
+  *) echo "usage: $0 l2|l1a|l1b|trianel"; exit 1 ;;
 esac

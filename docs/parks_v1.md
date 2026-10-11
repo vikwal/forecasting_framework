@@ -192,6 +192,25 @@ Bekannte, bewusst belassene Punkte:
 - FedGradient und FedAvg haben strategieeigene Optimierer und Clipping.
 - ECMWF 12 UTC wird den ICON-Läufen 12 und 15 UTC zugeordnet (Annahme: verfügbar).
 
+### Drift-Diagnostik, Client-Anzahl, Schiefe, ohne Lag, reale Trianel-Parks (2026-10-11)
+
+| Schlüssel / Werkzeug | Wirkung |
+|---|---|
+| `fl.drift_metrics: true` | Kosinus der Client-Gradienten (FedGradient) bzw. -Updates (FedAvg) zum Aggregat, paarweiser Kosinus, Alignment, `val_rmse` je Client und Runde → `history['drift_clients'|'drift_rounds']` ([fedgradient.md](fedgradient.md)) |
+| `make_fl_scenarios.py --part drift` | `scenarios_drift/`: 10/5/2/1 Parks je Client (8/16/40/80 Clients), FedAvg mit 5 lokalen Epochen, Mengen-Schiefe 25..2 Parks (`skew_clients`), Runden/Patience mit 10/k skaliert |
+| `make_fl_scenarios.py --part nolag` | `scenarios_nolag/`: 1/3 Monate und neue Parks (Folds 0–4) ohne Leistungs-Lag |
+| `make_fl_scenarios.py --part trianel` | `configs/trianel/`: 12 reale Trianel-Parks (`data.use_case: trianel`, s. u.), je Park ein Client, mit/ohne Lag, Seeds 42–44, dazu leave-one-park-out (12 Folds) |
+| `scripts/launch_prehpo_queues.sh l2 \| l1a \| l1b \| trianel` | gemeinsame NFS-Warteschlangen `${DATA_ROOT}/runs/{fl_drift,fl_nolag,trianel}` |
+
+**Reale Parks (`data.use_case: trianel`):** `_get_data_from_config_files` ruft `preprocess_trianel_tft` auf (15-min-SCADA
+`real_data_path`, Normierung auf das Maximum der Messung, ICON-D2 ML aus `nwp_path/ML/<HH>/<park>/`, ECMWF SL aus
+`ecmwf_path/{00,12}/<park>.parquet`, `park_age` zum `train_start`). Die ECMWF-Zuordnung wurde dabei korrigiert:
+bisher nahm der Trianel-Pfad je Zielstunde den *jüngsten* ECMWF-Lauf (auch nach der ICON-Ausgabe, Look-ahead); jetzt
+der Lauf ≤ ICON-Ausgabezeit (ICON 00–11 UTC → ECMWF 00 UTC, 12–23 → 12 UTC; `_merge_ecmwf_by_issue_time`, Test
+`tests/test_trianel_ecmwf.py`). Pfade relativ zu `${DATA_ROOT}/../nvme2` (l1 nvme2). Zeitraum 2023-07-24..2024-02
+Training, 2024-03..05 Test (Messdaten enden 2024-06-01), Vogelsberg ausgeschlossen (51 % Lücken, kein ECMWF).
+Ergebnisse in `results/trianel_parks/`. Auswertung: `FL_Contribution/pipeline/trianel_study.py`.
+
 Optuna-Datenbank: Die Studien dieses Projekts liegen in einer eigenen Postgres-DB `optuna_fl` (auf l2, angelegt am 2026-10-11) und nicht in `optuna_db` (Windgeschwindigkeits-Studien). `.bashrc` bleibt unverändert; HPO und `--lookup-hpo` werden mit umgebogener Variable gestartet:
 
 ```bash
