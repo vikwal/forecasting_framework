@@ -53,6 +53,17 @@ case "$1" in
   trianel_newcomer_pool)   # real-park control: pool of the 11 other parks as one client (--part trianel_newcomer_pool)
     $P $Q --manifest configs/trianel_newcomer_pool/manifest.csv --log-dir $D/trianel_newcomer_pool \
           --scenarios trianel_newcomer_pool --methods fl_fedgradient ;;
+  transfer_a|transfer_b)   # K2 transfer ladder (--part transfer): small CL runs; a = forward, b = reverse; GPUS env
+    $P $Q --manifest configs/parks_v1/scenarios_transfer/manifest.csv --log-dir $D/fl_transfer --scenarios transfer \
+          --methods cl80 --gpus ${GPUS:-0-1} $( [ "$1" = transfer_b ] && echo --reverse ) ;;
+  poolglobal_fl)   # K3 few-shot: pool as one client + 42 newcomers (--part poolglobal)
+    $P $Q --manifest configs/parks_v1/scenarios_poolglobal/manifest.csv --log-dir $D/fl_poolglobal \
+          --scenarios poolglobal --methods fl_fedgradient ;;
+  poolglobal_cl)   # K3 zero-shot central models and the newcomers' own short-history models
+    $P $Q --manifest configs/parks_v1/scenarios_poolglobal/manifest.csv --log-dir $D/fl_poolglobal \
+          --scenarios poolglobal --methods cl80 --gpus ${GPUS:-2-3}
+    $P $Q --manifest configs/parks_v1/scenarios_poolglobal/manifest.csv --log-dir $D/fl_poolglobal \
+          --scenarios poolglobal_ref --methods local --gpus ${GPUS:-2-3} --per-gpu 4 ;;
   newcomer_l2)   # local (16 clients) and central on l2
     $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer \
           --methods local cl80 --gpus 0-3 --per-gpu 4 ;;

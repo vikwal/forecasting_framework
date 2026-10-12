@@ -681,12 +681,16 @@ def newcomer_pool(rows: list) -> None:
     OUT = os.path.join(BASE, 'scenarios_newcomer_pool')
     b = bases('static')
     clients = b['fl_fedgradient']['fl']['clients']
+    allp = [p for ps in clients.values() for p in ps]
+    holdout = list(b['fl_fedgradient']['data']['val_files'])
     for seed in SEEDS:
         for tag in ('2w', '1m'):
             for c, parks in clients.items():
                 cfg = copy.deepcopy(b['fl_fedgradient'])
                 cfg['params']['random_seed'] = seed
                 cfg['data']['station_history_start'] = {parks[0]: NEWCOMER_HISTORY[tag]}
+                # the 9-park model is also scored on the 70 foreign client parks (val_files: end-of-run only)
+                cfg['data']['val_files'] = holdout + [p for p in allp if p not in parks]
                 cfg['model']['epochs'] = 1000
                 cfg['model']['early_stopping']['patience'] = 100
                 cfg['fl']['clients'] = {c: list(parks[1:]), f'{c}_new': [parks[0]]}
@@ -700,6 +704,96 @@ def newcomer_pool(rows: list) -> None:
                              'config': write(cfg, f'scen_newpool_h{tag}_s{seed}_{c}_fl_fedgradient',
                                              f'newcomer {parks[0]} ({tag} history) with only its operator {c} '
                                              f'(9 parks) as pool, seed {seed}, fl_fedgradient')})
+
+
+TRANSFER_K = (10, 8, 6, 4, 2, 1)
+
+
+def transfer_ladder(rows: list) -> None:
+    """K2 transfer ladder (Viktor, 2026-10-12): every operator trains a central model on its first k parks
+    (k = 10 .. 1) and that model is scored zero-shot on all other parks (data.holdout_files: the operator's own
+    unused parks, the 70+ foreign client parks and the 10 holdout parks). Reference per unseen park: its own
+    full-history one-park model (drift block k = 1) / the holdout operator's own 10-park model (T12).
+    Seeds 42-44 in seed-major order."""
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_transfer')
+    b = bases('static')
+    clients = b['fl_fedgradient']['fl']['clients']
+    allp = [p for ps in clients.values() for p in ps]
+    holdout = list(b['cl80']['data']['holdout_files'])
+    for seed in SEEDS:
+        for k in TRANSFER_K:
+            for c, parks in clients.items():
+                cfg = copy.deepcopy(b['cl80'])
+                cfg['params']['random_seed'] = seed
+                cfg['data']['files'] = list(parks[:k])
+                cfg['data']['holdout_files'] = [p for p in allp if p not in parks[:k]] + holdout
+                rows.append({'scenario': 'transfer', 'k': k, 'client': c, 'seed': seed, 'method': 'cl80',
+                             'config': write(cfg, f'scen_transfer_k{k}_{c}_s{seed}_cl80',
+                                             f'K2 transfer ladder: operator {c} model from its first {k} parks, '
+                                             f'zero-shot on the other {90 - k} parks, seed {seed}')})
+
+
+POOLS = {'mix48': lambda cl: [p for ps in cl.values() for p in ps[:6]],
+         'mix24': lambda cl: [p for ps in cl.values() for p in ps[:3]],
+         'mix8': lambda cl: [ps[0] for ps in cl.values()],
+         'reg24': lambda cl: [p for c, ps in cl.items() if c.startswith('R') for p in ps[:6]],
+         'nat24': lambda cl: [p for c, ps in cl.items() if c.startswith('N') for p in ps[:6]]}
+
+
+def pool_global(rows: list) -> None:
+    """K3 global zero-/few-shot model (Viktor, 2026-10-12): a pool of 8 / 24 / 48 parks (mixed over all clients)
+    or 24 parks of the regional / nationwide clients only, scored on the same 42 unseen parks (parks 6-9 of every
+    client + the 10 holdout parks). zero-shot = central model on the pool (data.holdout_files = unseen);
+    few-shot = FedGradient with the pool as ONE client and the 42 unseen parks as one-park newcomers with 2w / 1m
+    history + FT variants (the newcomers' weeks enter pretraining at ~3 % weight). Reference: the unseen parks'
+    own short-history models (scenario poolglobal_ref, run `local` only) and their full-history models.
+    Seeds 42-44 in seed-major order."""
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_poolglobal')
+    b = bases('static')
+    clients = b['fl_fedgradient']['fl']['clients']
+    holdout = list(b['fl_fedgradient']['data']['val_files'])
+    unseen = [p for ps in clients.values() for p in ps[6:]] + holdout
+
+    def few_shot(pool_parks, tag, seed):
+        cfg = copy.deepcopy(b['fl_fedgradient'])
+        cfg['params']['random_seed'] = seed
+        cfg['data']['files'] = list(pool_parks) + list(unseen)
+        cfg['data']['val_files'] = []
+        cfg['data']['station_history_start'] = {p: NEWCOMER_HISTORY[tag] for p in unseen}
+        cfg['model']['epochs'] = 1000
+        cfg['model']['early_stopping']['patience'] = 100
+        cfg['fl']['clients'] = ({'pool': list(pool_parks)} if pool_parks else {}) | {f'{p}_new': [p] for p in unseen}
+        cfg['fl']['n_rounds'] = 200
+        cfg['fl']['global_early_stopping']['patience'] = 20
+        cfg['fl']['max_concurrent_actors'] = 22
+        cfg['fl']['drift_metrics'] = True
+        return fine_tune(cfg, 10, variants=True)
+
+    for seed in SEEDS:
+        for name, fn in POOLS.items():
+            pool = fn(clients)
+            cfg = copy.deepcopy(b['cl80'])
+            cfg['params']['random_seed'] = seed
+            cfg['data']['files'] = list(pool)
+            cfg['data']['holdout_files'] = list(unseen)
+            rows.append({'scenario': 'poolglobal', 'pool': name, 'history': 'none', 'seed': seed, 'method': 'cl80',
+                         'config': write(cfg, f'scen_poolglobal_{name}_s{seed}_cl80',
+                                         f'K3 pool {name} ({len(pool)} parks) central, zero-shot on 42 unseen parks, '
+                                         f'seed {seed}')})
+            for tag in ('2w', '1m'):
+                rows.append({'scenario': 'poolglobal', 'pool': name, 'history': tag, 'seed': seed,
+                             'method': 'fl_fedgradient',
+                             'config': write(few_shot(pool, tag, seed), f'scen_poolglobal_{name}_h{tag}_s{seed}_fl_fedgradient',
+                                             f'K3 pool {name} ({len(pool)} parks) as one client + 42 unseen parks as '
+                                             f'newcomers with {tag} history, few-shot FT, seed {seed}')})
+        for tag in ('2w', '1m'):
+            rows.append({'scenario': 'poolglobal_ref', 'pool': 'ref', 'history': tag, 'seed': seed,
+                         'method': 'fl_fedgradient',
+                         'config': write(few_shot([], tag, seed), f'scen_poolglobal_ref_h{tag}_s{seed}_fl_fedgradient',
+                                         f'K3 reference: the 42 unseen parks as one-park clients with {tag} history '
+                                         f'(run method local only), seed {seed}')})
 
 
 def trianel_newcomer_pool(rows: list) -> None:
@@ -833,6 +927,10 @@ def main():
         trianel_newcomer(rows)
     elif part == 'newcomer_pool':
         newcomer_pool(rows)
+    elif part == 'transfer':
+        transfer_ladder(rows)
+    elif part == 'poolglobal':
+        pool_global(rows)
     elif part == 'trianel_newcomer_pool':
         trianel_newcomer_pool(rows)
     elif part == 'drift':
