@@ -85,8 +85,9 @@ def main():
         done = os.path.join(LOGS, f'{stem}.done')
         log = os.path.join(LOGS, f'{stem}.out')
         if not os.path.exists(done) and os.path.exists(log):      # finished before a restart
-            prev = RESULT.findall(open(log, errors='ignore').read())
-            if prev and (os.path.exists(os.path.join(REPO, prev[-1])) or args.log_dir):
+            prev_txt = open(log, errors='ignore').read()
+            prev = RESULT.findall(prev_txt)
+            if prev and 'failed clients' not in prev_txt and (os.path.exists(os.path.join(REPO, prev[-1])) or args.log_dir):
                 with open(done, 'w') as f:
                     f.write(prev[-1] + '\n')
         if os.path.exists(done):
@@ -108,9 +109,11 @@ def main():
             rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, cwd=REPO)
         txt = open(log, errors='ignore').read()
         hits = RESULT.findall(txt)          # Ray workers keep logging after the result line
-        ok = rc == 0 and hits
-        print(f'[{i}/{len(todo)}] end {stem} rc={rc} {time.time() - t0:.0f} s {hits[-1] if hits else "NO RESULT"}',
-              flush=True)
+        # train_local exits 0 with a partial pickle when single clients crash ('failed clients: [...]'); no .done then
+        failed = 'failed clients' in txt
+        ok = rc == 0 and hits and not failed
+        print(f'[{i}/{len(todo)}] end {stem} rc={rc} {time.time() - t0:.0f} s '
+              f'{"FAILED CLIENTS, no .done" if failed else hits[-1] if hits else "NO RESULT"}', flush=True)
         if ok:
             with open(done, 'w') as f:
                 f.write(hits[-1] + '\n')
