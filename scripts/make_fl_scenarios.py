@@ -636,6 +636,36 @@ def trianel(rows: list) -> None:
         open(p, 'w').write(txt)
 
 
+TRIANEL_NEWCOMER_HISTORY = {'2w': '2024-02-15', '1m': '2024-02-01', '3m': '2023-12-01'}   # train_end 2024-02-29
+TRIANEL_NEWCOMER_PARKS = ('barlt_west', 'jettebruch', 'eisleben', 'kengen', 'trendelburg', 'mattenberg')
+
+
+def trianel_newcomer(rows: list) -> None:
+    """Onboarding curve on the real parks: one park is a newcomer with 2 weeks / 1 month / 3 months of own history
+    before the test period (data.station_history_start), the other 11 keep their 7 months. Parks spread over the
+    local R² range (0.50 .. 0.76). local = train_local (the newcomer's own model on its short history), FedGradient
+    global + fine-tuned, central CL12 with the same data; seed 42, with lag. Same question as --part newcomer."""
+    global OUT
+    OUT = os.path.join(BASE, '..', 'trianel_newcomer')
+    for park in TRIANEL_NEWCOMER_PARKS:
+        for tag, start in TRIANEL_NEWCOMER_HISTORY.items():
+            for meth in ('fl_fedgradient', 'cl80'):
+                cfg = scale(trianel_base(meth, True), 2 if meth == 'cl80' else 10)
+                cfg['params']['random_seed'] = 42
+                cfg['data']['station_history_start'] = {park: start}
+                if meth.startswith('fl_'):
+                    fine_tune(cfg, 10, variants=True)
+                rows.append({'scenario': 'trianel_newcomer', 'park': park, 'history': tag, 'seed': 42,
+                             'method': meth,
+                             'config': write(cfg, f'trianel_new_{park}_h{tag}_{meth.replace("cl80", "cl12")}',
+                                             f'Trianel newcomer {park} with {tag} own history, with lag, {meth} '
+                                             f'(local: train_local on the FedGradient config)')})
+    for r in rows:
+        p = os.path.join(REPO, r['config'] + '.yaml')
+        txt = open(p).read().replace(f'results_path: {RESULTS}', 'results_path: results/trianel')
+        open(p, 'w').write(txt)
+
+
 def large_batch(rows: list) -> None:
     """Central x4 runs with the FedGradient optimisation regime (effective batch 8 x 64 = 512, Adam lr 0.01,
     clipnorm 1.0, no lag): is the FL gain against the available power (fl_scenarios_v2 C) an aggregation effect
@@ -736,6 +766,8 @@ def main():
         large_batch(rows)
     elif part == 'trianel':
         trianel(rows)
+    elif part == 'trianel_newcomer':
+        trianel_newcomer(rows)
     elif part == 'drift':
         drift(rows)
     elif part == 'nolag':

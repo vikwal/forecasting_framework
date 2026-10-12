@@ -15,6 +15,7 @@ D=${DATA_ROOT}/runs
 DRIFT="--manifest configs/parks_v1/scenarios_drift/manifest.csv --log-dir $D/fl_drift"
 NOLAG="--manifest configs/parks_v1/scenarios_nolag/manifest.csv --log-dir $D/fl_nolag"
 FL="--methods fl_fedgradient fl_fedavg"
+TRN="--manifest configs/trianel_newcomer/manifest.csv --log-dir $D/trianel_newcomer"
 case "$1" in
   l2)
     $P $Q $NOLAG --scenarios scarce_nolag lopo_nolag --methods local cl80 --gpus 0-3 --per-gpu 2
@@ -33,6 +34,12 @@ case "$1" in
     $P $Q $TRI --scenarios trianel_base $FL
     $P $Q $TRI --scenarios trianel_lopo --methods cl80 --gpus 2-3
     $P $Q $TRI --scenarios trianel_lopo $FL ;;
+  trianel_newcomer_l2)   # onboarding curve on the real parks (configs/trianel_newcomer, --part trianel_newcomer)
+    $P $Q $TRN --scenarios trianel_newcomer --methods local cl80 --gpus 2-3 --per-gpu 6 ;;
+  trianel_newcomer_l1a)
+    $P $Q $TRN --scenarios trianel_newcomer --methods fl_fedgradient ;;
+  trianel_newcomer_l1b)
+    $P $Q $TRN --scenarios trianel_newcomer --methods fl_fedgradient --reverse ;;
   newcomer_l1)   # onboarding curve (make_fl_scenarios.py --part newcomer): FL on l1
     $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer $FL ;;
   newcomer_l2)   # local (16 clients) and central on l2

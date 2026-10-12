@@ -3780,6 +3780,14 @@ def _merge_ecmwf_onto_icon(df_icon: pd.DataFrame,
     return df
 
 
+def history_cut_mask(timestamps, history_start, test_start) -> np.ndarray:
+    """True for the rows a station has no data for: valid times before ``history_start`` within the training
+    period (``data.station_history_start`` – a newcomer with a short own history). Test rows are kept."""
+    ts = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True))
+    h, t0 = pd.Timestamp(history_start, tz='UTC'), pd.Timestamp(test_start, tz='UTC')
+    return np.asarray((ts < h) & (ts < t0))
+
+
 def preprocess_trianel_tft(park_id: str,
                             config: dict,
                             freq: str = '1H',
@@ -4087,6 +4095,15 @@ def preprocess_trianel_tft(park_id: str,
     # Inner-join: only keep NWP rows whose validtime (starttime + forecasttime) has a SCADA match.
     # Left-join would produce NaN for NWP timestamps beyond the SCADA measurement period.
     df_merged = df_final.merge(df_power[['power']], left_on='timestamp', right_index=True, how='inner')
+
+    # data.station_history_start {park: date}: the park has no measurements before that date in the
+    # training period (a newcomer with a short own history); issues straddling the date lose their
+    # early hours and are dropped by the 48-hour check below (synthetic path: NaN target + dropna)
+    _hist = (config['data'].get('station_history_start') or {}).get(str(park_id))
+    if _hist:
+        _cut = history_cut_mask(df_merged['timestamp'], _hist, config['data']['test_start'])
+        df_merged = df_merged[~_cut]
+        logging.info(f"preprocess_trianel_tft({park_id}): history starts {_hist}, {int(_cut.sum())} rows dropped")
 
     # Drop incomplete sequences: after the inner join, some starttimes may have fewer than
     # 48 forecast hours because their last hours fell outside the SCADA range.
