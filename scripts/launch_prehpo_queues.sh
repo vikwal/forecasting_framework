@@ -47,6 +47,12 @@ case "$1" in
           --methods fl_fedgradient --reverse ;;
   drift_l2avg)   # extra FedAvg queue on l2 for the k = 5/2 runs (2026-10-12 08:20)
     $P $Q $DRIFT --scenarios clients --methods fl_fedavg ;;
+  newcomer_pool) # control: newcomer + its own operator's 9 parks only (--part newcomer_pool), FedGradient
+    $P $Q --manifest configs/parks_v1/scenarios_newcomer_pool/manifest.csv --log-dir $D/fl_newcomer_pool \
+          --scenarios newcomer_pool --methods fl_fedgradient ;;
+  trianel_newcomer_pool)   # real-park control: pool of the 11 other parks as one client (--part trianel_newcomer_pool)
+    $P $Q --manifest configs/trianel_newcomer_pool/manifest.csv --log-dir $D/trianel_newcomer_pool \
+          --scenarios trianel_newcomer_pool --methods fl_fedgradient ;;
   newcomer_l2)   # local (16 clients) and central on l2
     $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer \
           --methods local cl80 --gpus 0-3 --per-gpu 4 ;;

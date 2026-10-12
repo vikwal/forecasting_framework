@@ -669,6 +669,66 @@ def trianel_newcomer(rows: list) -> None:
         open(p, 'w').write(txt)
 
 
+def newcomer_pool(rows: list) -> None:
+    """Control for the onboarding advantage (--part newcomer): federation or just a pretrained pool? The newcomer
+    (park 0 of client c, short history) trains with only its own operator's other 9 parks as the second client.
+    FedGradient weights every step by batch samples and a client leaves the round after its own epoch, so the
+    newcomer carries < 1 % of the aggregate: the global model is in effect the operator's 9-park model.
+    zero-shot = that model on the newcomer (fine_tune_eval_global), few-shot = the FT variants on its own weeks.
+    Compare with the same newcomer inside the 16-client federation and with its own short-history model.
+    Histories 2w / 1m, seeds 42-44 in seed-major order (seed 42 runs first)."""
+    global OUT
+    OUT = os.path.join(BASE, 'scenarios_newcomer_pool')
+    b = bases('static')
+    clients = b['fl_fedgradient']['fl']['clients']
+    for seed in SEEDS:
+        for tag in ('2w', '1m'):
+            for c, parks in clients.items():
+                cfg = copy.deepcopy(b['fl_fedgradient'])
+                cfg['params']['random_seed'] = seed
+                cfg['data']['station_history_start'] = {parks[0]: NEWCOMER_HISTORY[tag]}
+                cfg['model']['epochs'] = 1000
+                cfg['model']['early_stopping']['patience'] = 100
+                cfg['fl']['clients'] = {c: list(parks[1:]), f'{c}_new': [parks[0]]}
+                cfg['fl']['n_rounds'] = 200
+                cfg['fl']['global_early_stopping']['patience'] = 20
+                cfg['fl']['max_concurrent_actors'] = 2
+                cfg['fl']['drift_metrics'] = True
+                fine_tune(cfg, 10, variants=True)
+                rows.append({'scenario': 'newcomer_pool', 'history': tag, 'seed': seed, 'client': c,
+                             'newcomer': parks[0], 'method': 'fl_fedgradient',
+                             'config': write(cfg, f'scen_newpool_h{tag}_s{seed}_{c}_fl_fedgradient',
+                                             f'newcomer {parks[0]} ({tag} history) with only its operator {c} '
+                                             f'(9 parks) as pool, seed {seed}, fl_fedgradient')})
+
+
+def trianel_newcomer_pool(rows: list) -> None:
+    """Real-park control for --part trianel_newcomer: the 11 established parks form ONE client (the operator's
+    pool, in effect CL11) and the newcomer with its short history the second; zero-shot / few-shot as in
+    newcomer_pool. Seeds 42-44 in seed-major order (seed 42 first)."""
+    global OUT
+    OUT = os.path.join(BASE, '..', 'trianel_newcomer_pool')
+    for seed in SEEDS:
+        for park in TRIANEL_NEWCOMER_PARKS:
+            for tag, start in TRIANEL_NEWCOMER_HISTORY.items():
+                cfg = scale(trianel_base('fl_fedgradient', True), 10)
+                cfg['params']['random_seed'] = seed
+                cfg['data']['station_history_start'] = {park: start}
+                cfg['fl']['clients'] = {'pool': [p for p in TRIANEL_PARKS if p != park], park: [park]}
+                cfg['fl']['max_concurrent_actors'] = 2
+                fine_tune(cfg, 10, variants=True)
+                stag = '' if seed == 42 else f'_s{seed}'
+                rows.append({'scenario': 'trianel_newcomer_pool', 'park': park, 'history': tag, 'seed': seed,
+                             'method': 'fl_fedgradient',
+                             'config': write(cfg, f'trianel_newpool_{park}_h{tag}{stag}_fl_fedgradient',
+                                             f'Trianel newcomer {park} ({tag} history) with the 11 other parks as '
+                                             f'one pool client, seed {seed}, fl_fedgradient')})
+    for r in rows:
+        p = os.path.join(REPO, r['config'] + '.yaml')
+        txt = open(p).read().replace(f'results_path: {RESULTS}', 'results_path: results/trianel')
+        open(p, 'w').write(txt)
+
+
 def large_batch(rows: list) -> None:
     """Central x4 runs with the FedGradient optimisation regime (effective batch 8 x 64 = 512, Adam lr 0.01,
     clipnorm 1.0, no lag): is the FL gain against the available power (fl_scenarios_v2 C) an aggregation effect
@@ -771,6 +831,10 @@ def main():
         trianel(rows)
     elif part == 'trianel_newcomer':
         trianel_newcomer(rows)
+    elif part == 'newcomer_pool':
+        newcomer_pool(rows)
+    elif part == 'trianel_newcomer_pool':
+        trianel_newcomer_pool(rows)
     elif part == 'drift':
         drift(rows)
     elif part == 'nolag':
