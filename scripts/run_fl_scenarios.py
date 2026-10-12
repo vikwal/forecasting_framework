@@ -42,24 +42,10 @@ def command(cfg: str, method: str, args) -> tuple:
                 str(args.per_gpu), '--save-predictions'], env
     if args.gpus and method == 'cl80':
         env['CUDA_VISIBLE_DEVICES'] = expand(args.gpus)
-    if method.startswith('fl_'):
-        # FL: Ray fills the first visible GPU first, so several FL processes on one host stack their first
-        # actors on GPU 0 (OOM on l1, 2026-10-12). FL_GPU_ORDER (utils/federated.run_simulation) rotates the
-        # placement order per run: --gpus restricts the set (default: all GPUs), the start GPU follows the
-        # config name. FL_GPU_ORDER set by the caller wins.
-        if not env.get('FL_GPU_ORDER'):
-            gpus = expand(args.gpus).split(',') if args.gpus else [str(i) for i in range(n_gpus())]
-            k = sum(map(ord, os.path.basename(cfg))) % max(len(gpus), 1)
-            env['FL_GPU_ORDER'] = ','.join(gpus[k:] + gpus[:k])
+    # FL: all GPUs, least loaded first (utils/federated.run_simulation), or FL_GPU_ORDER="7,6,5,4,3" from the
+    # caller's environment to pin the set and order; --gpus is ignored for FL
     script = 'train_cl.py' if method == 'cl80' else 'train_fl.py'
     return [py, script, '-c', cfg, '-m', 'tft', '--save-predictions'], env
-
-
-def n_gpus() -> int:
-    try:
-        return len(subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=20).stdout.strip().splitlines())
-    except Exception:            # noqa: BLE001
-        return 1
 
 
 def expand(spec: str) -> str:

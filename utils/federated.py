@@ -1049,6 +1049,18 @@ def client_row_owners(partitions: Dict[Any, Any], model: nn.Module):
             for cid, part in partitions.items()}
 
 
+def gpu_order_by_load() -> str:
+    """Physical GPU indices ordered by memory in use (ascending), as a CUDA_VISIBLE_DEVICES string; '' if unknown."""
+    import subprocess
+    try:
+        out = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used', '--format=csv,noheader,nounits'],
+                             capture_output=True, text=True, timeout=20).stdout
+        rows = [tuple(int(x) for x in line.split(',')) for line in out.strip().splitlines() if line.strip()]
+        return ','.join(str(i) for i, _ in sorted(rows, key=lambda r: r[1])) if rows else ''
+    except Exception:            # noqa: BLE001
+        return ''
+
+
 def run_simulation(partitions: Any,
                    config: Dict[str, Any],
                    hyperparameters: Dict[str, Any],
@@ -1134,15 +1146,17 @@ def run_simulation(partitions: Any,
             f"Clearing it to allow Ray GPU management."
         )
         del os.environ['CUDA_VISIBLE_DEVICES']
-    # FL_GPU_ORDER="7,6,5,4,3": physical GPUs this run may use, in placement order (Ray fills the first
-    # listed GPU first). Several FL processes on one host otherwise all stack their first actors on GPU 0.
-    if os.environ.get('FL_GPU_ORDER'):
-        os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['FL_GPU_ORDER']
-        total_num_gpus = len(os.environ['FL_GPU_ORDER'].split(','))
+    # Placement order of the physical GPUs: Ray fills the first visible GPU first, so several FL processes on
+    # one host all stacked their first actors on GPU 0 (OOM on l1, 2026-10-12). FL_GPU_ORDER="7,6,5,4,3" pins
+    # the set and order; otherwise all GPUs are used, least memory in use first (nvidia-smi at start).
+    gpu_order = os.environ.get('FL_GPU_ORDER') or gpu_order_by_load()
+    if gpu_order:
+        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_order
+        total_num_gpus = len(gpu_order.split(','))
         _actors_per_gpu = math.ceil(n_clients / total_num_gpus)
         gpu_per_actor = max(0.1, min(1.0, math.floor(1.0 / _actors_per_gpu * 10) / 10))
-        logging.info(f"[Ray-GPU] FL_GPU_ORDER={os.environ['FL_GPU_ORDER']}: {total_num_gpus} GPUs, "
-                     f"gpu_per_actor={gpu_per_actor}")
+        logging.info(f"[Ray-GPU] GPU order {gpu_order} ({'FL_GPU_ORDER' if os.environ.get('FL_GPU_ORDER') else 'by load'}): "
+                     f"{total_num_gpus} GPUs, gpu_per_actor={gpu_per_actor}")
 
     logging.info(
         f"FL Simulation: {n_clients} clients, {n_rounds} rounds, {total_num_gpus} GPUs "
