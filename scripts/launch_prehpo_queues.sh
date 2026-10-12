@@ -56,9 +56,9 @@ case "$1" in
   transfer_a|transfer_b)   # K2 transfer ladder (--part transfer): small CL runs; a = forward, b = reverse; GPUS env
     $P $Q --manifest configs/parks_v1/scenarios_transfer/manifest.csv --log-dir $D/fl_transfer --scenarios transfer \
           --methods cl80 --gpus ${GPUS:-0-1} $( [ "$1" = transfer_b ] && echo --reverse ) ;;
-  poolglobal_fl)   # K3 few-shot: pool as one client + 42 newcomers (--part poolglobal)
+  poolglobal_fl|poolglobal_flb)   # K3 few-shot: pool as one client + 42 newcomers (--part poolglobal); b = reverse
     $P $Q --manifest configs/parks_v1/scenarios_poolglobal/manifest.csv --log-dir $D/fl_poolglobal \
-          --scenarios poolglobal --methods fl_fedgradient ;;
+          --scenarios poolglobal --methods fl_fedgradient $( [ "$1" = poolglobal_flb ] && echo --reverse ) ;;
   poolglobal_cl)   # K3 zero-shot central models and the newcomers' own short-history models
     $P $Q --manifest configs/parks_v1/scenarios_poolglobal/manifest.csv --log-dir $D/fl_poolglobal \
           --scenarios poolglobal --methods cl80 --gpus ${GPUS:-2-3}
