@@ -42,6 +42,11 @@ case "$1" in
     $P $Q $TRN --scenarios trianel_newcomer --methods fl_fedgradient --reverse ;;
   newcomer_l1)   # onboarding curve (make_fl_scenarios.py --part newcomer): FL on l1
     $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer $FL ;;
+  newcomer_l2fl) # third FedGradient queue on l2 (2026-10-12 08:20, l1 queues busy)
+    $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer \
+          --methods fl_fedgradient --reverse ;;
+  drift_l2avg)   # extra FedAvg queue on l2 for the k = 5/2 runs (2026-10-12 08:20)
+    $P $Q $DRIFT --scenarios clients --methods fl_fedavg ;;
   newcomer_l2)   # local (16 clients) and central on l2
     $P $Q --manifest configs/parks_v1/scenarios_newcomer/manifest.csv --log-dir $D/fl_newcomer --scenarios newcomer \
           --methods local cl80 --gpus 0-3 --per-gpu 4 ;;

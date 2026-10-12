@@ -644,22 +644,25 @@ def trianel_newcomer(rows: list) -> None:
     """Onboarding curve on the real parks: one park is a newcomer with 2 weeks / 1 month / 3 months of own history
     before the test period (data.station_history_start), the other 11 keep their 7 months. Parks spread over the
     local R² range (0.50 .. 0.76). local = train_local (the newcomer's own model on its short history), FedGradient
-    global + fine-tuned, central CL12 with the same data; seed 42, with lag. Same question as --part newcomer."""
+    global + fine-tuned, central CL12 with the same data; seeds 42-44 (seed 42 config names carry no seed tag,
+    they were generated first), with lag. Same question as --part newcomer."""
     global OUT
     OUT = os.path.join(BASE, '..', 'trianel_newcomer')
-    for park in TRIANEL_NEWCOMER_PARKS:
-        for tag, start in TRIANEL_NEWCOMER_HISTORY.items():
-            for meth in ('fl_fedgradient', 'cl80'):
-                cfg = scale(trianel_base(meth, True), 2 if meth == 'cl80' else 10)
-                cfg['params']['random_seed'] = 42
-                cfg['data']['station_history_start'] = {park: start}
-                if meth.startswith('fl_'):
-                    fine_tune(cfg, 10, variants=True)
-                rows.append({'scenario': 'trianel_newcomer', 'park': park, 'history': tag, 'seed': 42,
-                             'method': meth,
-                             'config': write(cfg, f'trianel_new_{park}_h{tag}_{meth.replace("cl80", "cl12")}',
-                                             f'Trianel newcomer {park} with {tag} own history, with lag, {meth} '
-                                             f'(local: train_local on the FedGradient config)')})
+    for seed in SEEDS:
+        for park in TRIANEL_NEWCOMER_PARKS:
+            for tag, start in TRIANEL_NEWCOMER_HISTORY.items():
+                for meth in ('fl_fedgradient', 'cl80'):
+                    cfg = scale(trianel_base(meth, True), 2 if meth == 'cl80' else 10)
+                    cfg['params']['random_seed'] = seed
+                    cfg['data']['station_history_start'] = {park: start}
+                    if meth.startswith('fl_'):
+                        fine_tune(cfg, 10, variants=True)
+                    stag = '' if seed == 42 else f'_s{seed}'
+                    rows.append({'scenario': 'trianel_newcomer', 'park': park, 'history': tag, 'seed': seed,
+                                 'method': meth,
+                                 'config': write(cfg, f'trianel_new_{park}_h{tag}{stag}_{meth.replace("cl80", "cl12")}',
+                                                 f'Trianel newcomer {park} with {tag} own history, with lag, seed '
+                                                 f'{seed}, {meth} (local: train_local on the FedGradient config)')})
     for r in rows:
         p = os.path.join(REPO, r['config'] + '.yaml')
         txt = open(p).read().replace(f'results_path: {RESULTS}', 'results_path: results/trianel')
