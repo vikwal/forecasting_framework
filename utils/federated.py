@@ -1134,6 +1134,15 @@ def run_simulation(partitions: Any,
             f"Clearing it to allow Ray GPU management."
         )
         del os.environ['CUDA_VISIBLE_DEVICES']
+    # FL_GPU_ORDER="7,6,5,4,3": physical GPUs this run may use, in placement order (Ray fills the first
+    # listed GPU first). Several FL processes on one host otherwise all stack their first actors on GPU 0.
+    if os.environ.get('FL_GPU_ORDER'):
+        os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['FL_GPU_ORDER']
+        total_num_gpus = len(os.environ['FL_GPU_ORDER'].split(','))
+        _actors_per_gpu = math.ceil(n_clients / total_num_gpus)
+        gpu_per_actor = max(0.1, min(1.0, math.floor(1.0 / _actors_per_gpu * 10) / 10))
+        logging.info(f"[Ray-GPU] FL_GPU_ORDER={os.environ['FL_GPU_ORDER']}: {total_num_gpus} GPUs, "
+                     f"gpu_per_actor={gpu_per_actor}")
 
     logging.info(
         f"FL Simulation: {n_clients} clients, {n_rounds} rounds, {total_num_gpus} GPUs "
