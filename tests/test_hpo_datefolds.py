@@ -82,7 +82,7 @@ class _Trial:
         self.params[name] = lo
         return lo
 
-    def suggest_int(self, name, lo, hi):
+    def suggest_int(self, name, lo, hi, step=1, log=False):
         self.params[name] = lo
         return lo
 
@@ -115,6 +115,43 @@ def test_fedavg_overrides_only_for_weight_averaging():
     cfg = _fl_cfg('fedavg')
     cfg['hpo']['fl'].pop('n_local_epochs')
     assert hpo.fedavg_trial_overrides(cfg, _Trial()) == {}
+
+
+def test_prune_fold_is_the_penultimate_fold():
+    assert hpo.prune_fold(3) == 1 and hpo.prune_fold(2) == 0 and hpo.prune_fold(5) == 3
+    assert hpo.prune_fold(1) is None
+
+
+def test_sampler_seed_differs_per_process_and_keeps_none():
+    import os
+    assert hpo._sampler_seed(None) is None
+    s = hpo._sampler_seed(42)
+    assert 0 <= s < 2 ** 31 - 1 and s == hpo._sampler_seed(42)          # deterministic within a process
+    assert s != (42 * 100003 + os.getpid() + 1) % (2 ** 31 - 1)
+
+
+def _hp_cfg(fl: bool):
+    return {'model': {'name': 'tft', 'shuffle': True, 'fl': fl, 'lookback': 48, 'horizon': 48,
+                      'tft': {'num_quantiles': 1, 'clipnorm': 7.0}},
+            'fl': {'strategy': 'fedavg', 'n_rounds': 100},
+            'hpo': {'batch_size': [32, 256], 'epochs': [10, 100], 'n_layers': [1, 4], 'n_cnn_layers': [1, 8],
+                    'n_rnn_layers': [1, 4], 'learning_rate': [1e-4, 1e-2], 'attention_heads': [1, 8],
+                    'cnn': {'filters': [16, 128], 'kernel_size': [2, 5], 'increase_filters': False},
+                    'rnn': {'dropout': [0.0, 0.5], 'units': [16, 128]}, 'fnn': {'units': [32, 256]},
+                    'tft': {'n_heads': [1, 8], 'hidden_dim': [16, 128], 'dropout': [0.01, 0.5],
+                            'n_lstm_layers': [1, 2], 'static_embedding_dim': [8, 64], 'clipnorm': [1.0, 10.0]},
+                    'weight_decay': [1e-6, 1e-3],
+                    'fl': {'server_lr': [1e-4, 1e-1], 'beta_1': [0, 1], 'beta_2': [0, 1], 'tau': [1e-4, 1e-1]}}}
+
+
+def test_fl_search_space_has_no_dead_dimensions():
+    t = _Trial()
+    hp = hpo.get_hyperparameters(_hp_cfg(fl=True), hpo=True, trial=t)
+    assert 'weight_decay' not in t.params and 'clipnorm' not in t.params      # not consumed by FL clients
+    assert hp['clipnorm'] == 7.0 and 'weight_decay' not in hp
+    t2 = _Trial()
+    hp2 = hpo.get_hyperparameters(_hp_cfg(fl=False), hpo=True, trial=t2)
+    assert 'weight_decay' in t2.params and 'clipnorm' in t2.params and hp2['clipnorm'] == 1.0
 
 
 def test_fold_without_samples_raises():

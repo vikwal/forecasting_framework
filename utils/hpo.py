@@ -400,6 +400,21 @@ def n_folds(config: dict) -> int:
     return len(b) - 1 if b else int(config['hpo']['kfolds'])
 
 
+def _sampler_seed(random_seed):
+    """Per-process sampler seed derived from params.random_seed (None stays None)."""
+    if random_seed is None:
+        return None
+    return (int(random_seed) * 100003 + os.getpid()) % (2 ** 31 - 1)
+
+
+def prune_fold(n_folds: int):
+    """Index of the fold after which a trial may be pruned: the penultimate one (the running mean of
+    the folds so far is reported once, at that step). Pruning after the last fold would discard a fully
+    computed trial, and reporting every fold would let the pruner compare the trial's best fold with
+    other trials' values at the current fold (folds validate different seasons). None = no pruning."""
+    return n_folds - 2 if n_folds >= 2 else None
+
+
 REDUCTIONS = ('last', 'best')
 
 
@@ -515,9 +530,11 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
         multivariate=True,
         group=True,
         warn_independent_sampling=False,
-        # reproducible proposals (one process per study; several processes on one study
-        # with the same seed would propose the same points)
-        seed=(config or {}).get('params', {}).get('random_seed')
+        # several processes share one study (ask/tell): each process gets its own sampler seed
+        # (same seed = same random start points = duplicate proposals), and constant_liar lets
+        # the TPE avoid the points other processes are still evaluating
+        seed=_sampler_seed((config or {}).get('params', {}).get('random_seed')),
+        constant_liar=True,
     )
 
     pruner = None
@@ -767,7 +784,9 @@ def get_hyperparameters(config: dict,
         #hyperparameters['epochs'] = trial.suggest_int('epochs', epochs[0], epochs[1])
         hyperparameters['lr'] = trial.suggest_float('lr', learning_rate[0], learning_rate[1], log=True)
         weight_decay_range = config['hpo'].get('weight_decay')
-        if weight_decay_range is not None:
+        # the FL clients train with plain Adam(lr) (fedavg) or send raw gradients (fedgradient):
+        # weight_decay and the model clipnorm are not consumed there -> no dead search dimensions
+        if weight_decay_range is not None and not config['model'].get('fl'):
             hyperparameters['weight_decay'] = trial.suggest_float(
                 'weight_decay', weight_decay_range[0], weight_decay_range[1], log=True
             )
@@ -815,9 +834,11 @@ def get_hyperparameters(config: dict,
             else:
                 hyperparameters['static_embedding_dim'] = static_embedding_dim
 
-            # Clipnorm: can be None, a scalar, or a range for HPO
+            # Clipnorm: can be None, a scalar, or a range for HPO (range only searched for the
+            # central/local trainer; FL clients clip via client_clipnorm or not at all)
             if clipnorm is not None and isinstance(clipnorm, list):
-                hyperparameters['clipnorm'] = trial.suggest_float('clipnorm', clipnorm[0], clipnorm[1])
+                hyperparameters['clipnorm'] = config['model']['tft'].get('clipnorm') if config['model'].get('fl') \
+                    else trial.suggest_float('clipnorm', clipnorm[0], clipnorm[1])
             else:
                 hyperparameters['clipnorm'] = clipnorm
         if 'attn' in model_name:

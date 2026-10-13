@@ -312,12 +312,6 @@ def main() -> None:
                 for obj in objectives:
                     accuracies[obj['metric']].append(fold_metrics[obj['metric']])
 
-                # Report intermediate value for pruning (only for single-objective)
-                # Note: Pruning is not supported in multi-objective optimization
-                if not is_multi_objective:
-                    pruning_value = fold_metrics[objectives[0]['metric']]
-                    trial.report(pruning_value, step=fold_idx)
-
                 # Log all objective values
                 metrics_str = ', '.join([f"{k}: {v:.4f}" for k, v in fold_metrics.items()])
                 logging.info(
@@ -328,9 +322,12 @@ def main() -> None:
                 del model, history
                 gc.collect()
 
-                # Check for pruning (only for single-objective)
-                if not is_multi_objective and trial.should_prune():
-                    raise optuna.TrialPruned()
+                # Pruning (single-objective): once, after the penultimate fold, on the running mean
+                # (hpo.prune_fold); never after the last fold, never fold-vs-fold
+                if not is_multi_objective and fold_idx == hpo.prune_fold(len(lazy_fold_loader)):
+                    trial.report(float(np.mean(accuracies[objectives[0]['metric']])), step=fold_idx)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
 
             else:
                 # All folds completed - calculate averages and report

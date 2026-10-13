@@ -457,9 +457,18 @@ def main() -> None:
     personalize = config['fl'].get('personalize', False)
 
     trial_counter = 0
-    while completed_trials < config['hpo']['trials']:
+    consecutive_failures = 0
+    max_consecutive_failures = int(config['hpo'].get('max_consecutive_failures', 5))
+    seed = config['params'].get('random_seed')
+    while True:
+        # count from the study: correct budget also when other processes work on the same study
+        completed_trials = len(study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)))
+        if completed_trials >= config['hpo']['trials']:
+            break
         trial = study.ask()
-        trial_number = len_trials + trial_counter
+        trial_number = trial.number
+        if seed is not None:
+            tools.set_seed(int(seed) + trial_number)    # model init/shuffling reproducible per trial
 
         hyperparameters = hpo.get_hyperparameters(
             config=config,
@@ -569,11 +578,6 @@ def main() -> None:
                 for obj in objectives:
                     accuracies[obj['metric']].append(fold_metrics[obj['metric']])
 
-                # Report intermediate value for pruning (only for single-objective)
-                if not is_multi_objective:
-                    pruning_value = fold_metrics[objectives[0]['metric']]
-                    trial.report(pruning_value, step=fold_idx)
-
                 # Log fold result with key metrics (val_rmse + val_r^2)
                 rmse_val = hpo.reduce_fold_metric(metrics_df['val_rmse'], {'direction': 'minimize'}, reduction) \
                     if 'val_rmse' in metrics_df.columns else None
@@ -590,9 +594,12 @@ def main() -> None:
                 del history
                 gc.collect()
 
-                # Check for pruning (only for single-objective)
-                if not is_multi_objective and trial.should_prune():
-                    raise optuna.TrialPruned()
+                # Pruning (single-objective): once, after the penultimate fold, on the running mean
+                # (hpo.prune_fold); never after the last fold, never fold-vs-fold
+                if not is_multi_objective and fold_idx == hpo.prune_fold(len(kfolds_partitions)):
+                    trial.report(float(np.mean(accuracies[objectives[0]['metric']])), step=fold_idx)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
 
             else:
                 # All folds completed - calculate averages and report
@@ -640,7 +647,14 @@ def main() -> None:
             logging.error(f'Trial number {trial_number+1} failed with error: {str(e)}. Marking as failed.')
             logging.exception("Full traceback:")
             study.tell(trial, state=optuna.trial.TrialState.FAIL)
-            raise  # Re-raise to see the full error; remove this for production to continue with next trial
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:   # systematic error, not a one-off OOM
+                raise
+        else:
+            consecutive_failures = 0
 
         trial_counter += 1
 
