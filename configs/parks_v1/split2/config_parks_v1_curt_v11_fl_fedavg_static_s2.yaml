@@ -225,11 +225,11 @@ hpo:
   kfolds: 3
   min_train_date: '2023-07-24'
   pruning:
-    use_median_pruner: false
+    use_median_pruner: true
     n_startup_trials: 10
-    n_warmup_steps: 2
+    n_warmup_steps: 1
     interval_steps: 1
-    disable_pruning: true
+    disable_pruning: false
   batch_size:
   - 32
   - 256

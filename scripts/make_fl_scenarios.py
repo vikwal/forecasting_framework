@@ -378,6 +378,9 @@ def split2(rows: list) -> None:
         cfg['data'].update(SPLIT2, strict_split=True)        # no training target in the test period
         cfg['hpo'].update(fold_boundaries=list(SPLIT2_FOLDS), objective_reduction='best', kfolds=3,
                           weight_decay=[1e-6, 1e-3])                      # float, log
+        # MedianPruner after fold 2 (step 1 of 3): compares the same fold across trials (Viktor 2026-10-13)
+        cfg['hpo']['pruning'] = dict(use_median_pruner=True, n_startup_trials=10, n_warmup_steps=1,
+                                     interval_steps=1, disable_pruning=False)
         cfg['hpo']['tft'].update(n_lstm_layers=[1, 2], static_embedding_dim=[8, 64],   # int
                                  clipnorm=[1.0, 10.0])                    # float, linear
         if meth != 'cl80':    # FL-HPO (hpo_fl.py, date folds): FedGradient server step; FedAvg keeps 1 local epoch
