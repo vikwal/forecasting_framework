@@ -215,8 +215,9 @@ Ergebnisse in `results/trianel_parks/`. Auswertung: `FL_Contribution/pipeline/tr
 
 Optuna-Datenbank: Die Studien dieses Projekts liegen in der üblichen Postgres-DB `optuna_db` (`OPTUNA_STORAGE` aus
 der `.bashrc`, unverändert). Die separate DB `optuna_fl` (2026-10-11 angelegt) wurde am 2026-10-13 wieder aufgegeben;
-stattdessen wurden die 13 Studien der Graphen-Netz-/Windleistungs-Untersuchung (`cl_m-dcrnn_*`, `cl_m-mtgnn_*`,
-`cl_m-wavenet_*`, `cl_m-tft-bc_*_wind_tft_sp_*`, 2026-08) nach `${DATA_ROOT}/optuna_archive/` archiviert (Voll-Dump
+stattdessen wurden 16 Studien – die 13 der Graphen-Netz-/Windleistungs-Untersuchung (`cl_m-dcrnn_*`, `cl_m-mtgnn_*`,
+`cl_m-wavenet_*`, `cl_m-tft-bc_*_wind_tft_sp_*`, 2026-08) und die 3 FL/CL-Stationsstudien vom 2026-03 (`*wind_80cl_1dwd_1ecmwf`,
+`*config_wind_80fl_1n3st`) – nach `${DATA_ROOT}/optuna_archive/` archiviert (Voll-Dump
 `optuna_db_full_2026-10-13.dump`, je Studie `studies/<name>.csv` + `.json`) und aus `optuna_db` gelöscht, damit die DB
 schlank bleibt. Dashboards 8504/8510 zeigen `optuna_db`.
 
