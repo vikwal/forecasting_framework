@@ -118,6 +118,9 @@ class DataCache:
         # hpo.fold_boundaries only hashed when set (existing cache ids unchanged)
         if config.get('hpo', {}).get('fold_boundaries'):
             hash_data['hpo']['fold_boundaries'] = [str(x) for x in config['hpo']['fold_boundaries']]
+        # power targets: own history stays raw since 2026-10-13 (invalidates the z-scored entries)
+        if 'power' in preprocessing.get_target_cols(config):
+            hash_data['own_history_scaling'] = 'raw'
         cv_mode = str(config.get('hpo', {}).get('cv_mode', 'temporal')).lower()
         if cv_mode == 'spatial':
             hash_data['cv_mode'] = 'spatial'
@@ -612,7 +615,11 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None, restrict_train_end
     # when handed a bare ndarray, so a reordered frame would otherwise be scaled with
     # the wrong column's mean/std without any error.
     scaler._ff_feature_cols = ref_cols
-    if hasattr(target_feature_scaler, 'mean_'):
+    # 'power' is already normalised to [0, 1] by capacity and enters the observed history RAW in
+    # train_cl.py / train_fl.py / hpo_fl.py (plain StandardScaler without this attribute); the HPO
+    # must see the same representation, so the target-as-feature scaler is only attached for the
+    # wind-speed 'hist' variant it was written for (2026-10-13 pipeline review).
+    if hasattr(target_feature_scaler, 'mean_') and target_col != 'power':
         scaler._ff_target_feature_scaler = target_feature_scaler
         # Spaltenliste mitgeben: prepare_data_for_tft übergibt transform() ein blankes
         # ndarray, sklearn prüft dort nur die Spaltenanzahl — bei mehreren Zielspalten
