@@ -380,6 +380,12 @@ def split2(rows: list) -> None:
                           weight_decay=[1e-6, 1e-3])                      # float, log
         cfg['hpo']['tft'].update(n_lstm_layers=[1, 2], static_embedding_dim=[8, 64],   # int
                                  clipnorm=[1.0, 10.0])                    # float, linear
+        if meth != 'cl80':    # FL-HPO (hpo_fl.py, date folds): FedGradient server step; FedAvg keeps 1 local epoch
+            cfg['hpo']['fl']['strategy'] = cfg['fl']['strategy']
+            cfg['hpo']['fl'].setdefault('fedgradient', {}).update(server_optimizer=['adam', 'sgd_momentum'],
+                                                                  server_lr=[1e-4, 1e-1],   # log
+                                                                  clipnorm=[0.3, 10.0])     # log, client clipping
+            cfg['hpo']['fl'].pop('n_local_epochs', None)   # Viktor 2026-10-13: local epochs stay at 1
         cfg['eval']['results_path'] = 'results/parks_v1_split2'
         name = f'parks_v1_curt_v11_{meth}_static_s2'
         path = write(cfg, name, f'split 2 (train data 2023-07-24..2025-07, test 2025-08..2026-07, HPO folds '

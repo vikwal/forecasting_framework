@@ -316,6 +316,9 @@ hpo:
       server_lr:
       - 0.0001
       - 0.1
+      clipnorm:
+      - 0.3
+      - 10.0
   fold_boundaries:
   - '2024-08-01'
   - '2024-12-01'
