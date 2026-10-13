@@ -214,12 +214,13 @@ Training, 2024-03..05 Test (Messdaten enden 2024-06-01), Vogelsberg ausgeschloss
 Ergebnisse in `results/trianel_parks/`. Auswertung: `FL_Contribution/pipeline/trianel_study.py`.
 
 Optuna-Datenbank: Die Studien dieses Projekts liegen in der üblichen Postgres-DB `optuna_db` (`OPTUNA_STORAGE` aus
-der `.bashrc`, unverändert). Die separate DB `optuna_fl` (2026-10-11 angelegt) wurde am 2026-10-13 wieder aufgegeben;
-stattdessen wurden 16 Studien – die 13 der Graphen-Netz-/Windleistungs-Untersuchung (`cl_m-dcrnn_*`, `cl_m-mtgnn_*`,
-`cl_m-wavenet_*`, `cl_m-tft-bc_*_wind_tft_sp_*`, 2026-08) und die 3 FL/CL-Stationsstudien vom 2026-03 (`*wind_80cl_1dwd_1ecmwf`,
-`*config_wind_80fl_1n3st`) – nach `${DATA_ROOT}/optuna_archive/` archiviert (Voll-Dump
-`optuna_db_full_2026-10-13.dump`, je Studie `studies/<name>.csv` + `.json`) und aus `optuna_db` gelöscht, damit die DB
-schlank bleibt. Dashboards 8504/8510 zeigen `optuna_db`.
+der `.bashrc`, unverändert; die separate DB `optuna_fl` vom 2026-10-11 wurde am 2026-10-13 wieder gelöscht). Zum
+Schlankhalten wurden 16 Studien – die 13 der Graphen-Netz-/Windleistungs-Untersuchung (`cl_m-dcrnn_*`, `cl_m-mtgnn_*`,
+`cl_m-wavenet_*`, `cl_m-tft-bc_*_wind_tft_sp_*`, 2026-08) und die 3 FL/CL-Stationsstudien vom 2026-03
+(`*wind_80cl_1dwd_1ecmwf`, `*config_wind_80fl_1n3st`) – in die Postgres-DB **`optuna_archive`** verschoben (gleicher
+Server; im Streamlit-Dashboard 8504 über das Datenbank-Dropdown wählbar, im nativen Dashboard 8510 nicht sichtbar).
+Dateisicherung zusätzlich unter `${DATA_ROOT}/optuna_archive/` (Voll-Dump `optuna_db_full_2026-10-13.dump` vor der
+Löschung, je Studie `studies/<name>.csv` + `.json`).
 
 ```bash
 python hpo_cl.py -c configs/parks_v1/split2/config_parks_v1_curt_v11_cl80_static_s2 -m tft --gpu 0
