@@ -213,11 +213,17 @@ der Lauf ≤ ICON-Ausgabezeit (ICON 00–11 UTC → ECMWF 00 UTC, 12–23 → 12
 Training, 2024-03..05 Test (Messdaten enden 2024-06-01), Vogelsberg ausgeschlossen (51 % Lücken, kein ECMWF).
 Ergebnisse in `results/trianel_parks/`. Auswertung: `FL_Contribution/pipeline/trianel_study.py`.
 
-Optuna-Datenbank: Die Studien dieses Projekts liegen in einer eigenen Postgres-DB `optuna_fl` (auf l2, angelegt am 2026-10-11) und nicht in `optuna_db` (Windgeschwindigkeits-Studien). `.bashrc` bleibt unverändert; HPO und `--lookup-hpo` werden mit umgebogener Variable gestartet:
+Optuna-Datenbank: Die Studien dieses Projekts liegen in der üblichen Postgres-DB `optuna_db` (`OPTUNA_STORAGE` aus
+der `.bashrc`, unverändert). Die separate DB `optuna_fl` (2026-10-11 angelegt) wurde am 2026-10-13 wieder aufgegeben;
+stattdessen wurden die 13 Studien der Graphen-Netz-/Windleistungs-Untersuchung (`cl_m-dcrnn_*`, `cl_m-mtgnn_*`,
+`cl_m-wavenet_*`, `cl_m-tft-bc_*_wind_tft_sp_*`, 2026-08) nach `${DATA_ROOT}/optuna_archive/` archiviert (Voll-Dump
+`optuna_db_full_2026-10-13.dump`, je Studie `studies/<name>.csv` + `.json`) und aus `optuna_db` gelöscht, damit die DB
+schlank bleibt. Dashboards 8504/8510 zeigen `optuna_db`.
 
 ```bash
-export OPTUNA_STORAGE=${OPTUNA_STORAGE%/*}/optuna_fl    # gleicher Server, andere DB
+python hpo_cl.py -c configs/parks_v1/split2/config_parks_v1_curt_v11_cl80_static_s2 -m tft --gpu 0
+python hpo_fl.py -c configs/parks_v1/split2/config_parks_v1_curt_v11_fl_fedgradient_static_s2 -m tft --gpu 0
 python hpo_local.py -c configs/parks_v1/split2/config_parks_v1_curt_v11_fl_fedgradient_static_s2 -m tft --gpus 0-7
 ```
 
-`pg_hba.conf` auf l2 hat seit 2026-10-13 Einträge für `optuna_fl` von l1 (.238) und ws (.252) (die Freigabe gilt je Datenbank); beide Hosts erreichen die DB (geprüft). `optuna-native` (8510) zeigt `optuna_fl`, `optuna-dashboard` (8504) weiter `optuna_db`.
+`pg_hba.conf` auf l2 hat Einträge für l1 (.238) und ws (.252); `optuna_db` ist von allen drei Hosts erreichbar.
