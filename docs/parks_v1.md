@@ -176,6 +176,8 @@ Fine-Tune-Varianten, CL80; lokal = `train_local.py` auf der FedGradient-Config; 
 | `data.train_forecast_hours: ['09']` | trainiert nur auf den Stichproben dieser ICON-Läufe (Ausgabestunde UTC); der Test behält alle Läufe aus `data.forecast_hours` (`preprocessing.filter_train_runs`). Im Cache-Schlüssel. |
 | `hpo_local.py -c <FL-Config>` | eine Optuna-Studie je FL-Client (`hpo_cl.py` auf der Client-Config von `train_local.py`); danach `train_local.py --lookup-hpo`. Die Studiennamen stimmen mit dem Lookup überein (`cl_m-tft_out-48_freq-1h_<lokaler Name>_<Client>`). |
 | `model.lookup_hpo` | bricht jetzt ab, wenn die Studie fehlt (vorher stiller Rückfall auf die Config-Werte). |
+| `hpo_fl.py` mit `hpo.fold_boundaries` (2026-10-13, Branch `hpo-fl-datefolds`) | FL-HPO mit denselben Datumsfolds wie `hpo_cl.py`: je Client `hpo.client_folds` (→ `kfolds_by_dates`), Skalierer nur auf Daten vor der ersten Grenze (`hpo.scaler_fit_end`), Fold-Wert = beste Runde bei `hpo.objective_reduction: best` (`hpo.reduce_fold_metric`). `data.val_files` wird im HPO-Lauf mit Warnung ignoriert (Validierung = eigene Parks der Clients im Fold-Fenster). Tests `tests/test_hpo_datefolds.py`, Smoke-Config `configs/parks_v1/split2/smoke_hpo_fl_s2.yaml` (2 Clients × 2 Parks, 1 Trial, ≈ 1,5 min). |
+| `hpo.fl.fedgradient.clipnorm: [lo, hi]`, `hpo.fl.n_local_epochs: [lo, hi]` | neue FL-Suchdimensionen: Client-Clipping von FedGradient (log) und lokale Epochen der Gewichtsmittelung (int, `hpo.fedavg_trial_overrides`, je Trial in `fl.n_local_epochs` geschrieben). In den Split-2-Konfigs gesetzt (`make_fl_scenarios.py --part split2`). |
 
 Korrekturen aus dem Review (Commit `130054c`):
 - Eine fortgesetzte Studie behält den multivariaten TPE-Sampler; der Sampler hat einen Seed.
@@ -218,4 +220,4 @@ export OPTUNA_STORAGE=${OPTUNA_STORAGE%/*}/optuna_fl    # gleicher Server, ander
 python hpo_local.py -c configs/parks_v1/split2/config_parks_v1_curt_v11_fl_fedgradient_static_s2 -m tft --gpus 0-7
 ```
 
-Damit l1 zugreifen kann, braucht `pg_hba.conf` auf l2 einen Eintrag für `optuna_fl` (die Freigabe gilt je Datenbank). Die Dashboards (8504, 8510) zeigen weiter `optuna_db`.
+`pg_hba.conf` auf l2 hat seit 2026-10-13 Einträge für `optuna_fl` von l1 (.238) und ws (.252) (die Freigabe gilt je Datenbank); beide Hosts erreichen die DB (geprüft). `optuna-native` (8510) zeigt `optuna_fl`, `optuna-dashboard` (8504) weiter `optuna_db`.

@@ -74,10 +74,16 @@ def main() -> None:
 
     # Load config
     config = tools.load_config(f'{args.config}.yaml')
-    if (config.get('hpo') or {}).get('fold_boundaries'):
-        # the FL folds here are positional (TimeSeriesSplit) and the val_files folds station-major;
-        # date folds would be silently ignored -> refuse instead
-        raise NotImplementedError("hpo_fl.py does not support hpo.fold_boundaries yet")
+    date_folds = hpo.fold_boundaries(config)
+    if date_folds and config['data'].get('val_files'):
+        # date folds validate on the clients' own stations in fixed windows; the station-major
+        # val_files chunks do not align with them -> use the config without val_files for the HPO
+        logging.warning("hpo.fold_boundaries set: data.val_files is ignored for the HPO folds "
+                        "(validation = the clients' own stations in the fold windows)")
+        config['data'].pop('val_files')
+    reduction = str((config.get('hpo') or {}).get('objective_reduction', 'last')).lower()
+    if reduction not in hpo.REDUCTIONS:
+        raise ValueError(f"unknown hpo.objective_reduction {reduction!r} (allowed: {', '.join(hpo.REDUCTIONS)})")
 
     # Override verbose settings for HPO
     config['model']['verbose'] = 0
@@ -222,10 +228,11 @@ def main() -> None:
                             df_temp.drop(new_col, axis=1, inplace=True, errors='ignore')
 
             t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
+            # with hpo.fold_boundaries the scalers see only the data before the first fold window
             df_train, _ = preprocessing.split_data(
                 data=df_temp,
                 train_frac=config['data']['train_frac'],
-                test_start=pd.Timestamp(config['data']['test_start'], tz='UTC'),
+                test_start=hpo.scaler_fit_end(config),
                 test_end=pd.Timestamp(config['data'].get('test_end', '2099-12-31'), tz='UTC'),
                 t_0=t_0
             )
@@ -300,12 +307,16 @@ def main() -> None:
     # Mirrors hpo_cl.py / data_cache.py: data before min_train_date is always included
     # in every fold's training set (as a mandatory "min_block"), so all folds have
     # comparable training size and fold 0 is not disadvantaged vs. later folds.
-    n_splits = config['hpo']['kfolds']
+    n_splits = hpo.n_folds(config)
     min_train_date = config['hpo'].get('min_train_date', None)
-    logging.info(
-        f"Processing data and creating {n_splits}-fold partitions "
-        f"(min_train_date={min_train_date}) for {len(clients_data)} clients..."
-    )
+    if date_folds:
+        logging.info(f"Creating {n_splits} date folds (hpo.fold_boundaries {[str(b.date()) for b in date_folds]}, "
+                     f"expanding window, scalers fitted before {date_folds[0].date()}) for {len(clients_data)} clients...")
+    else:
+        logging.info(
+            f"Processing data and creating {n_splits}-fold partitions "
+            f"(min_train_date={min_train_date}) for {len(clients_data)} clients..."
+        )
     client_ids_ordered = []
     client_kfolds = {}  # {client_id: [((X_tr, y_tr), (X_val, y_val)), ...]}
 
@@ -339,12 +350,8 @@ def main() -> None:
             logging.warning(f"Client {client_id}: no training data after preprocessing — skipping.")
             continue
 
-        # Build k-folds with min_train_date — identical approach to hpo_cl.py / data_cache.py
-        fold_data = hpo.kfolds_with_per_file_min_train_len(
-            prepared_datasets=client_prepared,
-            n_splits=n_splits,
-            min_train_date=min_train_date
-        )
+        # Folds as in hpo_cl.py / data_cache.py: date folds with hpo.fold_boundaries, else positional
+        fold_data = hpo.client_folds(client_prepared, config)
         client_kfolds[client_id] = fold_data
         client_ids_ordered.append(client_id)
 
@@ -462,6 +469,10 @@ def main() -> None:
 
         # Add FL-specific hyperparameters
         hyperparameters['personalization'] = personalize
+        # local epochs of the weight-averaging strategies are read from the config by the actors
+        for k, v in hpo.fedavg_trial_overrides(config, trial).items():
+            config['fl'][k] = v
+            hyperparameters[k] = v
 
         # Check for duplicate parameters
         existing_params = [t.params for t in study.trials]
@@ -536,12 +547,13 @@ def main() -> None:
                 for obj in objectives:
                     metric_key = obj['metric']
 
-                    # Try the metric directly
+                    # Try the metric directly; hpo.objective_reduction 'best' = best round
+                    # (global early stopping restores the weights of that round)
                     if metric_key in metrics_df.columns:
-                        fold_metrics[metric_key] = metrics_df[metric_key].iloc[-1]
+                        fold_metrics[metric_key] = hpo.reduce_fold_metric(metrics_df[metric_key], obj, reduction)
                     elif metric_map.get(metric_key) in metrics_df.columns:
                         mapped_key = metric_map.get(metric_key)
-                        fold_metrics[metric_key] = metrics_df[mapped_key].iloc[-1]
+                        fold_metrics[metric_key] = hpo.reduce_fold_metric(metrics_df[mapped_key], obj, reduction)
                     else:
                         available_metrics = list(metrics_df.columns)
                         raise ValueError(
@@ -563,9 +575,11 @@ def main() -> None:
                     trial.report(pruning_value, step=fold_idx)
 
                 # Log fold result with key metrics (val_rmse + val_r^2)
-                rmse_val = metrics_df['val_rmse'].iloc[-1] if 'val_rmse' in metrics_df.columns else None
-                r2_val = metrics_df['val_r^2'].iloc[-1] if 'val_r^2' in metrics_df.columns else None
-                fold_log_parts = [f'Fold {fold_idx + 1}/{len(kfolds_partitions)}']
+                rmse_val = hpo.reduce_fold_metric(metrics_df['val_rmse'], {'direction': 'minimize'}, reduction) \
+                    if 'val_rmse' in metrics_df.columns else None
+                r2_val = hpo.reduce_fold_metric(metrics_df['val_r^2'], {'direction': 'maximize'}, reduction) \
+                    if 'val_r^2' in metrics_df.columns else None
+                fold_log_parts = [f'Fold {fold_idx + 1}/{len(kfolds_partitions)} ({reduction} round)']
                 if rmse_val is not None:
                     fold_log_parts.append(f'val_rmse: {rmse_val:.4f}')
                 if r2_val is not None:

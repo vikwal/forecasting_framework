@@ -371,6 +371,49 @@ def kfolds_by_dates(prepared_datasets: List[Dict[str, Any]],
     return folds
 
 
+def fold_boundaries(config: dict) -> list:
+    """hpo.fold_boundaries as UTC timestamps ([] when unset)."""
+    b = [pd.Timestamp(x) for x in ((config.get('hpo') or {}).get('fold_boundaries') or [])]
+    return [x.tz_localize('UTC') if x.tz is None else x.tz_convert('UTC') for x in b]
+
+
+def scaler_fit_end(config: dict) -> pd.Timestamp:
+    """Last issue time the x/y scalers may see: the first fold boundary with hpo.fold_boundaries
+    (no validation data in the scaler), otherwise data.test_start."""
+    b = fold_boundaries(config)
+    t = pd.Timestamp(config['data']['test_start'], tz='UTC')
+    return min(b[0], t) if b else t
+
+
+def client_folds(prepared_datasets: List[Dict[str, Any]], config: dict) -> List:
+    """Folds of one client (or of the pooled stations): date folds with hpo.fold_boundaries,
+    otherwise positional folds with hpo.kfolds / hpo.min_train_date."""
+    if fold_boundaries(config):
+        return kfolds_by_dates(prepared_datasets, boundaries=config['hpo']['fold_boundaries'],
+                               horizon_hours=int(config['model']['horizon']))
+    return kfolds_with_per_file_min_train_len(prepared_datasets, n_splits=config['hpo']['kfolds'],
+                                              min_train_date=config['hpo'].get('min_train_date'))
+
+
+def n_folds(config: dict) -> int:
+    b = fold_boundaries(config)
+    return len(b) - 1 if b else int(config['hpo']['kfolds'])
+
+
+REDUCTIONS = ('last', 'best')
+
+
+def reduce_fold_metric(values, obj: dict, mode: str = 'last') -> float:
+    """One fold value from the epoch / round history: the last entry, or the best one in the
+    objective's direction (what early stopping with restore_best_weights returns)."""
+    values = list(values)
+    if mode == 'last':
+        return values[-1]
+    if mode != 'best':
+        raise ValueError(f"unknown hpo.objective_reduction {mode!r} (allowed: {', '.join(REDUCTIONS)})")
+    return min(values) if obj.get('direction', 'minimize') == 'minimize' else max(values)
+
+
 def get_objectives_from_config(config: dict) -> tuple:
     """
     Extract optimization objectives from config.
@@ -852,7 +895,8 @@ def get_hyperparameters(config: dict,
 
 def _fedgradient_trial(config: dict, trial) -> dict:
     """Optional HPO dimensions of fedgradient (hpo.fl.fedgradient):
-    server_optimizer (list -> categorical), server_lr ([lo, hi], log-uniform).
+    server_optimizer (list -> categorical), server_lr ([lo, hi], log-uniform),
+    clipnorm ([lo, hi], log-uniform; the clients' gradient clipping before sending).
     The remaining optimizer settings come from fl.fedgradient, which must therefore hold
     the keys of every optimizer in the search space (beta_1/beta_2/eps, momentum)."""
     space = (config['hpo'].get('fl') or {}).get('fedgradient') or {}
@@ -864,7 +908,21 @@ def _fedgradient_trial(config: dict, trial) -> dict:
     if space.get('server_lr'):
         lo, hi = space['server_lr']
         hp['server_lr'] = trial.suggest_float('server_lr', lo, hi, log=True)
+    if space.get('clipnorm'):
+        lo, hi = space['clipnorm']
+        hp['client_clipnorm'] = trial.suggest_float('client_clipnorm', lo, hi, log=True)
     return hp
+
+def fedavg_trial_overrides(config: dict, trial) -> dict:
+    """Optional HPO dimensions of the weight-averaging strategies (hpo.fl.n_local_epochs [lo, hi]):
+    the clients' local epochs per round are read from fl.n_local_epochs by the client actors, so the
+    caller writes the returned values into config['fl'] for the trial."""
+    out = {}
+    rng = (config['hpo'].get('fl') or {}).get('n_local_epochs')
+    if rng and config['fl']['strategy'] in ('fedavg', 'fedavgm', 'fedadam', 'fedyogi', 'fedprox'):
+        out['n_local_epochs'] = trial.suggest_int('n_local_epochs', int(rng[0]), int(rng[1]))
+    return out
+
 
 def load_hyperparams(study_name: str,
                      config: dict):
