@@ -17,7 +17,8 @@ from . import preprocessing, tools, hpo
 # import this instead of repeating the literal — a second hardcoded copy in
 # hpo_cl_tft_bc.py once silently pointed the eviction logic at an empty relative
 # directory, so nothing was ever evicted and the root partition filled up.
-DEFAULT_CACHE_DIR = "/mnt/nvme2/data_cache"
+# DATA_CACHE_DIR overrides it on hosts without /mnt/nvme2 (e.g. the workstation).
+DEFAULT_CACHE_DIR = os.environ.get("DATA_CACHE_DIR") or "/mnt/nvme2/data_cache"
 DEFAULT_GNN_CACHE_DIR = f"{DEFAULT_CACHE_DIR}/gnns"
 
 
