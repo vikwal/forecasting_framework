@@ -113,18 +113,25 @@ def _pool_scalers(scalers: List[StandardScaler]) -> StandardScaler:
     return g
 
 
-def prepare_clients(config: dict, features: dict, clients: Dict[str, List[str]], pool_scalers: bool) -> dict:
-    """{client_id: {'stations': {key: prepared}, 'scaler_x', 'scaler_y'}} with pipeline() output per station."""
+def prepare_clients(config: dict, features: dict, clients: Dict[str, List[str]], pool_scalers: bool,
+                    scalers: Dict[str, dict] | None = None) -> dict:
+    """{client_id: {'stations': {key: prepared}, 'scaler_x', 'scaler_y'}} with pipeline() output per station.
+    `scalers` ({client_id: {'scaler_x', 'scaler_y'}}) applies given scalers instead of fitting them, e.g. a
+    trained model's scaler for stations it has never seen."""
     data_dir, freq = config['data']['path'], config['data']['freq']
     out = {}
     for cid, stations in clients.items():
         ccfg = federated.client_data_config(config, stations)
         dfs = preprocessing.get_data(data_dir=data_dir, config=ccfg, freq=freq, features=features,
                                      files_key='client_files')
-        sx, sy = _fit_client_scalers(dfs, config, features)
+        if scalers is not None:
+            sx, sy = scalers[cid]['scaler_x'], scalers[cid].get('scaler_y')
+            logging.info(f'[{cid}] {len(dfs)} stations loaded, given scaler applied')
+        else:
+            sx, sy = _fit_client_scalers(dfs, config, features)
+            logging.info(f'[{cid}] {len(dfs)} stations loaded, scaler fitted before {hpo.scaler_fit_end(config).date()}')
         out[cid] = {'dfs': dfs, 'scaler_x': sx, 'scaler_y': sy}
-        logging.info(f'[{cid}] {len(dfs)} stations loaded, scaler fitted before {hpo.scaler_fit_end(config).date()}')
-    if pool_scalers and len(out) > 1:
+    if pool_scalers and len(out) > 1 and scalers is None:
         gx = _pool_scalers([c['scaler_x'] for c in out.values()])
         gy = _pool_scalers([c['scaler_y'] for c in out.values()]) if out[next(iter(out))]['scaler_y'] else None
         for c in out.values():
@@ -267,6 +274,8 @@ def train_fold(setting: str, config: dict, hp: dict, clients_prepared: dict, bou
         info = {'epochs': int(history.get('last_round', len(ma))), 'best': int(history.get('best_round', 0)),
                 'train_samples': n_train, 'history': ma.to_dict(orient='list') if hasattr(ma, 'to_dict') else None,
                 'comm_stats': history.get('comm_stats')}
+        config['model']['feature_dim'] = tools.get_feature_dim(X=next(iter(clients_prepared.values()))['stations']
+                                                               [next(iter(next(iter(clients_prepared.values()))['stations']))]['X_train'])
         model = models.get_model(config=config, hyperparameters=hp)
         model.load_state_dict(state)
         model = model.to(device)
