@@ -11,7 +11,7 @@ is evaluated in-sample w.r.t. early stopping on its own window and out-of-sample
 
 Usage (per GPU one process, clients split between them):
     python scripts/fold_retrain_check.py -c configs/parks_v1/split2/config_parks_v1_curt_v11_fl_fedgradient_static_s2 \
-        --clients R0 R1 --gpu 0 --seeds 42 43 44 --out results/fold_retrain/s2_local.csv
+        --clients R0 R1 --gpu 0 --seeds 42 43 44 --forecast-hours 06 09 12 15 --out results/fold_retrain/s2_local.csv
     python scripts/fold_retrain_check.py --summary results/fold_retrain/s2_local.csv
 """
 import argparse
@@ -177,6 +177,8 @@ def main() -> int:
     ap.add_argument('--gpu', type=int, default=None)
     ap.add_argument('--out', default='results/fold_retrain/fold_retrain.csv')
     ap.add_argument('--run-dir', default=None, help='where the client configs are written (default runs/fold_retrain/<name>)')
+    ap.add_argument('--forecast-hours', nargs='+', default=None,
+                    help='NWP issue hours used for training and evaluation (default: the config\'s, e.g. 09 only)')
     ap.add_argument('--summary', metavar='CSV', help='only print the markdown summary of an existing result file')
     args = ap.parse_args()
     if args.summary:
@@ -194,10 +196,15 @@ def main() -> int:
                                   logging.StreamHandler()])
     # same round trip as hpo_local.py (write + load), so the data-cache key matches the HPO's
     configs = client_hpo_configs(config, args.clients, kfolds=config['hpo'].get('kfolds'))
+    if args.forecast_hours:          # e.g. 06 09 12 15: four samples per day instead of the 09 run only
+        for cfg in configs.values():
+            cfg['data']['forecast_hours'] = [str(h).zfill(2) for h in args.forecast_hours]
+            cfg['data'].pop('train_forecast_hours', None)
     paths = local_training.write_configs(configs, os.path.join(run_dir, 'configs'), name)
     device = f'cuda:{args.gpu}' if args.gpu is not None and torch.cuda.is_available() else \
         ('cuda' if torch.cuda.is_available() else 'cpu')
-    logging.info(f'{len(paths)} clients, seeds {args.seeds}, device {device}, results -> {args.out}')
+    logging.info(f'{len(paths)} clients, seeds {args.seeds}, device {device}, forecast hours '
+                 f"{next(iter(configs.values()))['data'].get('forecast_hours')}, results -> {args.out}")
     for cid, path in paths.items():
         run_client(cid, f'{path}.yaml', args.seeds, device, args.out, args.model)
     print(summary(args.out))
