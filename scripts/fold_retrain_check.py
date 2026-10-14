@@ -68,7 +68,9 @@ def metrics(p, t) -> dict:
 
 def run_client(cid: str, cfg_path: str, seeds: list, device: str, out: str, model_name: str) -> None:
     cfg = tools.load_config(cfg_path)
-    cfg['model']['fl'] = False
+    cfg['model']['fl'] = False            # as hpo_cl.py sets them after loading
+    cfg['model']['name'] = model_name
+    cfg['model']['verbose'] = 0
     stem = os.path.basename(cfg_path).replace('config_', '').replace('.yaml', '')
     study_name = f"cl_m-{model_name}_out-{cfg['model']['horizon']}_freq-{cfg['data']['freq']}_{stem}"
     study = hpo.load_study(cfg['hpo']['studies_path'], study_name, required=True)
