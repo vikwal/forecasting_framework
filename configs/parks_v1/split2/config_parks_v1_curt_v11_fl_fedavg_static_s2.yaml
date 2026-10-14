@@ -221,7 +221,7 @@ hpo:
   objectives:
   - metric: val_rmse
     direction: minimize
-  trials: 100
+  trials: 150
   kfolds: 3
   min_train_date: '2023-07-24'
   pruning:
@@ -244,7 +244,7 @@ hpo:
   - 4
   learning_rate:
   - 0.0001
-  - 0.01
+  - 0.03
   attention_heads:
   - 1
   - 8
@@ -273,7 +273,7 @@ hpo:
     - 8
     hidden_dim:
     - 16
-    - 128
+    - 256
     dropout:
     - 0.01
     - 0.5

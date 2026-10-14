@@ -394,6 +394,14 @@ def _split2_configs() -> dict:
             # 0.107-0.110 after fold 2, so the threshold only separates noise (survivorship bias), while a
             # pruned trial still costs 2 of 3 folds and does not count toward the budget (slower overall)
             cfg['hpo']['pruning'] = dict(use_median_pruner=False, disable_pruning=True)
+        if meth == 'fl_fedavg':
+            # Viktor 2026-10-14 11:10: the FedAvg study sat at the upper bounds after 53 trials (hidden_dim 126
+            # of 128, top-10 at 0.9 of the range, lr 0.0037 with rho -0.3; pipeline/hpo_bounds.py) -> wider
+            # hidden_dim / lr and 50 more trials in the same study (TPE keeps the old trials; hidden_dim is
+            # sampled independently anyway because its range depends on n_heads)
+            cfg['hpo']['tft']['hidden_dim'] = [16, 256]
+            cfg['hpo']['learning_rate'] = [1e-4, 3e-2]
+            cfg['hpo']['trials'] = 150
         cfg['eval']['results_path'] = 'results/parks_v1_split2'
         out[meth] = cfg
     return out
