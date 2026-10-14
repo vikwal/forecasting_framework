@@ -371,9 +371,9 @@ SPLIT2 = {'train_start': '2023-07-24', 'train_end': '2025-07-31 23:00', 'test_st
 SPLIT2_FOLDS = ['2024-08-01', '2024-12-01', '2025-04-01', '2025-08-01']
 
 
-def split2(rows: list) -> None:
-    global OUT
-    OUT = os.path.join(BASE, 'split2')
+def _split2_configs() -> dict:
+    """{method: config} of the split-2 HPO configs (cl80, fl_fedavg, fl_fedgradient)."""
+    out = {}
     for meth, cfg in bases('static').items():
         cfg['data'].update(SPLIT2, strict_split=True)        # no training target in the test period
         cfg['hpo'].update(fold_boundaries=list(SPLIT2_FOLDS), objective_reduction='best', kfolds=3,
@@ -395,10 +395,27 @@ def split2(rows: list) -> None:
             # pruned trial still costs 2 of 3 folds and does not count toward the budget (slower overall)
             cfg['hpo']['pruning'] = dict(use_median_pruner=False, disable_pruning=True)
         cfg['eval']['results_path'] = 'results/parks_v1_split2'
+        out[meth] = cfg
+    return out
+
+
+def split2(rows: list, final: bool = False) -> None:
+    """HPO configs (configs/parks_v1/split2/) or, with final=True, the final-run configs
+    (configs/parks_v1/split2/final/, same file names so the HPO lookup finds the studies): all four
+    ICON runs for training and testing and model.lookup_hpo (Viktor 2026-10-14: HPO on the 09 run,
+    fold and test trainings with all runs, one fixed model per cell, no retraining)."""
+    global OUT
+    OUT = os.path.join(BASE, 'split2', 'final') if final else os.path.join(BASE, 'split2')
+    for meth, cfg in _split2_configs().items():
+        if final:
+            cfg['data']['forecast_hours'] = list(RUNS)
+            cfg['data'].pop('train_forecast_hours', None)
+            cfg['model']['lookup_hpo'] = True
         name = f'parks_v1_curt_v11_{meth}_static_s2'
         path = write(cfg, name, f'split 2 (train data 2023-07-24..2025-07, test 2025-08..2026-07, HPO folds '
-                                f'{SPLIT2_FOLDS}), x1 statics, {meth}')
-        rows.append({'scenario': 'split2', 'method': meth, 'config': path})
+                                f'{SPLIT2_FOLDS}), x1 statics, {meth}'
+                                + (f'; final run: ICON runs {RUNS}, lookup_hpo' if final else ''))
+        rows.append({'scenario': 'split2_final' if final else 'split2', 'method': meth, 'config': path})
     # write() sets eval.results_path to the scenario folder; keep the split-2 folder
     for r in rows:
         p = os.path.join(REPO, r['config'] + '.yaml')
@@ -963,6 +980,8 @@ def main():
         pool_size(rows)
     elif part == 'split2':
         split2(rows)
+    elif part == 'split2_final':
+        split2(rows, final=True)
     elif part == 'runs':
         forecast_runs(rows)
     elif part == 'features':

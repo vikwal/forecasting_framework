@@ -36,6 +36,8 @@ def main() -> int:
     parser.add_argument('--lookup-hpo', action='store_true',
                         help='Train every client with the best trial of its hpo_local.py study (model.lookup_hpo)')
     parser.add_argument('--dry-run', action='store_true', help='Write the configs, print the commands, do not run')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Pass --seed to train_cl.py (overrides params.random_seed, suffix _seed<N> on the outputs)')
     args = parser.parse_args()
 
     cfg_path = args.config if args.config.endswith('.yaml') else f'{args.config}.yaml'
@@ -59,7 +61,8 @@ def main() -> int:
                 name=cid,
                 cmd=[sys.executable, 'train_cl.py', '-c', path, '-m', args.model]
                     + (['--save_model'] if args.save_model else [])
-                    + (['--save-predictions'] if args.save_predictions else []),
+                    + (['--save-predictions'] if args.save_predictions else [])
+                    + (['--seed', str(args.seed)] if args.seed is not None else []),
                 log=os.path.join(run_dir, 'logs', f'{cid}.out'))
             for cid, path in paths.items()]
     logging.info(f"[local] {len(jobs)} clients from {cfg_path} on GPUs {gpus} "
@@ -90,7 +93,8 @@ def main() -> int:
         merged.update({'model': args.model, 'source_config': cfg_path, 'run_dir': run_dir,
                        'failed': failed})
         base_dir = os.path.basename(config['data']['path'])
-        out = os.path.join('results', base_dir, f"local_m-{args.model}_{name.removeprefix('config_')}_{stamp}.pkl")
+        seed_tag = f'_seed{args.seed}' if args.seed is not None else ''
+        out = os.path.join('results', base_dir, f"local_m-{args.model}_{name.removeprefix('config_')}{seed_tag}_{stamp}.pkl")
         local_training.save_merged(merged, out)
         logging.info(f"[local] {local_training.summary_line(merged)} -> {out}")
     return 1 if failed else 0

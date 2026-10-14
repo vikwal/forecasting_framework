@@ -40,6 +40,9 @@ def main() -> None:
                         help='Store predictions per station/target in the result pickle (as train_cl.py)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume the FL simulation from a checkpoint (<fl.checkpoint.dir>/last.pt)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Override params.random_seed; result and model files get the suffix _seed<N> '
+                             '(the study name used for the HPO lookup stays unchanged)')
     args = parser.parse_args()
     _predictions: dict = {}   # (park, target) -> pred/true frames, only with --save-predictions
 
@@ -80,6 +83,9 @@ def main() -> None:
 
     # Load config
     config = tools.load_config(f'{args.config}.yaml')
+    if args.seed is not None:
+        config.setdefault('params', {})['random_seed'] = int(args.seed)
+    seed_tag = f'_seed{args.seed}' if args.seed is not None else ''
     tools.set_seed(config.get('params', {}).get('random_seed', 42))   # reproducible runs and seed replicates
     freq = config['data']['freq']
     params = config['params']
@@ -220,6 +226,10 @@ def main() -> None:
     hyperparameters['n_rounds'] = config['fl'].get('n_rounds', 10)
     hyperparameters['personalization'] = config['fl'].get('personalize', False)
     hyperparameters['global_scaler'] = config['fl'].get('global_scaler', False)
+    if study is not None and 'n_local_epochs' in study.best_trial.params:
+        # tuned local epochs of the weight-averaging strategies are read from the config by the client actors
+        config['fl']['n_local_epochs'] = int(study.best_trial.params['n_local_epochs'])
+        logging.info(f"fl.n_local_epochs from the study: {config['fl']['n_local_epochs']}")
 
     logging.info(f"Hyperparameters: {json.dumps(hyperparameters, indent=2)}")
 
@@ -956,7 +966,7 @@ def main() -> None:
 
     # Save results
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path_to_pkl = os.path.join('results', base_dir, f'{study_name}_{timestamp}.pkl')
+    path_to_pkl = os.path.join('results', base_dir, f'{study_name}{seed_tag}_{timestamp}.pkl')
 
     with open(path_to_pkl, 'wb') as f:
         pickle.dump(results, f)
@@ -987,7 +997,7 @@ def main() -> None:
         if config['fl'].get('personalize', False):
             # Personalized: save one model and scaler per client
             for client_id, weights in clients_weights.items():
-                model_name = f'{study_name}_id-{client_id}.pt'
+                model_name = f'{study_name}{seed_tag}_id-{client_id}.pt'
                 model_path = os.path.join('models', model_name)
                 torch.save(weights, model_path)
                 logging.info(f"Client {client_id} model saved to: {model_path}")
@@ -1006,7 +1016,7 @@ def main() -> None:
         else:
             # Global model: all clients share the same weights, save once
             first_client_id = list(clients_weights.keys())[0]
-            model_name = f'{study_name}_global.pt'
+            model_name = f'{study_name}{seed_tag}_global.pt'
             model_path = os.path.join('models', model_name)
             torch.save(clients_weights[first_client_id], model_path)
             logging.info(f"Global model saved to: {model_path}")

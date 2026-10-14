@@ -45,6 +45,9 @@ def main() -> None:
                              '(noetig fuer den Vergleich verschiedener Zeitraster auf gemeinsamem Raster)')
     parser.add_argument('--test-mode', action='store_true', default=False,
                         help='Final evaluation mode: trains on files+val_files, evaluates on test_files')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Override params.random_seed; result and model files get the suffix _seed<N> '
+                             '(the study name used for the HPO lookup stays unchanged)')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
@@ -81,6 +84,9 @@ def main() -> None:
     os.makedirs('models', exist_ok=True)
 
     config = tools.load_config(f'{args.config}.yaml')
+    if args.seed is not None:
+        config.setdefault('params', {})['random_seed'] = int(args.seed)
+    seed_tag = f'_seed{args.seed}' if args.seed is not None else ''
     tools.set_seed(config.get('params', {}).get('random_seed', 42))   # reproducible runs and seed replicates
     freq = config['data']['freq']
     params = config['params']
@@ -743,10 +749,10 @@ def main() -> None:
             logging.info(f"Chronos-2 model saved to: {model_path}/")
             scaler_path = os.path.join('models', 'scaler', f'scaler_chronos_{study_name}.pkl')
         else:
-            model_path = os.path.join('models', f'{study_name}{study_name_suffix}.pt')
+            model_path = os.path.join('models', f'{study_name}{seed_tag}.pt')
             torch.save(model.state_dict(), model_path)
             logging.info(f"Model saved to: {model_path}")
-            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}{study_name_suffix}.pkl')
+            scaler_path = os.path.join('models', 'scaler', f'scaler_{study_name}{seed_tag}.pkl')
 
         with open(scaler_path, 'wb') as f:
             pickle.dump(global_scaler_x, f)
@@ -812,7 +818,7 @@ def main() -> None:
 
     # Save results
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    path_to_pkl = os.path.join('results', base_dir, f'{study_name}_{timestamp}.pkl')
+    path_to_pkl = os.path.join('results', base_dir, f'{study_name}{seed_tag}_{timestamp}.pkl')
 
     with open(path_to_pkl, 'wb') as f:
         pickle.dump(results, f)
