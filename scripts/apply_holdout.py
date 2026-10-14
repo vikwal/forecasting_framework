@@ -88,11 +88,15 @@ def run_unit(unit: str, setting: str, cfg_path: str, config: dict, holdout: list
                          os.path.join(args.out_dir, f'{study_name}_folds_seed{seed}_holdout.pkl'))
         del prepared
     if 'test' in args.which:
+        prepared, prev = None, None
         for seed in args.seeds:
             with open(os.path.join('models', 'scaler', f'scaler_{study_name}_seed{seed}.pkl'), 'rb') as f:
                 sx = pickle.load(f)
-            prepared = ft.prepare_clients(cfg, features, {'holdout': holdout}, pool_scalers=False,
-                                          scalers={'holdout': {'scaler_x': sx, 'scaler_y': None}})
+            # the scaler fit is deterministic: reuse the preprocessed data when the seeds share one scaler
+            if prepared is None or not np.allclose(prev.mean_, sx.mean_) or not np.allclose(prev.scale_, sx.scale_):
+                prepared = ft.prepare_clients(cfg, features, {'holdout': holdout}, pool_scalers=False,
+                                              scalers={'holdout': {'scaler_x': sx, 'scaler_y': None}})
+                prev = sx
             model = load_model(cfg, hp, os.path.join('models', f'{study_name}_seed{seed}.pt'), device,
                                next(iter(prepared['holdout']['stations'].values()))['X_test'])
             preds, ev = predict_test(model, prepared, target, device, hp['batch_size'])
@@ -104,7 +108,7 @@ def run_unit(unit: str, setting: str, cfg_path: str, config: dict, holdout: list
                          f"mae {agg['mae']:.4f} (n {agg['n']})")
             pd.to_pickle({'unit': unit, 'kind': 'test', 'seed': seed, 'study': study_name, 'predictions': preds},
                          os.path.join(args.out_dir, f'{study_name}_test_seed{seed}_holdout.pkl'))
-            del model, prepared
+            del model
     return rows
 
 
