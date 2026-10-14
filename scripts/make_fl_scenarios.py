@@ -389,10 +389,11 @@ def split2(rows: list) -> None:
                                                                   server_lr=[1e-4, 1e-1],   # log
                                                                   clipnorm=[0.3, 10.0])     # log, client clipping
             cfg['hpo']['fl'].pop('n_local_epochs', None)   # Viktor 2026-10-13: local epochs stay at 1
-            # Viktor 2026-10-14: PercentilePruner(75) instead of the median - the median of completed trials
-            # tightened with every prune (10 of 12 FedAvg trials pruned at < 1 % distance), and pruned
-            # trials do not count toward the budget while still costing 2 of 3 folds
-            cfg['hpo']['pruning'].update(percentile=75.0, use_median_pruner=False)
+            # Viktor 2026-10-14: no pruning in the FL studies. MedianPruner (06:45) and PercentilePruner(75)
+            # (08:45) both pruned about half of the FedAvg trials: all completed trials sit within
+            # 0.107-0.110 after fold 2, so the threshold only separates noise (survivorship bias), while a
+            # pruned trial still costs 2 of 3 folds and does not count toward the budget (slower overall)
+            cfg['hpo']['pruning'] = dict(use_median_pruner=False, disable_pruning=True)
         cfg['eval']['results_path'] = 'results/parks_v1_split2'
         name = f'parks_v1_curt_v11_{meth}_static_s2'
         path = write(cfg, name, f'split 2 (train data 2023-07-24..2025-07, test 2025-08..2026-07, HPO folds '
