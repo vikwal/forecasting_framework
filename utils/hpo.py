@@ -498,6 +498,31 @@ def get_objectives_from_config(config: dict) -> tuple:
         raise ValueError("Config must contain either 'hpo.metric' (single) or 'hpo.objectives' (multi)")
 
 
+def make_pruner(pruning_config: dict | None):
+    """Pruner from hpo.pruning: `percentile` (e.g. 75 = prune the worst quarter) -> PercentilePruner,
+    else `use_median_pruner` -> MedianPruner, else `disable_pruning` -> NopPruner, else None (Optuna default).
+    Both percentile and median pruners compare against *completed* trials only, so the median threshold
+    tightens with every pruned trial (survivorship); the percentile variant is the lenient choice when
+    pruned trials do not count toward the trial budget."""
+    if not pruning_config:
+        return None
+    kw = dict(n_startup_trials=pruning_config.get('n_startup_trials', 10),
+              n_warmup_steps=pruning_config.get('n_warmup_steps', 1),
+              interval_steps=pruning_config.get('interval_steps', 1))
+    if pruning_config.get('percentile') is not None:
+        pruner = optuna.pruners.PercentilePruner(float(pruning_config['percentile']), **kw)
+        logging.debug(f"Using PercentilePruner({pruning_config['percentile']}) with {kw}")
+    elif pruning_config.get('use_median_pruner', False):
+        pruner = optuna.pruners.MedianPruner(**kw)
+        logging.debug(f"Using MedianPruner with {kw}")
+    elif pruning_config.get('disable_pruning', False):
+        pruner = optuna.pruners.NopPruner()
+        logging.debug("Using NopPruner (no pruning)")
+    else:
+        pruner = None
+    return pruner
+
+
 def create_or_load_study(path, study_name, direction=None, pruning_config=None, config=None):
     """
     Create or load an Optuna study with flexible single/multi-objective support.
@@ -537,18 +562,7 @@ def create_or_load_study(path, study_name, direction=None, pruning_config=None, 
         constant_liar=True,
     )
 
-    pruner = None
-    if pruning_config and pruning_config.get('use_median_pruner', False):
-        pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=pruning_config.get('n_startup_trials', 10),
-            n_warmup_steps=pruning_config.get('n_warmup_steps', 1),
-            interval_steps=pruning_config.get('interval_steps', 1)
-        )
-        logging.debug(f"Using MedianPruner with n_startup_trials={pruner._n_startup_trials}, "
-                     f"n_warmup_steps={pruner._n_warmup_steps}, interval_steps={pruner._interval_steps}")
-    elif pruning_config and pruning_config.get('disable_pruning', False):
-        pruner = optuna.pruners.NopPruner()
-        logging.debug("Using NopPruner (no pruning)")
+    pruner = make_pruner(pruning_config)
 
     # Determine if multi-objective from config
     if config is not None:

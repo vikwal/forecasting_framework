@@ -158,3 +158,12 @@ def test_fold_without_samples_raises():
     cfg = _cfg(boundaries=['2026-01-01', '2026-05-01'])         # after the data: no validation samples
     with pytest.raises(ValueError):
         hpo.client_folds([_prepared('2023-07-24', '2025-07-31')], cfg)
+
+
+def test_make_pruner_percentile_before_median():
+    import optuna
+    assert hpo.make_pruner(None) is None and hpo.make_pruner({}) is None
+    p = hpo.make_pruner({'percentile': 75.0, 'use_median_pruner': False, 'n_startup_trials': 10, 'n_warmup_steps': 1})
+    assert isinstance(p, optuna.pruners.PercentilePruner) and p._percentile == 75.0 and p._n_startup_trials == 10
+    assert isinstance(hpo.make_pruner({'use_median_pruner': True}), optuna.pruners.MedianPruner)
+    assert isinstance(hpo.make_pruner({'disable_pruning': True}), optuna.pruners.NopPruner)
