@@ -1,11 +1,14 @@
-"""Apply the trained split-2 models (local per client and central) to the holdout parks they have
-never seen: the fold models (scripts/final_folds.py, models/split2_folds/) on the fold windows and the
-test-year models (train_cl.py --save_model, models/<study>_seed<s>.pt) on the test year. Each model
-scales the holdout data with its own scaler.
+"""Apply the trained split-2 models (local per client, central and federated global models) to the
+holdout parks they have never seen: the fold models (scripts/final_folds.py, models/split2_folds/) on
+the fold windows and the test-year models (train_cl.py / train_fl.py --save_model,
+models/<study>_seed<s>.pt resp. models/<study>_seed<s>_global.pt) on the test year. Each model scales
+the holdout data with its own scaler (FL: the pooled global scaler).
 
     python scripts/apply_holdout.py -c configs/parks_v1/split2/final/config_parks_v1_curt_v11_fl_fedgradient_static_s2 \
         --central-config configs/parks_v1/split2/final/config_parks_v1_curt_v11_cl80_static_s2 \
         --which folds test --seeds 42 43 44 --gpu 0
+    python scripts/apply_holdout.py -c configs/parks_v1/split2/final/config_parks_v1_curt_v11_fl_fedavg_static_s2 \
+        --skip-local --fl-config configs/parks_v1/split2/final/config_parks_v1_curt_v11_fl_fedavg_static_s2 --gpu 0
     python scripts/apply_holdout.py --summary results/split2_holdout/holdout_eval.csv
 
 Output: results/split2_holdout/holdout_eval.csv (unit, kind, seed, window, park, n, rmse, mae, r2) and
@@ -25,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import final_training as ft, hpo, models, preprocessing, tools   # noqa: E402
 
 COLS = ['unit', 'kind', 'seed', 'window', 'park', 'n', 'rmse', 'mae', 'r2']
+FL_UNITS = ['fedavg', 'fedgradient', 'fedprox', 'scaffold']
 
 
 def clean_state(state: dict) -> dict:
@@ -59,7 +63,8 @@ def predict_test(model, prepared_clients: dict, target: str, device: str, batch_
 
 def run_unit(unit: str, setting: str, cfg_path: str, config: dict, holdout: list, args, device: str) -> list:
     cfg = ft.final_config(config, args.model, setting)      # final configs already carry the four ICON runs
-    study_name = ft.study_names(cfg_path, config, args.model, setting, [unit] if setting == 'local' else None)[unit]
+    names = ft.study_names(cfg_path, config, args.model, setting, [unit] if setting == 'local' else None)
+    study_name = names['fl'] if setting == 'fl' else names[unit]
     hp, study = ft.best_hyperparameters(cfg, study_name)
     features = preprocessing.get_features(config=cfg)
     boundaries = hpo.fold_boundaries(cfg)
@@ -68,7 +73,13 @@ def run_unit(unit: str, setting: str, cfg_path: str, config: dict, holdout: list
     os.makedirs(args.out_dir, exist_ok=True)
     if 'folds' in args.which:
         with open(os.path.join(args.model_dir, f'scaler_{study_name}.pkl'), 'rb') as f:
-            sc = pickle.load(f)[unit]
+            sc = pickle.load(f)
+        if setting == 'fl':
+            if not cfg['fl'].get('global_scaler', False):
+                raise SystemExit(f'{study_name}: no global scaler, holdout scaling of the global model undefined')
+            sc = next(iter(sc.values()))        # pooled: identical for every client
+        else:
+            sc = sc[unit]
         prepared = ft.prepare_clients(cfg, features, {'holdout': holdout}, pool_scalers=False, scalers={'holdout': sc})
         for seed in args.seeds:
             preds_all = {}
@@ -90,14 +101,17 @@ def run_unit(unit: str, setting: str, cfg_path: str, config: dict, holdout: list
     if 'test' in args.which:
         prepared, prev = None, None
         for seed in args.seeds:
-            with open(os.path.join('models', 'scaler', f'scaler_{study_name}_seed{seed}.pkl'), 'rb') as f:
+            # train_fl.py writes one (deterministic) global scaler per study, train_cl.py one per seed
+            sname = f'scaler_{study_name}_global.pkl' if setting == 'fl' else f'scaler_{study_name}_seed{seed}.pkl'
+            with open(os.path.join('models', 'scaler', sname), 'rb') as f:
                 sx = pickle.load(f)
             # the scaler fit is deterministic: reuse the preprocessed data when the seeds share one scaler
             if prepared is None or not np.allclose(prev.mean_, sx.mean_) or not np.allclose(prev.scale_, sx.scale_):
                 prepared = ft.prepare_clients(cfg, features, {'holdout': holdout}, pool_scalers=False,
                                               scalers={'holdout': {'scaler_x': sx, 'scaler_y': None}})
                 prev = sx
-            model = load_model(cfg, hp, os.path.join('models', f'{study_name}_seed{seed}.pt'), device,
+            mname = f'{study_name}_seed{seed}' + ('_global' if setting == 'fl' else '')
+            model = load_model(cfg, hp, os.path.join('models', f'{mname}.pt'), device,
                                next(iter(prepared['holdout']['stations'].values()))['X_test'])
             preds, ev = predict_test(model, prepared, target, device, hp['batch_size'])
             for r in ev.itertuples():
@@ -119,18 +133,18 @@ def summary(csv: str) -> str:
         return pd.Series({'rmse': np.sqrt((g.n * g.mse).sum() / g.n.sum()), 'mae': (g.n * g.mae).sum() / g.n.sum(),
                           'r2': g.r2.mean()})
     per = d.groupby(['unit', 'kind', 'window', 'seed']).apply(pooled).groupby(['unit', 'kind', 'window']).mean().reset_index()
-    per['group'] = np.where(per.unit == 'central', 'central', 'local')
+    # FL units are named after their strategy (fedavg, fedgradient); everything else is a local client
+    per['group'] = np.where(per.unit.isin(['central', *FL_UNITS]), per.unit, 'local')
     out = ['Holdout parks: pooled RMSE / MAE over parks, mean over seeds; "local" = mean over the 8 client models.\n']
     t = per.groupby(['kind', 'window', 'group'])[['rmse', 'mae', 'r2']].mean().round(4).reset_index()
-    out.append('| kind | window | central rmse | local rmse | Δ | central mae | local mae | central r2 | local r2 |')
-    out.append('|---|---|---|---|---|---|---|---|---|')
-    for (k, w), g in t.groupby(['kind', 'window'], sort=False):
-        c = g[g.group == 'central'].iloc[0] if (g.group == 'central').any() else None
-        l = g[g.group == 'local'].iloc[0] if (g.group == 'local').any() else None
-        f = lambda x, col: f'{x[col]:.4f}' if x is not None else ''
-        delta = f'{l.rmse - c.rmse:+.4f}' if c is not None and l is not None else ''
-        out.append(f'| {k} | {w} | {f(c, "rmse")} | {f(l, "rmse")} | {delta} | {f(c, "mae")} | {f(l, "mae")} | '
-                   f'{f(c, "r2")} | {f(l, "r2")} |')
+    groups = [g for g in ['central', *FL_UNITS, 'local'] if g in set(t.group)]
+    for col in ['rmse', 'mae', 'r2']:
+        out.append(f'\n{col.upper()}\n')
+        out.append('| kind | window | ' + ' | '.join(groups) + ' |')
+        out.append('|---|---|' + '---|' * len(groups))
+        for (k, w), g in t.groupby(['kind', 'window'], sort=False):
+            v = g.set_index('group')[col]
+            out.append(f'| {k} | {w} | ' + ' | '.join(f'{v[x]:.4f}' if x in v else '' for x in groups) + ' |')
     out.append('\nPer unit (RMSE, pooled over holdout parks, mean over seeds):\n')
     piv = per.pivot_table(index='unit', columns=['kind', 'window'], values='rmse').round(4)
     piv.columns = [f'{k} {w}' for k, w in piv.columns]
@@ -147,6 +161,8 @@ def main() -> int:
     ap.add_argument('--central-config', default=None, help='cl80 final config (adds the central models)')
     ap.add_argument('-m', '--model', default='tft')
     ap.add_argument('--clients', nargs='+', default=None)
+    ap.add_argument('--skip-local', action='store_true', help='do not evaluate the local client models')
+    ap.add_argument('--fl-config', nargs='+', default=[], help='FL final config(s): adds the global FL models')
     ap.add_argument('--seeds', nargs='+', type=int, default=[42, 43, 44])
     ap.add_argument('--which', nargs='+', default=['folds', 'test'], choices=['folds', 'test'])
     ap.add_argument('--gpu', type=int, default=None)
@@ -166,7 +182,11 @@ def main() -> int:
         raise SystemExit('no holdout parks (data.val_files / holdout_files) in the config')
     logging.info(f'{len(holdout)} holdout parks, seeds {args.seeds}, {args.which}')
     out_csv = os.path.join(args.out_dir, 'holdout_eval.csv')
-    units = [(c, 'local', cfg_path, config) for c in (args.clients or config['fl']['clients'])]
+    units = [] if args.skip_local else [(c, 'local', cfg_path, config) for c in (args.clients or config['fl']['clients'])]
+    for fp in args.fl_config:
+        fp = fp if fp.endswith('.yaml') else f'{fp}.yaml'
+        fc = tools.load_config(fp)
+        units.append((fc['fl']['strategy'], 'fl', fp, fc))
     if args.central_config:
         cp = args.central_config if args.central_config.endswith('.yaml') else f'{args.central_config}.yaml'
         units.append(('central', 'central', cp, tools.load_config(cp)))
