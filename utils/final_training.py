@@ -264,6 +264,8 @@ def train_fold(setting: str, config: dict, hp: dict, clients_prepared: dict, bou
             partitions[cid] = (X_tr, y_tr, X_va, y_va)
         n_train = sum(len(p[1]) for p in partitions.values())
         config['model_name'] = f'final_fold{fold}_s{seed}'
+        # run_simulation builds the global model from config['model']['feature_dim'] (set by train_fl.py/hpo_fl.py)
+        config['model']['feature_dim'] = tools.get_feature_dim(X=next(iter(partitions.values()))[0])
         if gpu is not None:
             os.environ['FL_GPU_ORDER'] = str(gpu)
         history, clients_weights = federated.run_simulation(partitions=partitions, hyperparameters=hp,
@@ -274,8 +276,6 @@ def train_fold(setting: str, config: dict, hp: dict, clients_prepared: dict, bou
         info = {'epochs': int(history.get('last_round', len(ma))), 'best': int(history.get('best_round', 0)),
                 'train_samples': n_train, 'history': ma.to_dict(orient='list') if hasattr(ma, 'to_dict') else None,
                 'comm_stats': history.get('comm_stats')}
-        config['model']['feature_dim'] = tools.get_feature_dim(X=next(iter(clients_prepared.values()))['stations']
-                                                               [next(iter(next(iter(clients_prepared.values()))['stations']))]['X_train'])
         model = models.get_model(config=config, hyperparameters=hp)
         model.load_state_dict(state)
         model = model.to(device)
