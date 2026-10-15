@@ -38,6 +38,8 @@ def main() -> int:
     parser.add_argument('--dry-run', action='store_true', help='Write the configs, print the commands, do not run')
     parser.add_argument('--seed', type=int, default=None,
                         help='Pass --seed to train_cl.py (overrides params.random_seed, suffix _seed<N> on the outputs)')
+    parser.add_argument('--train-start', default=None,
+                        help='Pass --train-start to train_cl.py (overrides data.train_start, suffix _ts<YYYYMMDD>)')
     args = parser.parse_args()
 
     cfg_path = args.config if args.config.endswith('.yaml') else f'{args.config}.yaml'
@@ -62,7 +64,8 @@ def main() -> int:
                 cmd=[sys.executable, 'train_cl.py', '-c', path, '-m', args.model]
                     + (['--save_model'] if args.save_model else [])
                     + (['--save-predictions'] if args.save_predictions else [])
-                    + (['--seed', str(args.seed)] if args.seed is not None else []),
+                    + (['--seed', str(args.seed)] if args.seed is not None else [])
+                    + (['--train-start', args.train_start] if args.train_start else []),
                 log=os.path.join(run_dir, 'logs', f'{cid}.out'))
             for cid, path in paths.items()]
     logging.info(f"[local] {len(jobs)} clients from {cfg_path} on GPUs {gpus} "
@@ -94,6 +97,8 @@ def main() -> int:
                        'failed': failed})
         base_dir = os.path.basename(config['data']['path'])
         seed_tag = f'_seed{args.seed}' if args.seed is not None else ''
+        if args.train_start:
+            seed_tag += f"_ts{args.train_start.replace('-', '')}"
         out = os.path.join('results', base_dir, f"local_m-{args.model}_{name.removeprefix('config_')}{seed_tag}_{stamp}.pkl")
         local_training.save_merged(merged, out)
         logging.info(f"[local] {local_training.summary_line(merged)} -> {out}")

@@ -102,7 +102,7 @@ def run_unit(unit: str, setting: str, cfg_path: str, config: dict, holdout: list
         prepared, prev = None, None
         for seed in args.seeds:
             # train_fl.py writes one (deterministic) global scaler per study, train_cl.py one per seed
-            sname = f'scaler_{study_name}_global.pkl' if setting == 'fl' else f'scaler_{study_name}_seed{seed}.pkl'
+            sname = f'scaler_{study_name}_global.pkl' if setting == 'fl' else f'scaler_{study_name}_seed{seed}{args.tag}.pkl'
             with open(os.path.join('models', 'scaler', sname), 'rb') as f:
                 sx = pickle.load(f)
             # the scaler fit is deterministic: reuse the preprocessed data when the seeds share one scaler
@@ -110,18 +110,18 @@ def run_unit(unit: str, setting: str, cfg_path: str, config: dict, holdout: list
                 prepared = ft.prepare_clients(cfg, features, {'holdout': holdout}, pool_scalers=False,
                                               scalers={'holdout': {'scaler_x': sx, 'scaler_y': None}})
                 prev = sx
-            mname = f'{study_name}_seed{seed}' + ('_global' if setting == 'fl' else '')
+            mname = f'{study_name}_seed{seed}' + ('_global' if setting == 'fl' else args.tag)
             model = load_model(cfg, hp, os.path.join('models', f'{mname}.pt'), device,
                                next(iter(prepared['holdout']['stations'].values()))['X_test'])
             preds, ev = predict_test(model, prepared, target, device, hp['batch_size'])
             for r in ev.itertuples():
-                rows.append({'unit': unit, 'kind': 'test', 'seed': seed, 'window': 'test', 'park': r.key, 'n': r.n,
+                rows.append({'unit': unit, 'kind': 'test' + args.tag, 'seed': seed, 'window': 'test', 'park': r.key, 'n': r.n,
                              'rmse': r.rmse, 'mae': r.mae, 'r2': r.r2})
             agg = ft.pooled(ev)
             logging.info(f"[{unit}] test model seed {seed} on {len(ev)} holdout parks: rmse {agg['rmse']:.4f} "
                          f"mae {agg['mae']:.4f} (n {agg['n']})")
             pd.to_pickle({'unit': unit, 'kind': 'test', 'seed': seed, 'study': study_name, 'predictions': preds},
-                         os.path.join(args.out_dir, f'{study_name}_test_seed{seed}_holdout.pkl'))
+                         os.path.join(args.out_dir, f'{study_name}_test_seed{seed}{args.tag}_holdout.pkl'))
             del model
     return rows
 
@@ -161,6 +161,7 @@ def main() -> int:
     ap.add_argument('--central-config', default=None, help='cl80 final config (adds the central models)')
     ap.add_argument('-m', '--model', default='tft')
     ap.add_argument('--clients', nargs='+', default=None)
+    ap.add_argument('--tag', default='', help="test models with a file suffix, e.g. _ts20240801 (train_cl.py --train-start)")
     ap.add_argument('--skip-local', action='store_true', help='do not evaluate the local client models')
     ap.add_argument('--fl-config', nargs='+', default=[], help='FL final config(s): adds the global FL models')
     ap.add_argument('--seeds', nargs='+', type=int, default=[42, 43, 44])

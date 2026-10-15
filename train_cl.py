@@ -48,6 +48,9 @@ def main() -> None:
     parser.add_argument('--seed', type=int, default=None,
                         help='Override params.random_seed; result and model files get the suffix _seed<N> '
                              '(the study name used for the HPO lookup stays unchanged)')
+    parser.add_argument('--train-start', default=None,
+                        help='Override data.train_start (YYYY-MM-DD, training-length study); result and model '
+                             'files get the suffix _ts<YYYYMMDD>, the HPO study name stays unchanged')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
@@ -87,6 +90,9 @@ def main() -> None:
     if args.seed is not None:
         config.setdefault('params', {})['random_seed'] = int(args.seed)
     seed_tag = f'_seed{args.seed}' if args.seed is not None else ''
+    if args.train_start:
+        config['data']['train_start'] = args.train_start
+        seed_tag += f"_ts{pd.Timestamp(args.train_start):%Y%m%d}"
     tools.set_seed(config.get('params', {}).get('random_seed', 42))   # reproducible runs and seed replicates
     freq = config['data']['freq']
     params = config['params']
