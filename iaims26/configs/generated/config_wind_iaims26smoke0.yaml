@@ -1,6 +1,6 @@
 data:
-  path: /mnt/nvme1/synthetic/wind/era5_fric_wind_hourly_age
-  files: [00298, 02907, '02564', 05930]
+  path: /mnt/nvme1/synthetic/wind/site_v2_noqm_20261019
+  files: [00282, '00303', '00342', '00427']
   power_curves_path: /mnt/nvme1/synthetic/wind/power_curves
   nwp_path: /mnt/nvme1/icon-d2/parquet
   ecmwf_path: /mnt/nvme1/ecmwf/parquet
@@ -19,7 +19,7 @@ data:
   pca_components: 3
   lag_in_col: false
   n_neighbors: 5
-  val_files: ['15813', 02932]
+  val_files: ['00460', '00603']
   train_start: '2025-06-01'
 params:
   turbines: [Enercon E-70 E4 2.300, Enercon E-82 E2 2.000, Enercon E-115 2.500, Vestas

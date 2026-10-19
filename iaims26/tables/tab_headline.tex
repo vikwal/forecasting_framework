@@ -1,0 +1,16 @@
+\begin{tabular}{lcccccccc}
+\toprule
+& \multicolumn{2}{c}{$R^2$} & \multicolumn{2}{c}{RMSE [\%]} & & & & \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Configuration & med. & mean & med. & mean & $\Delta$RMSE & Win [\%] & $p_{\mathrm{Holm}}$ & sig. \\
+\midrule
+Local (per-farm, ref.) & 0.846 & 0.827 & 8.42 & 8.48 & -- & -- & -- & -- \\
+Zero-shot (physical statics) & 0.831 & 0.741 & 8.88 & 9.00 & +0.29 & 19 & $<$0.001 & \checkmark \\
+Zero-shot, no statics & 0.826 & 0.744 & 9.07 & 9.26 & +0.70 & 6 & $<$0.001 & \checkmark \\
+Zero-shot, site-ID embedding & 0.743 & 0.180 & 11.95 & 13.25 & +2.54 & 7 & $<$0.001 & \checkmark \\
+Fine-tuned, 7 days & 0.844 & 0.791 & 8.86 & 8.70 & +0.07 & 33 & $<$0.001 & \checkmark \\
+Fine-tuned, full history & 0.852 & 0.841 & 8.21 & 8.24 & -0.18 & 97 & $<$0.001 & \checkmark \\
+In-sample (80 farms) & 0.840 & 0.813 & 8.61 & 8.67 & +0.11 & 24 & $<$0.001 & \checkmark \\
+Global reference (100 farms) & 0.849 & 0.831 & 8.46 & 8.39 & -0.09 & 66 & $<$0.001 & \checkmark \\
+\bottomrule
+\end{tabular}

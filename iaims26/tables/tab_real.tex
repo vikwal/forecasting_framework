@@ -1,0 +1,17 @@
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{3}{c}{$R^2$} & \\
+\cmidrule(lr){2-4}
+Configuration & med. & mean & worst & Win [\%] \\
+\midrule
+Local (per-park, ref.) & 0.751 & 0.696 & 0.25 & -- \\
+Twin, zero-shot & 0.707 & 0.643 & 0.09 & 23 \\
+Twin + 7 days$^{\ast}$ & 0.746 & 0.724 & 0.47 & 38 \\
+Twin + 91 days$^{\ast}$ & 0.751 & 0.729 & 0.54 & 69 \\
+Twin + full history$^{\ast}$ & 0.754 & 0.739 & 0.54 & 62 \\
+Twin + 91 days$^{\dagger}$ & 0.761 & 0.702 & 0.19 & 77 \\
+Twin + full history$^{\dagger}$ & 0.783 & 0.701 & 0.13 & 54 \\
+From scratch, 7 days & 0.580 & 0.541 & -0.04 & 15 \\
+From scratch, full history & 0.740 & 0.713 & 0.53 & 46 \\
+\bottomrule
+\end{tabular}

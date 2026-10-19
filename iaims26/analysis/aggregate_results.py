@@ -50,6 +50,11 @@ def main():
         df = pd.read_csv(f)
         frames.append(_std(df[df.split == 'heldout'], 'zeroshot'))
         frames.append(_std(df[df.split == 'insample'], 'insample80'))
+    # no-static ablation folds (eval_zeroshot --config-name ..f{k}ns --out-tag nsfold{k})
+    for f in sorted((common.RESULTS_DIR / 'zeroshot').glob('zeroshot_nsfold*.csv')):
+        df = pd.read_csv(f)
+        frames.append(_std(df[df.split == 'heldout'], 'zeroshot_nostatic'))
+        frames.append(_std(df[df.split == 'insample'], 'insample80_nostatic'))
     g100 = common.RESULTS_DIR / 'zeroshot' / 'zeroshot_g100.csv'
     if g100.exists():
         df = pd.read_csv(g100)

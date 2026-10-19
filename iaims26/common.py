@@ -145,13 +145,17 @@ def study_name_parts(config_name: str, model: str = 'tft',
 
 
 def checkpoint_path(config_name: str) -> Path:
+    # train_cl.py until 2026-07 appended the suffix twice; the current version
+    # saves models/{study_name}.pt. Prefer the doubled name if it exists.
     study_name, suffix = study_name_parts(config_name)
-    return REPO_ROOT / 'models' / f'{study_name}{suffix}.pt'
+    doubled = REPO_ROOT / 'models' / f'{study_name}{suffix}.pt'
+    return doubled if doubled.exists() else REPO_ROOT / 'models' / f'{study_name}.pt'
 
 
 def scaler_path(config_name: str) -> Path:
     study_name, suffix = study_name_parts(config_name)
-    return REPO_ROOT / 'models' / 'scaler' / f'scaler_{study_name}{suffix}.pkl'
+    doubled = REPO_ROOT / 'models' / 'scaler' / f'scaler_{study_name}{suffix}.pkl'
+    return doubled if doubled.exists() else REPO_ROOT / 'models' / 'scaler' / f'scaler_{study_name}.pkl'
 
 
 def results_pkl_glob(config_name: str, data_path: str) -> list:

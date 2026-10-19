@@ -178,27 +178,28 @@ def tab_real():
 
 
 def tab_hparams():
+    """Zero-shot HPO optimum only (paper decision, round 4: no contrast
+    between in-sample and zero-shot hyperparameters)."""
     with open(common.IAIMS_DIR / 'configs' / 'hpo_best.json') as f:
         zs = json.load(f)['params']
-    # our own in-sample-objective HPO optimum on the same data (not a
-    # citation: this is a second HPO run we performed for the contrast)
-    companion = {'batch_size': 46, 'lr': 1.95e-4, 'n_heads': 8,
-                 'hidden_dim': 40, 'dropout': 0.0992, 'num_lstm_layers': 1,
-                 'static_embedding_dim': 128, 'clipnorm': 6.9179}
-    labels = [('batch\\_size', 'batch_size', '{:d}'),
-              ('learning rate', 'lr', '{:.2e}'),
-              ('attention heads', 'n_heads', '{:d}'),
-              ('hidden\\_dim', 'hidden_dim', '{:d}'),
-              ('dropout', 'dropout', '{:.3f}'),
+    labels = [('Batch size', 'batch_size', '{:d}'),
+              ('Learning rate', 'lr', 'sci'),
+              ('Attention heads', 'n_heads', '{:d}'),
+              ('Hidden dimension', 'hidden_dim', '{:d}'),
+              ('Dropout', 'dropout', '{:.3f}'),
               ('LSTM layers', 'num_lstm_layers', '{:d}'),
-              ('static\\_embedding\\_dim', 'static_embedding_dim', '{:d}'),
-              ('clipnorm', 'clipnorm', '{:.2f}')]
-    lines = ['\\begin{tabular}{lcc}', '\\toprule',
-             'Hyperparameter & Zero-shot obj. & In-sample obj. \\\\',
+              ('Static embedding dimension', 'static_embedding_dim', '{:d}'),
+              ('Gradient clipping norm', 'clipnorm', '{:.2f}')]
+    lines = ['\\begin{tabular}{lc}', '\\toprule',
+             'Hyperparameter & Value \\\\',
              '\\midrule']
     for label, key, fmt in labels:
-        lines.append(f'{label} & {fmt.format(zs[key])} & '
-                     f'{fmt.format(companion[key])} \\\\')
+        if fmt == 'sci':
+            mant, exp = f'{zs[key]:.2e}'.split('e')
+            val = f'${mant}\\times10^{{{int(exp)}}}$'
+        else:
+            val = fmt.format(zs[key])
+        lines.append(f'{label} & {val} \\\\')
     lines += ['\\bottomrule', '\\end{tabular}']
     (OUT_DIR / 'tab_hparams.tex').write_text('\n'.join(lines) + '\n')
     print('wrote tab_hparams.tex')
