@@ -13,6 +13,7 @@ per-experiment CSVs; writes into results/figures/.
   F4 fig4_mechanism.pdf   statics / no-statics / site-ID mechanism bars
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,14 @@ plt.rcParams.update({"font.size": 12, "axes.spines.top": False,
 FONT = 14
 DPI = 600
 
+# IAIMS_FIG_STYLE=journal: figures at the Elsevier double-column widths
+# (column 238.25 pt = 3.30 in, text 494.5 pt = 6.84 in) into figures_journal/.
+JOURNAL = os.environ.get('IAIMS_FIG_STYLE') == 'journal'
+W1, W2 = (3.30, 6.84) if JOURNAL else (5.5, 11.0)
+if JOURNAL:
+    FONT = 11
+    plt.rcParams.update({"font.size": 9.5})
+
 C_GLOBAL = "#2166ac"      # global / pretrained / twin
 C_NOSTATIC = "#74add1"    # light blue secondary
 C_LOCAL = "#2ca02c"       # local baselines
@@ -41,7 +50,7 @@ C_RED = "#d62728"         # scratch control
 GREEN, RED = "#2ca02c", "#d62728"   # win/loss coloring (as in the companion)
 
 MASTER = common.RESULTS_DIR / 'master_per_farm.csv'
-FIG_DIR = common.RESULTS_DIR / 'figures'
+FIG_DIR = common.RESULTS_DIR / ('figures_journal' if JOURNAL else 'figures')
 PERIOD = 'full'
 BUDGETS = ['zeroshot', '7d', '30d', '91d', 'full']
 BUDGET_LABELS = ['zero-shot', '1 week', '1 month', '3 months', 'full']
@@ -70,24 +79,37 @@ def fig1_zeroshot(master):
     loc = _series(master, 'local')
     stations = zs.index.intersection(loc.index)
 
-    fig, ax = plt.subplots(figsize=(5.5, 3.6))
+    fig, ax = plt.subplots(figsize=(W1, W1 * (0.80 if JOURNAL else 0.65)))
     lo = min(loc[stations].min(), zs[stations].min()) - 0.03
+    if JOURNAL:
+        lo = 0.25
     ax.plot([lo, 1], [lo, 1], ls='--', lw=1.0, color='gray', zorder=1)
     d = zs[stations] - loc[stations]
+    off = zs[stations][zs[stations] < lo] if JOURNAL else zs[stations].iloc[:0]
     # color by which model wins on the farm — the companion papers' convention
     for mask, color, label in ((d > 0, GREEN, 'zero-shot better'),
                                (d <= 0, RED, 'local better')):
-        idx = d[mask].index
-        ax.scatter(loc[idx], zs[idx], s=26, color=color,
+        idx = d[mask].index.difference(off.index)
+        ax.scatter(loc[idx], zs[idx], s=26 if not JOURNAL else 14, color=color,
                    edgecolors='#555555', linewidths=0.4, zorder=2,
                    label=f'{label} ({mask.mean():.0%})')
     # annotate the single catastrophic zero-shot failure so it cannot be
     # mistaken for a plotting artifact (discussed in the results text)
-    worst = zs[stations].idxmin()
-    ax.annotate(f'farm {worst}', xy=(loc[worst], zs[worst]),
-                xytext=(-8, 10), textcoords='offset points',
-                fontsize=FONT - 4, color='#555555', ha='right',
-                arrowprops=dict(arrowstyle='-', color='#999999', lw=0.7))
+    if JOURNAL and len(off):
+        ax.scatter(loc[off.index], np.full(len(off), lo + 0.012), marker='v',
+                   s=28, color=RED, edgecolors='#555555', linewidths=0.4,
+                   zorder=3, clip_on=False)
+        vals = ', '.join(f'{v:.1f}' for v in sorted(off.values))
+        ax.annotate(f'{len(off)} farms off scale\n(zero-shot $R^2$ {vals})',
+                    xy=(loc[off.index].mean(), lo + 0.012), xytext=(18, 4),
+                    textcoords='offset points', fontsize=8.5, color='#555555',
+                    ha='left', va='bottom', arrowprops=dict(arrowstyle='-', color='#999999', lw=0.7))
+    elif not JOURNAL:
+        worst = zs[stations].idxmin()
+        ax.annotate(f'farm {worst}', xy=(loc[worst], zs[worst]),
+                    xytext=(-8, 10), textcoords='offset points',
+                    fontsize=FONT - 4, color='#555555', ha='right',
+                    arrowprops=dict(arrowstyle='-', color='#999999', lw=0.7))
     box = (f'median $R^2$: {zs[stations].median():.3f} '
            f'vs {loc[stations].median():.3f}')
     ax.text(0.03, 0.97, box, transform=ax.transAxes, fontsize=FONT - 3,
@@ -99,7 +121,8 @@ def fig1_zeroshot(master):
     ax.tick_params(labelsize=FONT - 1)
     ax.set_xlim(lo, 1.0)
     ax.set_ylim(lo, 1.0)
-    ax.legend(fontsize=FONT - 3, framealpha=0.95, loc='lower left')
+    ax.legend(fontsize=FONT - 3 if not JOURNAL else 8.5, framealpha=0.95, frameon=not JOURNAL, handletextpad=0.2 if JOURNAL else 0.8, borderaxespad=0.3 if JOURNAL else 0.5,
+              loc='upper left' if JOURNAL else 'lower left', bbox_to_anchor=(0.0, 0.89) if JOURNAL else None)
     _save(fig, 'fig1_zeroshot')
 
 
@@ -118,7 +141,7 @@ def fig2_budget(master):
     loc_med = _series(master, 'local').median()
     g100_med = _series(master, 'global100').median()
 
-    fig, ax = plt.subplots(figsize=(5.5, 4.2))
+    fig, ax = plt.subplots(figsize=(W1, W1 * (0.85 if JOURNAL else 0.76)))
     xs = np.arange(len(BUDGETS))
     for variant, style in variants.items():
         med, q1, q3 = [], [], []
@@ -146,7 +169,12 @@ def fig2_budget(master):
     ax.set_xlabel('Target-farm data budget', fontsize=FONT)
     ax.set_ylabel('Median $R^2$ (100 unseen farms)', fontsize=FONT)
     ax.tick_params(labelsize=FONT - 1)
-    ax.legend(fontsize=FONT - 4, framealpha=0.95, loc='lower right')
+    if JOURNAL:
+        ax.legend(fontsize=8.5, frameon=False, loc='upper center',
+                  bbox_to_anchor=(0.5, -0.32), ncol=2, handlelength=1.6,
+                  columnspacing=0.8)
+    else:
+        ax.legend(fontsize=FONT - 4, framealpha=0.95, loc='lower right')
     _save(fig, 'fig2_budget')
 
 
@@ -185,7 +213,7 @@ def fig3_real():
             out.append(s)
         return out
 
-    fig, (axa, axb) = plt.subplots(1, 2, figsize=(11, 3.5))
+    fig, (axa, axb) = plt.subplots(1, 2, figsize=(W2, W2 * (0.36 if JOURNAL else 0.32)))
     xs = np.arange(len(BUDGETS))
 
     # (a) accuracy vs budget
@@ -205,7 +233,8 @@ def fig3_real():
     axa.set_xlabel('Real data budget', fontsize=FONT)
     axa.set_ylabel('Median $R^2$ (13 parks)', fontsize=FONT)
     axa.tick_params(labelsize=FONT - 1)
-    axa.legend(fontsize=FONT - 4, framealpha=0.95, loc='lower right')
+    if not JOURNAL:
+        axa.legend(fontsize=FONT - 4, framealpha=0.95, loc='lower right')
 
     # (b) paired win rate against each park's own local model
     for label, variant, color in series:
@@ -222,10 +251,19 @@ def fig3_real():
     axb.set_xticks(xs)
     axb.set_xticklabels(BUDGET_LABELS, fontsize=FONT - 2, rotation=20)
     axb.set_xlabel('Real data budget', fontsize=FONT)
-    axb.set_ylabel('Parks beating their local model [\\%]', fontsize=FONT)
+    axb.set_ylabel('Parks beating their local model [%]', fontsize=FONT)
     axb.set_ylim(0, 100)
     axb.tick_params(labelsize=FONT - 1)
-    axb.legend(fontsize=FONT - 4, framealpha=0.95, loc='upper left')
+    if JOURNAL:
+        h, l = axa.get_legend_handles_labels()
+        hb, lb = axb.get_legend_handles_labels()
+        for hh, ll in zip(hb, lb):
+            if ll not in l:
+                h.append(hh); l.append(ll)
+        fig.legend(h, l, fontsize=8.5, frameon=False, loc='upper center',
+                   bbox_to_anchor=(0.5, 0.02), ncol=3)
+    else:
+        axb.legend(fontsize=FONT - 4, framealpha=0.95, loc='upper left')
     fig.tight_layout()
     _save(fig, 'fig3_real')
 
@@ -244,7 +282,7 @@ def fig4_mechanism(master):
     def stars(p):
         return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else 'n.s.'
 
-    fig, ax = plt.subplots(figsize=(5.5, 3.6))
+    fig, ax = plt.subplots(figsize=(W1, W1 * (0.80 if JOURNAL else 0.65)))
     width = 0.25
     all_meds = []
     for gi, (gname, kinds) in enumerate(groups.items()):
@@ -272,7 +310,12 @@ def fig4_mechanism(master):
     ax.set_xticklabels(list(groups), fontsize=FONT)
     ax.set_ylabel('Median $R^2$', fontsize=FONT)
     ax.tick_params(labelsize=FONT - 1)
-    ax.legend(fontsize=FONT - 3, framealpha=0.95, loc='upper right')
+    if JOURNAL:
+        ax.legend(fontsize=8.5, frameon=False, loc='lower center',
+                  bbox_to_anchor=(0.5, 1.0), ncol=3, handlelength=1.0,
+                  columnspacing=0.8)
+    else:
+        ax.legend(fontsize=FONT - 3, framealpha=0.95, loc='upper right')
     _save(fig, 'fig4_mechanism')
 
 
