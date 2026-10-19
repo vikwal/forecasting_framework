@@ -1,0 +1,16 @@
+{
+  "study": "iaims26_zeroshot_tft",
+  "exported": "2026-07-14 16:14",
+  "trial_number": 32,
+  "value_mean_heldout_rmse": 0.19990351885553623,
+  "params": {
+    "batch_size": 916,
+    "lr": 0.00032330455076665945,
+    "n_heads": 7,
+    "hidden_dim": 70,
+    "dropout": 0.243467309487736,
+    "num_lstm_layers": 4,
+    "static_embedding_dim": 9,
+    "clipnorm": 6.763536403687561
+  }
+}
