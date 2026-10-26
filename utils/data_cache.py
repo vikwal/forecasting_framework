@@ -185,6 +185,10 @@ class DataCache:
             'station_history_start': (tuple(sorted((config['data'].get('station_history_start') or {}).items()))
                                       or None),
             'ecmwf_path': config['data'].get('ecmwf_path') if config['data'].get('ecmwf_layout') else None,
+            # GFS (2026-10-26, utils/gfs.py): store paths and grid points, only when set
+            'gfs_path': config['data'].get('gfs_path'),
+            'gfs_solar_path': config['data'].get('gfs_solar_path'),
+            'next_n_grid_gfs': config['params'].get('next_n_grid_gfs'),
             'forecast_hours': (tuple(config['data']['forecast_hours'])
                                if config['data'].get('ecmwf_layout') and config['data'].get('forecast_hours')
                                else None),

@@ -35,6 +35,7 @@ import pvlib
 from geopy.distance import geodesic
 
 from . import solar as _solar
+from . import gfs as _gfs
 from . import solar_ecmwf as _se
 
 logger = logging.getLogger(__name__)
@@ -329,6 +330,18 @@ def preprocess_pv_park(path: str, config: dict, freq: str = '30min', features: d
             df = _se.add_ecmwf_geometry_features(df, need)
         except (FileNotFoundError, ValueError) as exc:
             logger.warning('park %s: ECMWF solar not loaded (%s)', park_id, exc)
+
+    # GFS (utils/gfs.py): <gfs_solar_path>/{06,12}/<prefix><id>/<lat>_<lon>_solar_sl.parquet; a configured
+    # but missing source raises, unlike ECMWF above
+    if _gfs.enabled(params_cfg, features):
+        gfs_feats = _gfs.requested(features)
+        gfs_path = data_cfg.get('gfs_solar_path')
+        if not gfs_path:
+            raise ValueError('gfs_* features requested but data.gfs_solar_path is not set')
+        g = _gfs.load_points(gfs_path, f"{data_cfg.get('nwp_site_prefix', 'park_')}{base_id(park_id)}", '_solar_sl.parquet',
+                             meta['lat'], meta['lon'], gfs_feats, int(params_cfg.get('next_n_grid_gfs', 1)),
+                             None if lower is None else lower - pd.Timedelta(days=1), upper)
+        df = _gfs.merge(df, g, gfs_feats)
 
     df = _add_park_irradiance(df, meta)
 

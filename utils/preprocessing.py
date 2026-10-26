@@ -25,6 +25,7 @@ from sklearn.decomposition import PCA
 
 from . import meteo
 from . import db_connector
+from . import gfs as _gfs
 
 
 
@@ -3036,6 +3037,21 @@ def preprocess_synth_wind_icond2(path: str,
                     )
 
             df_merged.drop(columns=['_ecmwf_st_key', '_ecmwf_ft'], inplace=True)
+
+    # 3d. GFS (utils/gfs.py): <gfs_path>/SL/{06,12}/<prefix><id>/<lat>_<lon>_wind_sl.parquet,
+    # latest GFS run <= ICON start, features gfs_wind_speed_h<NNN> / gfs_<column> with rank suffix
+    if _gfs.enabled(config['params'], features):
+        _gfs_feats = _gfs.requested(features)
+        _gfs_path = config['data'].get('gfs_path')
+        if not _gfs_path:
+            raise ValueError("gfs_* features requested but data.gfs_path is not set")
+        _icon_st = pd.to_datetime(df_merged['starttime'], utc=True)
+        _df_gfs = _gfs.load_points(
+            os.path.join(_gfs_path, 'SL'), f"{config['data'].get('nwp_site_prefix', '')}{station_id}",
+            '_wind_sl.parquet', station_lat, station_lon, _gfs_feats,
+            int(config['params'].get('next_n_grid_gfs', 1)),
+            lower=_icon_st.min() - pd.Timedelta(days=1), upper=_icon_st.max())
+        df_merged = _gfs.merge(df_merged, _df_gfs, _gfs_feats, left_labelled=False)
 
     # 4. Set MultiIndex strictly: ['starttime', 'forecasttime', 'timestamp']
     if 'starttime' in df_merged.columns and 'forecasttime' in df_merged.columns and 'timestamp' in df_merged.columns:

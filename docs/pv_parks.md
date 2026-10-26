@@ -47,6 +47,17 @@ Intervallbeginn (`utils.solar.load_sl_grid_point`). Geprüft am Park SEL90032319
 korrigierte CAMS des Release 0,957 bei Versatz 0 gegen 0,941/0,949 bei ±1 Schritt. Läufe mit nur stündlicher Strahlung
 (Juli/August 2023) fallen bei `30min` heraus (15 von 128 im Smoke).
 
+## GFS (2026-10-26)
+
+`data.gfs_solar_path` (`${DATA_ROOT}/nwp_ready_pv/gfs/SOLAR`), `'gfs'` in `params.nwp_models` und `gfs_*`-Features
+(`utils/gfs.py`): `gfs_ghi` = `dswrf` (Stundenmittel, das auf dem Lead endet) und `gfs_<Spalte>` unverändert, z. B.
+`gfs_tcc`, `gfs_lcc`, `gfs_t_2m`, `gfs_tp`, `gfs_albdo` (Wolken und Albedo in %). Zuordnung wie ECMWF: Strahlung
+`lead = floor(h) + 1`, Momentanfelder `floor(h)`, im 30-min-Raster wird der Stundenwert gehalten; Lauf = jüngster GFS-Lauf
+(06/12) ≤ ICON-Start. GFS hat keine Direkt-/Diffusaufteilung und keine Clear-Sky-Größe, deshalb (noch) kein `gfs_gti`;
+Feature Engineering später. Ein fehlendes GFS-Verzeichnis bricht ab, statt die Features still wegzulassen.
+Geprüft an SEL981208943378 (ICON 12 UTC, Aug 2023, tagsüber): Korrelation `gfs_ghi` mit `ghi_nwp` 0,92, mit
+`ecmwf_ghi` 0,93, mit der Leistung 0,91 (ICON 0,91).
+
 ## Configs und Smoke
 
 `configs/pv_parks/config_pv_v1_cl_smoke.yaml` (3 Release-Parks, 1 Epoche) und `config_trianel_meter_smoke.yaml`

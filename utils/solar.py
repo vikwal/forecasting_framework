@@ -1285,7 +1285,7 @@ def _resolve_nwp_features(features: dict, params_cfg: dict) -> list[str]:
     for feat in (features.get('known', []) or []) + (features.get('observed', []) or []):
         if feat in measurement_like or feat in SOLAR_GEOMETRY_FEATURES:
             continue
-        if feat.endswith('_next') or feat.startswith('ecmwf_'):
+        if feat.endswith('_next') or feat.startswith(('ecmwf_', 'gfs_')):
             continue
         if feat not in out:
             out.append(feat)

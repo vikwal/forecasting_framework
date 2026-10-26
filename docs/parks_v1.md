@@ -24,9 +24,31 @@ python train_cl.py -c configs/parks_v1/config_parks_v1_cl -m tft         # 90 Pa
 | `params.static_categorical: [park_id]` | Park-ID als kategoriales statisches Feature: ganzzahliger Code (Position in `files`+`val_files`+`test_files`, `preprocessing.static_categories`), unskaliert, im TFT `nn.Embedding` statt `nn.Linear(1, d)` (`models._static_cardinalities`); nur `tft` |
 | `data.ecmwf_layout: site_runs` | ECMWF aus `<ecmwf_path>/SL/{00,12}/<prefix><id>/<lat>_<lon>_wind_sl.parquet` (`_fetch_ecmwf_data_from_site_runs`) |
 
+| `data.gfs_path`, `params.next_n_grid_gfs` | GFS 0,25° aus `<gfs_path>/SL/{06,12}/<prefix><id>/<lat>_<lon>_wind_sl.parquet` (`utils/gfs.py`, 2026-10-26); aktiv mit `'gfs'` in `params.nwp_models` und `gfs_*`-Features |
+
 Die Laufzuordnung bleibt die des Wind-Pfads: ICON-Lauf < 12 UTC → ECMWF 00 UTC desselben Tages
 (bei ICON 09 UTC ohne Blick in die Zukunft). Alle neuen Schlüssel gehen in den Cache-Hash ein,
 aber nur wenn gesetzt — bestehende Cache-Einträge bleiben gültig.
+
+### GFS (2026-10-26)
+
+Features `gfs_wind_speed_h<NNN>` (|u, v| in 10/20/30/40/50/80/100 m; über 100 m hat GFS nichts) und
+`gfs_<Spalte>` unverändert (`gust`, `temp2m`, `dew_point2m`, `relhum2m`, `sp`, `tsfc`, `hpbl`), Rang-Suffix
+`_<n>` wie bei ECMWF. Lauf: der jüngste GFS-Lauf ≤ ICON-Start (ICON 06/09 → GFS 06, ICON 12/15 → GFS 12,
+vor 06 der 12er des Vortags); die Dateien haben Leads 0–57 h, ein 48-h-ICON-Horizont ist immer gedeckt.
+Fehlt ein konfiguriertes GFS-Verzeichnis, bricht das Laden ab (ECMWF warnt nur). Beispiel:
+
+```yaml
+data:
+  gfs_path: !ENV '${DATA_ROOT}/nwp_ready/gfs'
+params:
+  known_features: [wind_speed_h78, wind_speed_h127, wind_speed_h184, gfs_wind_speed_h100, gfs_wind_speed_h50]
+  nwp_models: ['icon-d2', 'gfs']
+  next_n_grid_gfs: 1
+```
+
+Geprüft am Park SEL900568481641 (ICON 12 UTC, 2023-07-24 … 08-25, 33 Läufe, alle vollständig): Korrelation
+`gfs_wind_speed_h100` mit ICON `wind_speed_h127` 0,84, mit ECMWF h100 0,87. Tests: `tests/test_gfs.py`.
 
 ## Konfiguration `configs/parks_v1/config_parks_v1_cl.yaml`
 
