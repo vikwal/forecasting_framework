@@ -329,28 +329,78 @@ def _take(X, mask):
     return X[mask]
 
 
+def _station_of(key, ids: set) -> str:
+    """Station id of a dataset key (file path / stem): the one id that is part of the key's basename."""
+    base = os.path.basename(str(key))
+    stem = os.path.splitext(base)[0]
+    hits = [i for i in ids if i == stem or stem.endswith('_' + i)]
+    if len(hits) != 1:
+        hits = [i for i in ids if i in base]  # substring fallback (e.g. ids with a suffix)
+    if len(hits) != 1:
+        raise ValueError(f"hpo.station_folds: dataset key {key!r} matches {len(hits)} station ids ({hits[:3]})")
+    return hits[0]
+
+
 def kfolds_by_dates(prepared_datasets: List[Dict[str, Any]],
                     boundaries: List[str],
-                    horizon_hours: int) -> List:
+                    horizon_hours: float,
+                    station_groups: List[List[str]] = None,
+                    keys: List[str] = None,
+                    fold_mode: str = 'expanding') -> List:
     """Expanding-window folds with fixed dates (hpo.fold_boundaries [b_0, ..., b_k]).
-
     Fold i validates on the samples issued in [b_i, b_i+1) and trains on every sample whose
     forecast horizon ends before b_i (issue time + horizon_hours <= b_i), so no training target
     lies in the validation period. Applied per station, then concatenated (same layout as
     kfolds_with_per_file_min_train_len).
+
+    station_groups (hpo.station_folds, one id list per fold): fold i validates only the stations
+    of group i and trains on all other stations, i.e. disjoint station folds (as in the CAMS
+    correction model) rotating together with the expanding window; `keys` are the dataset keys
+    (file paths) in the order of prepared_datasets, matched to the ids by basename.
+
+    fold_mode (hpo.fold_mode): 'expanding' (default) as above; 'fixed_window' needs exactly two
+    boundaries [b_0, b_1] and station_groups: every fold trains on the other groups with
+    issue + horizon <= b_0 and validates its own group in [b_0, b_1), i.e. the time split is the
+    same for all folds and only the stations rotate (spatial CV, transfer to unseen sites).
     """
     b = [pd.Timestamp(x) for x in boundaries]
     b = [x.tz_localize('UTC') if x.tz is None else x.tz_convert('UTC') for x in b]
     if len(b) < 2 or any(x >= y for x, y in zip(b, b[1:])):
         raise ValueError(f"hpo.fold_boundaries must be >= 2 increasing dates, got {boundaries}")
+    if fold_mode not in ('expanding', 'fixed_window'):
+        raise ValueError(f"hpo.fold_mode must be 'expanding' or 'fixed_window', got {fold_mode!r}")
+    fixed = fold_mode == 'fixed_window'
+    if fixed:
+        if len(b) != 2:
+            raise ValueError(f"hpo.fold_mode 'fixed_window' needs exactly two fold_boundaries, got {boundaries}")
+        if not station_groups:
+            raise ValueError("hpo.fold_mode 'fixed_window' needs hpo.station_folds (one station list per fold)")
+    n_folds = len(station_groups) if fixed else len(b) - 1
     horizon = pd.Timedelta(hours=horizon_hours)
+    groups = None
+    if station_groups is not None:
+        if not fixed and len(station_groups) != len(b) - 1:
+            raise ValueError(f"hpo.station_folds needs one station list per fold ({len(b) - 1}), got {len(station_groups)}")
+        if keys is None or len(keys) != len(prepared_datasets):
+            raise ValueError("hpo.station_folds needs the dataset keys (one per prepared dataset)")
+        groups = [set(str(x) for x in g) for g in station_groups]
+        ids = set().union(*groups)
+        if sum(len(g) for g in groups) != len(ids):
+            raise ValueError("hpo.station_folds: a station is in more than one fold")
+        station = [_station_of(k, ids) for k in keys]
+        unused = ids - set(station)
+        if unused:
+            raise ValueError(f"hpo.station_folds: {len(unused)} station ids match no dataset "
+                             f"(typo or missing file?): {sorted(unused)[:5]}")
     folds = []
-    for i in range(len(b) - 1):
+    for i in range(n_folds):
+        lo, hi = (b[0], b[1]) if fixed else (b[i], b[i + 1])
         tr_X, tr_y, va_X, va_y = [], [], [], []
-        for d in prepared_datasets:
+        for j, d in enumerate(prepared_datasets):
             t = _sample_times(d['index_train'])
-            tr = np.asarray(t + horizon <= b[i])
-            va = np.asarray((t >= b[i]) & (t < b[i + 1]))
+            in_val = groups is None or station[j] in groups[i]
+            tr = np.asarray(t + horizon <= lo) & (groups is None or not in_val)
+            va = np.asarray((t >= lo) & (t < hi)) & in_val
             if tr.any():
                 tr_X.append(_take(d['X_train'], tr))
                 tr_y.append(d['y_train'][tr])
@@ -365,10 +415,16 @@ def kfolds_by_dates(prepared_datasets: List[Dict[str, Any]],
         for x in va_X[1:]:
             X_va = tools.concatenate_data(old=X_va, new=x)
         y_tr, y_va = np.concatenate(tr_y), np.concatenate(va_y)
-        logging.info(f"Date fold {i + 1}: train issue + {horizon_hours} h <= {b[i].date()} ({len(y_tr)} samples), "
-                     f"val [{b[i].date()}, {b[i + 1].date()}) ({len(y_va)} samples)")
+        logging.info(f"Date fold {i + 1} ({fold_mode}): train issue + {horizon_hours} h <= {lo.date()} ({len(y_tr)} samples), "
+                     f"val [{lo.date()}, {hi.date()}) ({len(y_va)} samples)"
+                     + (f", val stations {len(groups[i])}" if groups else ""))
         folds.append(((X_tr, y_tr), (X_va, y_va)))
     return folds
+
+
+def horizon_hours(config: dict) -> float:
+    """model.horizon counts steps of data.freq (handle_freq); the fold gap needs hours."""
+    return float(int(config['model']['horizon']) * pd.Timedelta(config.get('data', {}).get('freq', '1h')) / pd.Timedelta('1h'))
 
 
 def fold_boundaries(config: dict) -> list:
@@ -389,15 +445,23 @@ def client_folds(prepared_datasets: List[Dict[str, Any]], config: dict) -> List:
     """Folds of one client (or of the pooled stations): date folds with hpo.fold_boundaries,
     otherwise positional folds with hpo.kfolds / hpo.min_train_date."""
     if fold_boundaries(config):
-        return kfolds_by_dates(prepared_datasets, boundaries=config['hpo']['fold_boundaries'],
-                               horizon_hours=int(config['model']['horizon']))
+        hpo = config['hpo']
+        if hpo.get('station_folds') or hpo.get('fold_mode', 'expanding') != 'expanding':
+            raise ValueError("per-client folds cannot rotate stations: hpo.station_folds / "
+                             "hpo.fold_mode 'fixed_window' are only supported by hpo_cl.py")
+        return kfolds_by_dates(prepared_datasets, boundaries=hpo['fold_boundaries'],
+                               horizon_hours=horizon_hours(config))
     return kfolds_with_per_file_min_train_len(prepared_datasets, n_splits=config['hpo']['kfolds'],
                                               min_train_date=config['hpo'].get('min_train_date'))
 
 
 def n_folds(config: dict) -> int:
+    """Number of CV folds: station groups (fixed_window), date intervals (expanding) or hpo.kfolds."""
+    hpo = config['hpo']
     b = fold_boundaries(config)
-    return len(b) - 1 if b else int(config['hpo']['kfolds'])
+    if b and hpo.get('fold_mode', 'expanding') == 'fixed_window':
+        return len(hpo.get('station_folds') or [])
+    return len(b) - 1 if b else int(hpo['kfolds'])
 
 
 def _sampler_seed(random_seed):

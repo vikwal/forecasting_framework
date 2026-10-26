@@ -28,7 +28,7 @@ import torch.multiprocessing
 torch.set_float32_matmul_precision('high')
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-from utils import preprocessing, tools, hpo, eval, vsn
+from utils import preprocessing, tools, hpo, eval, vsn, finetune
 
 
 def main() -> None:
@@ -51,6 +51,14 @@ def main() -> None:
     parser.add_argument('--train-start', default=None,
                         help='Override data.train_start (YYYY-MM-DD, training-length study); result and model '
                              'files get the suffix _ts<YYYYMMDD>, the HPO study name stays unchanged')
+    parser.add_argument('--init-model', default=None,
+                        help='Few-shot fine-tuning: start from this saved state dict (models/<study>.pt) with its '
+                             'scaler (models/scaler/scaler_<study>.pkl or --init-scaler); the scaler is not refitted')
+    parser.add_argument('--init-scaler', default=None,
+                        help='Scaler pickle for --init-model (default: derived from the model path)')
+    parser.add_argument('--finetune-days', type=int, default=None,
+                        help='Few-shot window: train on the N days before data.test_start (sets data.train_start/'
+                             'train_end); result and model files get the suffix _ft<N>d')
     args = parser.parse_args()
 
     os.makedirs('logs', exist_ok=True)
@@ -98,6 +106,15 @@ def main() -> None:
     params = config['params']
     config = tools.handle_freq(config=config)
     output_dim = config['model']['output_dim']
+    if args.finetune_days is not None:
+        config['data']['train_start'], config['data']['train_end'] = finetune.window(
+            config['data']['test_start'], args.finetune_days, freq, config['model']['horizon'],
+            config['data'].get('forecast_hours'))
+        seed_tag += f'_ft{args.finetune_days}d'
+        logging.info("Few-shot window: runs %s .. %s", config['data']['train_start'], config['data']['train_end'])
+    init_weights, init_scalers = None, None
+    if args.init_model:
+        init_weights, init_scalers = finetune.load_init(args.init_model, args.init_scaler)
     lookback = config['model']['lookback']
     horizon = config['model']['horizon']
 
@@ -368,7 +385,12 @@ def main() -> None:
             fit_scaler_y = any(c != 'power' for c in target_cols)  # power is pre-normalised to [0,1]
 
             _skipped_scaler = []
-            for key, df in tqdm(dfs.items(), desc="Fitting Global Scaler"):
+            if init_scalers is not None:
+                global_scaler_x, _init_sy = init_scalers
+                if _init_sy is not None:
+                    global_scaler_y = _init_sy
+                logging.info("Scalers taken from the init model, not refitted on the fine-tuning window.")
+            for key, df in tqdm(dfs.items() if init_scalers is None else (), desc="Fitting Global Scaler"):
                 df_temp = df.copy()
 
                 # For non-TFT models, create lag features before fitting scaler
@@ -468,6 +490,9 @@ def main() -> None:
                 )
                 X_train, y_train, X_test, y_test, test_data, _ = tools.combine_datasets_efficiently(data_generator)
 
+            if X_train is None or y_train is None or len(y_train) == 0:
+                raise ValueError("No training windows: every station was skipped in the training window "
+                                 f"{period_config['data'].get('train_start')} .. {period_config['data'].get('train_end')}")
             # Note: Don't delete dfs yet - needed for evaluation pipeline later
             gc.collect()
             logging.debug("Data processing completed.")
@@ -557,7 +582,9 @@ def main() -> None:
                     val=(X_test, y_test),
                     hyperparameters=hyperparameters,
                     config=period_config,
-                    device=device
+                    device=device,
+                    initial_weights=init_weights,
+                    trainable=period_config['model'].get('finetune_trainable') if init_weights is not None else None,
                 )
 
             # Store model if training once

@@ -118,9 +118,32 @@ class DataCache:
         # hpo.fold_boundaries only hashed when set (existing cache ids unchanged)
         if config.get('hpo', {}).get('fold_boundaries'):
             hash_data['hpo']['fold_boundaries'] = [str(x) for x in config['hpo']['fold_boundaries']]
+        if config.get('hpo', {}).get('station_folds'):
+            hash_data['hpo']['station_folds'] = [sorted(str(x) for x in g) for g in config['hpo']['station_folds']]
+        # hpo.fold_mode 'fixed_window' (2026-10-18): same time split for every fold, stations rotate;
+        # only hashed when set, so every existing (expanding) cache id is unchanged
+        if config.get('hpo', {}).get('fold_mode', 'expanding') != 'expanding':
+            hash_data['hpo']['fold_mode'] = str(config['hpo']['fold_mode'])
         # power targets: own history stays raw since 2026-10-13 (invalidates the z-scored entries)
         if 'power' in preprocessing.get_target_cols(config):
             hash_data['own_history_scaling'] = 'raw'
+        # 2026-10-17: test windows start at test_start (extension in steps, not hours) and
+        # wind_speed_nwp_<rank> is a known feature -- both only change sub-hourly data / the SL
+        # paths; keyed only there so the hourly wind caches stay valid
+        if str(config['data'].get('freq', '1h')) != '1h':
+            hash_data['test_window_fix'] = '2026-10-17'
+        if config['data'].get('use_case') in ('pv_park', 'solar'):
+            hash_data['wind_speed_nwp_match'] = 'exact_fallback'
+            hash_data['pv_sources'] = {
+                'target_source': config['data'].get('target_source'),
+                'twin_files': sorted(config['data'].get('twin_files') or []),
+                'twin_path': config['data'].get('twin_path'),
+                'meter_files': sorted(config['data'].get('meter_files') or []),
+                'meter_path': config['data'].get('meter_path'),
+                'nwp_path': config['data'].get('nwp_path'),
+                'forecast_hours': tuple(str(h) for h in (config['data'].get('forecast_hours') or [])),
+                'sub_hourly_fill': config['params'].get('sub_hourly_fill'),
+            }
         cv_mode = str(config.get('hpo', {}).get('cv_mode', 'temporal')).lower()
         if cv_mode == 'spatial':
             hash_data['cv_mode'] = 'spatial'
@@ -559,7 +582,8 @@ def _fit_global_scaler_x(dfs, config, logger, fit_until=None, restrict_train_end
         cutoff = pd.Timestamp(cutoff) if cutoff is not None else None
         is_nwp = isinstance(df.index, pd.MultiIndex) and 'starttime' in df.index.names
         if is_nwp and cutoff is not None:
-            cutoff = cutoff - pd.Timedelta(hours=history_length)
+            # lookback counts steps of data.freq (not hours): 96 steps at 30 min = 48 h
+            cutoff = cutoff - pd.Timedelta(config['data'].get('freq', '1h')) * history_length
 
         train_end, test_end = preprocessing.split_bounds(config)
         if restrict_train_end and fit_until is not None:
@@ -957,7 +981,10 @@ def create_or_load_preprocessed_data(config: Dict,
             combined_kfolds = hpo.kfolds_by_dates(
                 prepared_datasets=prepared_datasets,
                 boundaries=config['hpo']['fold_boundaries'],
-                horizon_hours=int(config['model']['horizon'])
+                horizon_hours=hpo.horizon_hours(config),
+                station_groups=config['hpo'].get('station_folds'),
+                keys=list(dfs.keys()),
+                fold_mode=config['hpo'].get('fold_mode', 'expanding'),
             )
         else:
             combined_kfolds = hpo.kfolds_with_per_file_min_train_len(

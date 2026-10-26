@@ -302,7 +302,14 @@ def _get_data_from_config_files(config: dict,
             except Exception as e:
                 logging.error(f"Error loading Trianel park {file}: {e}")
                 return file, None
-        if _raw_station_mode:
+        if _use_case == 'pv_park':
+            # PV parks: the directory depends on the park (release, twins, meters), see utils.pv_parks.park_source
+            from . import pv_parks as _pv_parks
+            file_path = _pv_parks.resolve_path(data_config, str(file))
+            if not os.path.exists(file_path):
+                logging.warning(f"File not found: {file_path}")
+                return file, None
+        elif _raw_station_mode:
             file_path = os.path.join(base_path, f"Station_{file}.parquet")
             if not os.path.exists(file_path):
                 logging.warning(f"File not found: {file_path}")
@@ -322,19 +329,27 @@ def _get_data_from_config_files(config: dict,
                 file_config['params']['station_turbine_type'] = station_turbine_map[station_id]
             else:
                 file_config['params']['random_seed'] = original_seed + file_idx
-                logging.warning(f"Station {station_id} not found in assignments CSV. "
-                                f"Falling back to seed {file_config['params']['random_seed']}")
+                if _use_case not in ('pv', 'pv_park', 'solar'):   # turbine types only exist for wind
+                    logging.warning(f"Station {station_id} not found in assignments CSV. "
+                                    f"Falling back to seed {file_config['params']['random_seed']}")
 
             if _use_case:
                 _is_wind = _use_case == 'wind'
                 _is_solar = _use_case == 'solar'
                 _is_pv = _use_case == 'pv'
+                _is_pv_park = _use_case == 'pv_park'
             else:
+                _is_pv_park = False
                 _is_wind = 'wind' in base_path.lower()
                 _is_solar = False
                 _is_pv = 'pv' in base_path.lower() or 'solar' in base_path.lower()
 
-            if _is_solar:
+            if _is_pv_park:
+                # PV parks (synthetic release / Trianel twins and meters): utils.pv_parks
+                from . import pv_parks as _pv_parks
+                df = _pv_parks.preprocess_pv_park(path=file_path, config=file_config, freq=freq,
+                                                  features=features.copy() if features else None, park_id=str(file))
+            elif _is_solar:
                 from . import solar as _solar
                 df = _solar.preprocess_solar_icond2(path=file_path, config=file_config,
                                                     freq=freq,
@@ -621,9 +636,6 @@ def pipeline(data: pd.DataFrame,
     gc.collect()
 
     df = knn_imputer(data=df, n_neighbors=config['data']['n_neighbors'])
-    with open('/tmp/ecmwf_debug.txt', 'a') as _dbg:
-        _ecmwf_after = [c for c in df.columns if c.startswith('ecmwf_')]
-        _dbg.write(f'after_knn: {list(df.columns)} ecmwf={_ecmwf_after}\n')
     t_0 = 0 if config['eval']['eval_on_all_test_data'] else config['eval']['t_0']
 
     # Multi-Target: data.target_cols hat Vorrang. Alle Aufrufer reichen ohnehin
@@ -4194,6 +4206,24 @@ def get_features(config: dict = None) -> Dict[str, list]:
         }
     return features_dict
 
+def _index_step(timestamps) -> pd.Timedelta:
+    """Step of a (possibly repeated) timestamp level: median gap between its unique sorted values, 1 h if undefined."""
+    t = pd.DatetimeIndex(pd.Index(timestamps).unique()).sort_values()
+    step = pd.Series(t).diff().median() if len(t) > 1 else pd.NaT
+    return pd.Timedelta(hours=1) if pd.isna(step) or step <= pd.Timedelta(0) else step
+
+
+def test_windows_from(index, test_start) -> np.ndarray:
+    """Boolean mask of the windows (index = issue times) issued at or after test_start; tz-naive values compare in UTC."""
+    idx = pd.DatetimeIndex(index)
+    t0 = pd.Timestamp(test_start)
+    if idx.tz is not None and t0.tz is None:
+        t0 = t0.tz_localize('UTC')
+    elif idx.tz is None and t0.tz is not None:
+        t0 = t0.tz_convert('UTC').tz_localize(None)
+    return np.asarray(idx >= t0)
+
+
 def prepare_data_for_tft(data: pd.DataFrame,
                          history_length: int, # e.g., 72 (for 3 days history)
                          future_horizon: int, # e.g., 24 (for 24 hours forecast)
@@ -4261,16 +4291,22 @@ def prepare_data_for_tft(data: pd.DataFrame,
     # to include historical forecasts required for creating the first test windows
     is_nwp_data = isinstance(df.index, pd.MultiIndex) and 'starttime' in df.index.names
 
+    original_test_start = None
     if is_nwp_data and test_start is not None:
-        # Extend test_start backwards by history_length so the past forecast run(s)
+        # Extend test_start backwards by history_length STEPS so the past forecast run(s)
         # feeding the known window are inside the split (create_tft_sequences offsets
-        # the past run by future_len per run, covering history_length hours in total).
-        # Example: test_start='2025-08-01', history_length=48 → forecasts from '2025-07-30'.
-        original_test_start = test_start
-        test_start_adjusted = pd.Timestamp(test_start) - pd.Timedelta(hours=history_length)
+        # the past run by future_len per run, covering history_length steps in total).
+        # Example: test_start='2025-08-01', history_length=48 steps of 1 h → runs from '2025-07-30'.
+        # history_length counts steps of the data's resolution, not hours: until 2026-10-17 the
+        # extension was pd.Timedelta(hours=history_length), i.e. 96 h instead of 48 h for 96
+        # half-hour steps. The two daily runs before test_start then had their predecessor run
+        # inside the extended split and became test windows -- issued before test_start, with
+        # targets inside the training window (evaluated and early-stopped on training targets).
+        original_test_start = pd.Timestamp(test_start)
+        _step = _index_step(df.index.get_level_values('timestamp'))
+        test_start = original_test_start - history_length * _step
         logging.debug(f"NWP data detected: Extending test data start from {original_test_start} "
-                    f"to {test_start_adjusted} (history_length={history_length}h) to include required historical forecasts")
-        test_start = test_start_adjusted
+                      f"to {test_start} (history_length={history_length} steps of {_step}) to include required historical forecasts")
 
     # Use helper function for splitting which handles MultiIndex correctly
     train_df, test_df = split_data(df, train_frac, train_start, test_start, test_end, t_0,
@@ -4572,6 +4608,20 @@ def prepare_data_for_tft(data: pd.DataFrame,
         # Shape: (n_samples, future_horizon) — matches y_test shape
         logging.debug(f"NWP raw test windowed shape: {nwp_raw_test_windowed.shape}")
 
+    # Guard: no test window may be issued before the configured test_start (the extension above
+    # only exists to supply the predecessor runs of the first real test windows).
+    if original_test_start is not None and len(test_indices) > 0:
+        _keep = test_windows_from(test_indices, original_test_start)
+        if not _keep.all():
+            logging.info("%d of %d test windows issued before test_start %s dropped",
+                         int((~_keep).sum()), len(_keep), original_test_start)
+            X_known_test, X_observed_test, y_test = X_known_test[_keep], X_observed_test[_keep], y_test[_keep]
+            test_indices = test_indices[_keep]
+            if nwp_raw_test_windowed is not None:
+                nwp_raw_test_windowed = nwp_raw_test_windowed[_keep]
+            if len(y_test) == 0 and not test_split_optional:
+                raise EmptySplitError(f"No test window issued at or after test_start {original_test_start}.")
+
     has_observed = X_observed_train.ndim == 3 and X_observed_train.shape[-1] > 0
     num_train_samples = X_observed_train.shape[0] if has_observed else X_known_train.shape[0]
     num_test_samples = X_observed_test.shape[0] if has_observed else X_known_test.shape[0]
@@ -4649,8 +4699,10 @@ def prepare_features_for_tft(cols: list,
     # Handle specific feature mappings for Icon-D2 data
     for known_feat in known_future_cols:
         if known_feat == 'wind_speed_nwp':
-            # Map wind_speed_nwp to all wind_speed_h* columns
-            matching_cols = [col for col in cols if 'wind_speed_h' in col]
+            # Wind path: one column per hub height (wind_speed_h10, ...). Solar/PV SL path: a single
+            # wind_speed_nwp_<rank> column -- fall back to the exact match instead of dropping the
+            # feature silently (until 2026-10-17 every PV model trained without the configured wind speed).
+            matching_cols = [col for col in cols if 'wind_speed_h' in col] or _match_feature_cols(cols, known_feat)
             new_known_cols.extend(matching_cols)
         else:
             matching_cols = _match_feature_cols(cols, known_feat)

@@ -167,3 +167,74 @@ def test_make_pruner_percentile_before_median():
     assert isinstance(p, optuna.pruners.PercentilePruner) and p._percentile == 75.0 and p._n_startup_trials == 10
     assert isinstance(hpo.make_pruner({'use_median_pruner': True}), optuna.pruners.MedianPruner)
     assert isinstance(hpo.make_pruner({'disable_pruning': True}), optuna.pruners.NopPruner)
+
+
+def test_station_folds_rotate_validation_group_with_expanding_window():
+    """hpo.station_folds: fold i validates only group i, trains on the other stations, window still expands."""
+    ds = [_prepared('2023-07-24', '2025-07-31') for _ in range(3)]
+    keys = ['/x/synth_S1.csv', '/x/synth_S2.csv', '/x/synth_S3.csv']
+    folds = hpo.kfolds_by_dates(ds, B, 48, station_groups=[['S1'], ['S2'], ['S3']], keys=keys)
+    b = hpo.fold_boundaries(_cfg())
+    t = ds[0]['index_train']
+    for i, ((X_tr, y_tr), (X_va, y_va)) in enumerate(folds):
+        n_tr, n_va = _expected(t, b[i], b[i + 1])
+        assert len(y_tr) == 2 * n_tr and len(y_va) == n_va            # two training stations, one validation station
+        assert X_tr['static'].shape[0] == len(y_tr)
+    with pytest.raises(ValueError):                                      # one list per fold
+        hpo.kfolds_by_dates(ds, B, 48, station_groups=[['S1'], ['S2']], keys=keys)
+    with pytest.raises(ValueError):                                      # a station in two folds
+        hpo.kfolds_by_dates(ds, B, 48, station_groups=[['S1'], ['S1'], ['S3']], keys=keys)
+
+
+def test_horizon_hours_counts_steps_of_freq():
+    assert hpo.horizon_hours({'model': {'horizon': 96}, 'data': {'freq': '30min'}}) == 48.0
+    assert hpo.horizon_hours({'model': {'horizon': 48}, 'data': {}}) == 48.0
+
+
+def test_fixed_window_rotates_stations_with_one_time_split():
+    """hpo.fold_mode 'fixed_window': every fold uses [b0, b1) for validation; fold i validates group i and
+    trains the other stations on issue + horizon <= b0 only (no pre-b0 sample of the val station in training)."""
+    ds = [_prepared('2023-07-24', '2025-07-31') for _ in range(3)]
+    for j, d in enumerate(ds):                       # encode the station in y to trace where samples go
+        d['y_train'] = d['y_train'] + 1e6 * (j + 1)
+    keys = ['/x/synth_S1.parquet', '/x/synth_S2.parquet', '/x/synth_S3.parquet']
+    groups = [['S1'], ['S2'], ['S3']]
+    B2 = ['2024-08-01', '2025-08-01']
+    folds = hpo.kfolds_by_dates(ds, B2, 48, station_groups=groups, keys=keys, fold_mode='fixed_window')
+    assert len(folds) == 3
+    b0, b1 = hpo.fold_boundaries({'hpo': {'fold_boundaries': B2}})
+    t = ds[0]['index_train']
+    n_tr, n_va = _expected(t, b0, b1)
+    for i, ((X_tr, y_tr), (X_va, y_va)) in enumerate(folds):
+        assert len(y_tr) == 2 * n_tr and len(y_va) == n_va
+        assert X_tr['static'].shape[0] == len(y_tr) and X_va['static'].shape[0] == len(y_va)
+        st_tr = set((y_tr // 1e6).astype(int)); st_va = set((y_va // 1e6).astype(int))
+        assert st_va == {i + 1} and st_tr == {1, 2, 3} - {i + 1}
+    with pytest.raises(ValueError):                  # fixed_window needs exactly two boundaries
+        hpo.kfolds_by_dates(ds, B, 48, station_groups=groups, keys=keys, fold_mode='fixed_window')
+    with pytest.raises(ValueError):                  # ... and station groups
+        hpo.kfolds_by_dates(ds, B2, 48, fold_mode='fixed_window')
+    with pytest.raises(ValueError):                  # unknown mode
+        hpo.kfolds_by_dates(ds, B2, 48, station_groups=groups, keys=keys, fold_mode='rolling')
+    with pytest.raises(ValueError):                  # a key matching no station id
+        hpo.kfolds_by_dates(ds, B2, 48, station_groups=groups, keys=keys[:2] + ['/x/synth_S9.parquet'],
+                            fold_mode='fixed_window')
+    with pytest.raises(ValueError):                  # a station id matching no key
+        hpo.kfolds_by_dates(ds, B2, 48, station_groups=[['S1'], ['S2'], ['S3', 'S4']], keys=keys,
+                            fold_mode='fixed_window')
+
+
+def test_station_of_prefers_exact_stem_match():
+    ids = {'pv1', 'pv10'}
+    assert hpo._station_of('/x/synth_pv1.parquet', ids) == 'pv1'
+    assert hpo._station_of('/x/synth_pv10.parquet', ids) == 'pv10'
+    assert hpo._station_of('/x/pv10.csv', ids) == 'pv10'
+
+
+def test_n_folds_and_client_folds_follow_fold_mode():
+    cfg = _cfg(boundaries=['2024-08-01', '2025-08-01'])
+    cfg['hpo'].update({'fold_mode': 'fixed_window', 'station_folds': [['S1'], ['S2'], ['S3']]})
+    assert hpo.n_folds(cfg) == 3
+    assert hpo.n_folds(_cfg()) == 3
+    with pytest.raises(ValueError):                  # per-client folds cannot rotate stations
+        hpo.client_folds([_prepared('2023-07-24', '2025-07-31')], cfg)

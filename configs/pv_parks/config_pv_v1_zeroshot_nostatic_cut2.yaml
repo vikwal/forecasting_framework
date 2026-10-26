@@ -1,0 +1,122 @@
+# PV zero-shot, cut 2: central TFT pretrained on the 30-min synthetic release (86 parks) + the 6 synthetic Trianel twins,
+# early stopping on 4 synthetic parks (val_files), evaluated without any training on the Trianel METERS (holdout_files, *_meter)
+# in the test window. Train runs up to 2024-01-31 23:30, test 2024-02-01 .. 2024-04-30. Features: geometry-invariant POA irradiance (docs/pv_parks.md).
+data:
+  use_case: 'pv_park'
+  path: !ENV '${DATA_ROOT}/synthetic/solar/parks_pv_v1_30min'
+  target_source: 'synthetic'
+  files: ['SEL900323191631', 'SEL900727412318', 'SEL902988132653', 'SEL903021016701', 'SEL903112346632', 'SEL905541554206', 'SEL906253042531', 'SEL908195388685', 'SEL910440791607', 'SEL912941791223', 'SEL913435527427', 'SEL913725723355', 'SEL913949745287', 'SEL916927956613', 'SEL917002969412', 'SEL917609541714', 'SEL918805709564', 'SEL918941507185', 'SEL920468626324', 'SEL923506216679', 'SEL924467964630', 'SEL925785902366', 'SEL925918106173', 'SEL926864286896', 'SEL928880976577', 'SEL931358182929', 'SEL934117801147', 'SEL935324856036', 'SEL935670133676', 'SEL937797613147', 'SEL940123145151', 'SEL940411400092', 'SEL941135609693', 'SEL942086318702', 'SEL943207528444', 'SEL944337893730', 'SEL945364837681', 'SEL946360652124', 'SEL946560347417', 'SEL946686841516', 'SEL946766312844', 'SEL946986920331', 'SEL948216398835', 'SEL948556521467', 'SEL948807179706', 'SEL950501535269', 'SEL951806357419', 'SEL953271139606', 'SEL953742042183', 'SEL953772954821', 'SEL953831279285', 'SEL954870838563', 'SEL955061852894', 'SEL957229479110', 'SEL958543212766', 'SEL959731076627', 'SEL959952274758', 'SEL961760100570', 'SEL963887911169', 'SEL966692449001', 'SEL968201731829', 'SEL968350186501', 'SEL968421274298', 'SEL968423559874', 'SEL968513427397', 'SEL968529220807', 'SEL969089055946', 'SEL969719546554', 'SEL972076685880', 'SEL973347155675', 'SEL973553533168', 'SEL978748582556', 'SEL978764131202', 'SEL981208943378', 'SEL981828226431', 'SEL981946007219', 'SEL983009290071', 'SEL983846005258', 'SEL984175261216', 'SEL985476676167', 'SEL988590533040', 'SEL988863759252', 'SEL989101602927', 'SEL989849702163', 'SEL990317510470', 'SEL991206873119', 'SEL992542797619', 'SEL993703977512', 'SEL994133611489', 'SEL996353761180'] 
+  twin_files: ['pv1', 'pv2', 'pv3', 'pv5', 'pv6', 'pv7']
+  twin_path: !ENV '${DATA_ROOT}/synthetic/solar/trianel_twins_30min'
+  meter_files: ['pv1_meter', 'pv2_meter', 'pv3_meter', 'pv5_meter', 'pv6_meter', 'pv7_meter']
+  meter_path: !ENV '${DATA_ROOT}/synthetic/solar/trianel_twins_30min'
+  holdout_files: ['pv1_meter', 'pv2_meter', 'pv3_meter', 'pv5_meter', 'pv6_meter', 'pv7_meter']
+  nwp_path: !ENV '${DATA_ROOT}/nwp_ready_pv/icon-d2'
+  nwp_site_prefix: 'park_'
+  forecast_hours: ['09']
+  ecmwf_solar_path: !ENV '${DATA_ROOT}/nwp_ready_pv/ecmwf/SOLAR'
+  freq: '30min'
+  target_col: 'power'
+  train_frac: 1
+  val_frac: 0.0
+  train_start: '2023-07-24'
+  train_end: '2024-02-29 23:30'
+  test_start: '2024-03-01'
+  test_end: '2024-05-31'
+  data_cutoff: '2024-06-01'
+  retrain_interval: 1
+  eval_interval: 1
+  scale_x: True
+  scale_y: False
+  lag_in_col: False
+  n_neighbors: 5
+  use_pca: False
+  pca_components: 3
+
+params:
+  icond2_features: ['ghi_nwp', 'dhi_nwp', 'bhi_nwp', 't_2m', 'clct', 'h_snow', 'wind_speed_nwp']
+  known_features: ['gti_nwp', 'gti_clearsky', 'kc_gti_nwp', 'kt_nwp', 'ghi_nwp', 'dhi_nwp', 't_2m', 'clct', 'h_snow', 'wind_speed_nwp',
+                   'ecmwf_gti', 'ecmwf_kc_gti', 'ecmwf_ghi',
+                   'solar_zenith_cos', 'solar_azimuth_sin', 'solar_azimuth_cos', 'ghi_clearsky', 'hour_sin', 'hour_cos', 'doy_sin', 'doy_cos']
+  observed_features: ['power']
+  static_features: []
+  nwp_models: ['icon-d2', 'ecmwf']
+  ecmwf_features: ['ecmwf_ghi', 'ecmwf_dhi']
+  next_n_grid_points: 1
+  next_n_grid_points_ecmwf: 1
+  get_next_grid_points_method: 'geodesic_next'
+  sub_hourly_fill: 'ffill'
+  nwp_baseline_col: {power: gti_nwp}
+  next_n_stations: 0
+  random_seed: 42
+
+model:
+  num_workers: 0
+  epochs: 100
+  output_dim: 96
+  lookback: 96
+  horizon: 96
+  step_size: 96
+  batch_size: 64
+  lr: 0.0005
+  optimizer: 'adam'
+  loss: 'mse'
+  metrics: ['mae', 'rmse', 'r^2']
+  shuffle: True
+  callbacks: False
+  force_retrain: True
+  lookup_hpo: False
+  verbose: 1
+  parallelize: False
+  fl: False
+  tft:
+    n_heads: 4
+    hidden_dim: 64
+    dropout: 0.1
+    rnn_type: 'lstm'
+    n_lstm_layers: 1
+    static_embedding_dim: 32
+    quantiles: [0.5]
+    clipnorm: 7.0
+  early_stopping:
+    enabled: True
+    patience: 10
+    min_delta: 0.0001
+    monitor: 'val_rmse'
+    mode: 'min'
+    restore_best_weights: True
+  fnn: {units: 128, n_layers: 2}
+  cnn: {filters: 64, kernel_size: 3, n_cnn_layers: 4, increase_filters: False}
+  rnn: {n_rnn_layers: 2, units: 64, dropout: 0.1}
+  attention_heads: 8
+  stemgnn: {units: 32, stack_cnt: 2, multi_layer: 5, dropout: 0.5}
+
+hpo:
+  studies_path: 'studies/optuna.db'
+  objectives: [{metric: 'val_rmse', direction: 'minimize'}]
+  trials: 10
+  kfolds: 3
+  min_train_date: '2023-07-24'
+  pruning: {use_median_pruner: False, n_startup_trials: 10, n_warmup_steps: 2, interval_steps: 1, disable_pruning: True}
+  batch_size: [32, 256]
+  epochs: [10, 100]
+  n_layers: [1, 4]
+  n_cnn_layers: [1, 8]
+  n_rnn_layers: [1, 4]
+  learning_rate: [0.0001, 0.01]
+  attention_heads: [1, 8]
+  fnn: {units: [32, 256]}
+  cnn: {filters: [16, 128], kernel_size: [2, 5], increase_filters: False}
+  rnn: {units: [16, 128], dropout: [0.0, 0.5]}
+  tft: {n_heads: [1, 8], hidden_dim: [16, 128], dropout: [0.01, 0.5], n_lstm_layers: [1, 3], static_embedding_dim: [8, 64], num_quantiles: [1], clipnorm: 7.0}
+  fl: {strategy: 'fedavg', personalize: False, n_rounds: [1, 30], server_lr: [0.0001, 0.1], beta_1: [0.0, 1.0], beta_2: [0.0, 1.0], tau: [0.0001, 0.1]}
+
+eval:
+  results_path: 'results/pv_parks_zeroshot_nostatic_cut2'
+  eval_on_all_test_data: True
+  retrain_interval: 0
+  t_0: 0
+
+fl:
+  strategy: 'fedavg'
+  n_rounds: 1

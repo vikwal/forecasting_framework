@@ -1,0 +1,102 @@
+{
+ "pv_v1_hpo_transfer": {
+  "trial": 190,
+  "value": 0.04882938787341118,
+  "batch_size": 39,
+  "lr": 0.0010513539531532814,
+  "n_heads": 6,
+  "hidden_dim": 36,
+  "dropout": 0.27302997649546995,
+  "num_lstm_layers": 2
+ },
+ "pv_v1_local_clients_R0": {
+  "trial": 137,
+  "value": 0.052923768758773804,
+  "batch_size": 41,
+  "lr": 0.0031317057674203628,
+  "n_heads": 6,
+  "hidden_dim": 48,
+  "dropout": 0.09433087454265027,
+  "num_lstm_layers": 1
+ },
+ "pv_v1_local_clients_R1": {
+  "trial": 89,
+  "value": 0.04567087069153786,
+  "batch_size": 36,
+  "lr": 0.0008678941650128843,
+  "n_heads": 4,
+  "hidden_dim": 64,
+  "dropout": 0.06073987520533959,
+  "num_lstm_layers": 1
+ },
+ "pv_v1_local_clients_R2": {
+  "trial": 117,
+  "value": 0.044262249022722244,
+  "batch_size": 49,
+  "lr": 0.0006157561809478604,
+  "n_heads": 8,
+  "hidden_dim": 112,
+  "dropout": 0.3978599858743807,
+  "num_lstm_layers": 1
+ },
+ "pv_v1_local_clients_R3": {
+  "trial": 50,
+  "value": 0.04779297113418579,
+  "batch_size": 71,
+  "lr": 0.003955254402697809,
+  "n_heads": 7,
+  "hidden_dim": 28,
+  "dropout": 0.012611520926050765,
+  "num_lstm_layers": 1
+ },
+ "pv_v1_local_clients_N0": {
+  "trial": 18,
+  "value": 0.05062989890575409,
+  "batch_size": 46,
+  "lr": 0.0005279119559267126,
+  "n_heads": 3,
+  "hidden_dim": 72,
+  "dropout": 0.06387459724311288,
+  "num_lstm_layers": 2
+ },
+ "pv_v1_local_clients_N1": {
+  "trial": 58,
+  "value": 0.045272231101989746,
+  "batch_size": 38,
+  "lr": 0.0017628549290143883,
+  "n_heads": 7,
+  "hidden_dim": 112,
+  "dropout": 0.27067810605463966,
+  "num_lstm_layers": 1
+ },
+ "pv_v1_local_clients_N2": {
+  "trial": 47,
+  "value": 0.048246338963508606,
+  "batch_size": 36,
+  "lr": 0.0003931537632191395,
+  "n_heads": 2,
+  "hidden_dim": 128,
+  "dropout": 0.4122445067311058,
+  "num_lstm_layers": 1
+ },
+ "pv_v1_local_clients_N3": {
+  "trial": 24,
+  "value": 0.04755759611725807,
+  "batch_size": 35,
+  "lr": 0.004635386171448609,
+  "n_heads": 5,
+  "hidden_dim": 45,
+  "dropout": 0.03808588622619957,
+  "num_lstm_layers": 1
+ },
+ "pv_v1_hpo_fl80": {
+  "trial": 168,
+  "value": 0.04748013615608215,
+  "batch_size": 51,
+  "lr": 0.001772668383175887,
+  "n_heads": 7,
+  "hidden_dim": 84,
+  "dropout": 0.37377589191947924,
+  "num_lstm_layers": 1
+ }
+}
