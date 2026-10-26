@@ -67,10 +67,13 @@ VAL = {
     "dcrnn_rep3":     [f"rep3_dcrnn_fold{i}" for i in (1, 2, 3)],
     "dcrnn_idw_rep2": [f"rep2_dcrnn_idw_alt_fold{i}" for i in (1, 2, 3)],
     "dcrnn_idw_rep3": [f"rep3_dcrnn_idw_alt_fold{i}" for i in (1, 2, 3)],
+    # --- added 2026-10-26: DCRNN grid without the nine terrain descriptors (arm A, launch_notopo.sh)
+    "dcrnn_notopo":   [f"notopo_dcrnn_fold{i}" for i in (1, 2, 3)],
 }
 TEST = {
     "dcrnn":      ["testmode_dcrnn"],
     "dcrnn_idw":  ["testmode_dcrnn_idw_alt"],
+    "dcrnn_notopo": ["testmode_dcrnn_notopo"],
     "mtgnn":      ["testmode_mtgnn_nwp"],
     "dcrnn_hist": [f"testmode_dcrnn_nwp_hist_s{s}" for s in (1, 2, 3)],
     "mtgnn_hist": [f"testmode_mtgnn_nwp_hist_s{s}" for s in (1, 2, 3)],
