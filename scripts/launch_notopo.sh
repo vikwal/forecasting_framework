@@ -18,6 +18,10 @@ REPO=$PWD
 eval "$(grep -E "^export (OPTUNA_STORAGE|DATA_ROOT|ECMWF_WIND_SL_URL|WEATHER_DB_URL)=" ~/.bashrc)"
 : "${OPTUNA_STORAGE:?OPTUNA_STORAGE fehlt}"; : "${DATA_ROOT:?DATA_ROOT fehlt}"
 : "${WEATHER_DB_URL:?WEATHER_DB_URL fehlt}"; : "${ECMWF_WIND_SL_URL:?ECMWF_WIND_SL_URL fehlt}"
+# Die veroeffentlichten HPO-Studien liegen seit der DB-Bereinigung in der
+# Postgres-Datenbank optuna_archive (gleiche Zugangsdaten, anderer DB-Name);
+# optuna_db kennt cl_m-dcrnn_* nicht mehr (Lauf vom 26.10. brach damit ab).
+OPTUNA_STORAGE="${OPTUNA_STORAGE%/optuna_db}/optuna_archive"
 export OPTUNA_STORAGE DATA_ROOT ECMWF_WIND_SL_URL WEATHER_DB_URL
 mkdir -p logs
 NF=none
