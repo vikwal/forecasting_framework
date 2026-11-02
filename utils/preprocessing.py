@@ -3943,14 +3943,19 @@ def preprocess_trianel_tft(park_id: str,
     # Load only needed columns (timestamp + power_t*) to compute installed capacity
     cols_to_load = ['timestamp'] + _power_t_cols if _power_t_cols else ['timestamp']
     # Try parquet first (fast), fallback to CSV (slow)
+    # capacity_from_full_file (round 3, twin ladder): the maximum over the whole
+    # synthetic series (reaches the rated park power) instead of the first 500 h
+    _cap_rows = None if config['data'].get('capacity_from_full_file', False) else 500
     try:
         synth_file_parquet = synth_file.replace('.csv', '.parquet') if synth_file.endswith('.csv') else synth_file
         if os.path.exists(synth_file_parquet):
-            _df_cap_sample = pd.read_parquet(synth_file_parquet, columns=cols_to_load).head(500)
+            _df_cap_sample = pd.read_parquet(synth_file_parquet, columns=cols_to_load)
+            if _cap_rows is not None:
+                _df_cap_sample = _df_cap_sample.head(_cap_rows)
         else:
-            _df_cap_sample = pd.read_csv(synth_file, sep=';', usecols=cols_to_load, nrows=500)
+            _df_cap_sample = pd.read_csv(synth_file, sep=';', usecols=cols_to_load, nrows=_cap_rows)
     except Exception:
-        _df_cap_sample = pd.read_csv(synth_file, sep=';', usecols=cols_to_load, nrows=500)
+        _df_cap_sample = pd.read_csv(synth_file, sep=';', usecols=cols_to_load, nrows=_cap_rows)
 
     if _power_t_cols:
         installed_capacity = float(_df_cap_sample[_power_t_cols].sum(axis=1).max())
