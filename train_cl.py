@@ -684,6 +684,7 @@ def main() -> None:
                 )
             else:
                 park_eval = eval.evaluation_pipeline(
+                    quantiles=period_config['model'].get('tft', {}).get('quantiles'),
                     data=park_df,
                     model=model,
                     model_name=f'{args.model.upper()}',

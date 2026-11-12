@@ -90,6 +90,7 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             bidirectional=False,
             hyperparameters=hyperparameters,
             num_targets=_num_targets(config),
+            num_quantiles=len(config['model'].get('tft', {}).get('quantiles') or [0.5]),
         )
         return model
 
@@ -105,6 +106,7 @@ def get_model(config: Dict[str, Any], hyperparameters: Dict[str, Any]) -> nn.Mod
             bidirectional=False,
             hyperparameters=hyperparameters,
             num_targets=_num_targets(config),
+            num_quantiles=len(config['model'].get('tft', {}).get('quantiles') or [0.5]),
         )
         return model
 
@@ -1144,16 +1146,21 @@ class CNNRNN(nn.Module):
         bidirectional: bool,
         hyperparameters: Dict[str, Any],
         num_targets: int = 1,
+        num_quantiles: int = 1,
     ):
         super().__init__()
+        if num_quantiles > 1 and num_targets > 1:
+            raise NotImplementedError('CNNRNN: quantiles for several targets')
 
         self.n_features = n_features
+        self.num_quantiles = num_quantiles
         # output_dim ist der Vorhersagehorizont. Bei mehreren Zielgrößen gibt die
         # Ausgabeschicht horizon*n_targets Werte aus, die in forward() auf
         # (batch, horizon, n_targets) umgeformt werden.
         self.horizon = output_dim
         self.num_targets = num_targets
-        self.output_dim = output_dim * num_targets
+        # Quantile output: horizon*num_quantiles values, reshaped to (batch, horizon, num_quantiles).
+        self.output_dim = output_dim * num_targets * num_quantiles
         self.conv_type = conv_type
         self.rnn_type = rnn_type
         self.bidirectional = bidirectional
@@ -1168,6 +1175,12 @@ class CNNRNN(nn.Module):
         self.increase_filters = hyperparameters.get('increase_filters', False)
         self.conv_activation = hyperparameters.get('conv_activation', 'relu')
         self.use_attention = hyperparameters.get('use_attention', False)
+        # step_output: one output per forecast step from the RNN state at that step (the input window ends with the
+        # horizon, as in the TFT known window), instead of the whole horizon from the last state. For PV day-ahead the
+        # last-state head was about a third worse than the TFT, the step head on par with it (pv_fl_models_capacity.md).
+        self.step_output = hyperparameters.get('step_output', False)
+        if self.step_output and self.use_attention:
+            raise NotImplementedError('CNNRNN: step_output together with use_attention')
         self.attention_heads = hyperparameters.get('attention_heads', 16)
 
         # Conv stack
@@ -1218,7 +1231,8 @@ class CNNRNN(nn.Module):
             self.output_fc = None  # Will be created in forward pass
         else:
             rnn_output_size = self.units * 2 if bidirectional else self.units
-            self.output_fc = nn.Linear(rnn_output_size, self.output_dim)
+            out_per_step = num_targets * num_quantiles
+            self.output_fc = nn.Linear(rnn_output_size, out_per_step if self.step_output else self.output_dim)
 
     def forward(self, x):
         # x shape: (batch, time, features)
@@ -1251,6 +1265,10 @@ class CNNRNN(nn.Module):
                 self.output_fc = nn.Linear(input_size, self.output_dim).to(x.device)
 
             output = self.output_fc(attn_output_flat)
+        elif self.step_output:
+            rnn_output, _ = self.rnn(x)
+            output = self.output_fc(rnn_output[:, -self.horizon:, :])      # (batch, horizon, targets*quantiles)
+            return output.squeeze(-1) if output.size(-1) == 1 else output
         else:
             # Return only last time step
             rnn_output, _ = self.rnn(x)
@@ -1260,4 +1278,6 @@ class CNNRNN(nn.Module):
 
         if self.num_targets > 1:
             output = output.view(-1, self.horizon, self.num_targets)
+        elif self.num_quantiles > 1:
+            output = output.view(-1, self.horizon, self.num_quantiles)
         return output

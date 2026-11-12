@@ -1,5 +1,16 @@
 # Forecasting Framework — Claude Context
 
+## Feste Studienentscheidung: PV Early Stopping (2026-11-09)
+
+Für die PV-Sim2Real-Studie hat Viktor ES auf den Test-/Auswertungsdaten ausdrücklich bestätigt
+(aktuell reale Quantil-/Kaltstartvergleiche: Februar–Mai 2024). Laut Viktor wurde die Stabilität
+längeren Trainings mit der verwendeten Dropout-Architektur bereits in früheren Versuchen geprüft;
+er akzeptiert dieses Protokoll auch mit Blick auf den produktiven Einsatz. Diese Entscheidung
+nicht erneut diskutieren und keinen separaten ES-/Testsplit oder ein begrenztes Validierungslabelbudget
+als notwendige Folgearbeit vorschlagen, sofern Viktor das Thema nicht selbst wieder öffnet.
+Das tatsächliche Protokoll korrekt dokumentieren; bestehende Sperren anderer Testdaten beibehalten.
+Details: `~/Work/pv_sim2real/docs/experiment_protocol.md`, Abschnitt „Verbindliche ES-Entscheidung“.
+
 **Renewable Energy Forecasting** (Wind & PV) mit ML auf **ICON-D2**-NWP-Daten,
 PyTorch. Zwei Lernparadigmen: **Centralized (CL)** und **Federated (FL)**.
 Alle Experimente werden über YAML in `configs/` gesteuert
@@ -97,6 +108,10 @@ Study-Löschen mit Passwort), [fold_dashboard.md](docs/fold_dashboard.md) (räum
 **Reviews & Pläne** — `review_round2_{findings,fixes}.md`, `topo_features_review_brief.md`,
 `topo_rehpo_plan.md`, `solar_irradiance_plan.md`, `prompt_baselines_implementation.md`
 
+**PV-Quantil-Fine-Tuning** — [pv_quantile_finetuning.md](docs/pv_quantile_finetuning.md): Zero-shot, lokal, zentral und FedGradient, sieben Quantile, drei Seeds, Protokoll und Auswertung.
+
+**PV-Quantil-Kaltstart** — [pv_quantile_coldstart.md](docs/pv_quantile_coldstart.md): begrenzte eigene Trainingslabels, fünf Donorparks, lokal/zentral/FedGradient.
+
 ## Arbeitskonventionen
 
 - **Definition of Done** für eine Änderung: getestet → committed → `/sync` (push +
@@ -125,3 +140,9 @@ Study-Löschen mit Passwort), [fold_dashboard.md](docs/fold_dashboard.md) (räum
   `load_config` laut ab; in bereits offenen Terminals `source ~/.bashrc`.
 - Skalierung mit StandardScaler; der Scaler wird für den Inverse-Transform bei
   der Evaluation gespeichert.
+
+**PV synthetischer Quantiltransfer** — [pv_synthetic_transfer.md](docs/pv_synthetic_transfer.md): 60 Quellparks → acht Clients, Zero-shot/lokal/zentral/FedGradient, drei Seeds.
+
+**Synthetischer Client-Kaltstart** — [pv_synthetic_coldstart.md](docs/pv_synthetic_coldstart.md): acht Zielclients, fünf eigene Tagesbudgets, drei Methoden und Seeds.
+
+**PV-Ausschnitte, Modellgröße, CNN-LSTM, Partnerkurve** — [pv_fl_models_capacity.md](docs/pv_fl_models_capacity.md): ICON-D2-16×16 im TFT, Trainingsfit zentral/lokal, Kapazitätsreihe, CNN-LSTM mit FedPer, Partnerzahl × Monate (2026-11-12).

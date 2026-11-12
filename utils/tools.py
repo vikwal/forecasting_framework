@@ -133,8 +133,12 @@ def get_y(X_test: Any,
           scaler_y: StandardScaler = None,
           device: str = 'cpu',
           clip_negative: bool = True,
-          batch_size: int = 256) -> Tuple[np.ndarray, np.ndarray]:
+          batch_size: int = 256,
+          quantile_idx: int = None) -> Tuple[np.ndarray, np.ndarray]:
     """Get predictions from PyTorch model.
+
+    quantile_idx: with a quantile output (n, horizon[, targets], Q) keep only this quantile (the median for the
+    point metrics); without it such an output would be flattened into wrong rows below.
 
     clip_negative : bool
         Vorhersagen bei 0 abschneiden. Richtig fuer Bestrahlungsstaerken und
@@ -170,6 +174,8 @@ def get_y(X_test: Any,
                 bloecke.append(model(torch.FloatTensor(X_test[i:i + batch_size]).to(device)).cpu())
 
         y_pred = torch.cat(bloecke, dim=0).numpy() if bloecke else np.empty((0,))
+    if quantile_idx is not None and y_pred.ndim == y_test.ndim + 1:
+        y_pred = y_pred[..., quantile_idx]
 
     # Reshape if needed. Bei Multi-Target ist y_test (n, horizon, n_targets); dann
     # muss die Vorhersage genau diese Form annehmen, nicht auf 2D plattgedrückt werden.
@@ -1018,6 +1024,7 @@ def create_data_generator(dfs, config, features, scaler_x=None, scaler_y=None):
             'X_test': prepared_data['X_test'],
             'y_test': prepared_data['y_test'],
             'index_test': prepared_data['index_test'],
+            'index_train': prepared_data.get('index_train'),
             'scalers': prepared_data['scalers'],
             'nwp_raw_test': prepared_data.get('nwp_raw_test', None)
         }

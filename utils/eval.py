@@ -415,9 +415,11 @@ def evaluation_pipeline(data: pd.DataFrame,
                         nwp_residual: bool = False,
                         target_transform: str = 'none',
                         exclude_imputed: bool = False,
-                        collect: dict | None = None) -> pd.DataFrame:
+                        collect: dict | None = None,
+                        quantiles: list = None) -> pd.DataFrame:
     """
     PyTorch evaluation pipeline.
+    quantiles: model.tft.quantiles; with several quantiles the point metrics use the median quantile.
     Main difference: uses PyTorch model instead of Keras model.
 
     Multi-Target: ist ``y_test`` dreidimensional (n, horizon, n_targets), wird die
@@ -433,7 +435,10 @@ def evaluation_pipeline(data: pd.DataFrame,
                                  scaler_y=scaler_y,
                                  model=model,
                                  device=device,
-                                 clip_negative=not nwp_residual)
+                                 clip_negative=not nwp_residual,
+                                 # quantile output: point evaluation on the median quantile
+                                 quantile_idx=(min(range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5))
+                                               if quantiles and len(quantiles) > 1 else None))
 
     if y_true.ndim == 3:
         cols = target_cols or [f'target_{i}' for i in range(y_true.shape[-1])]
