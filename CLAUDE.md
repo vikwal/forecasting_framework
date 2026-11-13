@@ -146,3 +146,5 @@ Study-Löschen mit Passwort), [fold_dashboard.md](docs/fold_dashboard.md) (räum
 **Synthetischer Client-Kaltstart** — [pv_synthetic_coldstart.md](docs/pv_synthetic_coldstart.md): acht Zielclients, fünf eigene Tagesbudgets, drei Methoden und Seeds.
 
 **PV-Ausschnitte, Modellgröße, CNN-LSTM, Partnerkurve** — [pv_fl_models_capacity.md](docs/pv_fl_models_capacity.md): ICON-D2-16×16 im TFT, Trainingsfit zentral/lokal, Kapazitätsreihe, CNN-LSTM mit FedPer, Partnerzahl × Monate (2026-11-12).
+
+**PV lokales CNNRNN-Rezept** — [pv_hpo_local.md](docs/pv_hpo_local.md): J1/J2/J3, Pilot A/B, Pinball gegen MSE, Park-Split (Test + 3 Folds), HPO über Park-Folds (2026-11-13).

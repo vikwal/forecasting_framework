@@ -46,13 +46,17 @@ def snapshot(model):
     return {k:v.detach().cpu().clone() for k,v in model.state_dict().items()}
 
 
-def train(name, data, val_items, state, cfg, hp, device, seed, qs, out, factory=None):
+def train(name, data, val_items, state, cfg, hp, device, seed, qs, out, factory=None,
+          lr=3e-4, batch_size=None, weight_decay=0.0, save=True, val_fn=None):
+    """batch_size overrides the default batch (64 local, 11 per client shared); save=False writes no history or
+    checkpoints (HPO trials); val_fn(pred (n, horizon, Q), y) replaces the pinball loss as early-stopping metric (e.g.
+    MSE for a point model). The defaults reproduce the earlier studies."""
     factory = factory or (lambda: models.get_model(config=cfg, hyperparameters=hp))
     tools.set_seed(seed)
     criterion, mi = tools.make_criterion(cfg)
     model = factory().to(device)
     model.load_state_dict(state)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     clip = cfg['model']['tft']['clipnorm']
     def clip_global(opt, args, kwargs):
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
@@ -63,7 +67,7 @@ def train(name, data, val_items, state, cfg, hp, device, seed, qs, out, factory=
         entries = [(X,np.concatenate([y for _,y in data]))]
     else:
         sizes, entries = None, data
-    bs = 64 if name.startswith('local_') else 11
+    bs = batch_size or (64 if name.startswith('local_') else 11)
     workers=[]
     for i,(X,y) in enumerate(entries):
         m=factory()
@@ -80,7 +84,7 @@ def train(name, data, val_items, state, cfg, hp, device, seed, qs, out, factory=
         for it in val_items:
             pred=base.predict(model,it['X_test'],device)
             y=it['y_test']
-            weighted += pinball(pred,y,qs)*y.size
+            weighted += (val_fn(pred,y) if val_fn else pinball(pred,y,qs))*y.size
             n += y.size
         return weighted/n
     initial=validate()
@@ -108,10 +112,11 @@ def train(name, data, val_items, state, cfg, hp, device, seed, qs, out, factory=
         logging.info('%s seed %s epoch %s pinball %.6f best %s',name,seed,ep,loss,best_ep)
         if wait>=es['patience']:
             break
-    pd.DataFrame(history).to_csv(out/f'{name}_history.csv',index=False)
-    fg.save_checkpoint(str(out/f'{name}_best.pt'),{'state_dict':best_sd,'quantiles':qs,'best_epoch':best_ep})
-    fg.save_checkpoint(str(out/f'{name}_best_trained.pt'),
-        {'state_dict':trained_sd,'quantiles':qs,'best_epoch':trained_ep})
+    if save:
+        pd.DataFrame(history).to_csv(out/f'{name}_history.csv',index=False)
+        fg.save_checkpoint(str(out/f'{name}_best.pt'),{'state_dict':best_sd,'quantiles':qs,'best_epoch':best_ep})
+        fg.save_checkpoint(str(out/f'{name}_best_trained.pt'),
+            {'state_dict':trained_sd,'quantiles':qs,'best_epoch':trained_ep})
     model.load_state_dict(best_sd)
     return model,dict(variant=name,best_epoch=best_ep,epochs=ep,initial_pinball=initial,
         selected_pinball=best,best_trained_pinball=trained_best,best_trained_epoch=trained_ep,
