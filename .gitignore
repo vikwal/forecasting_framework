@@ -205,10 +205,9 @@ configs/solar_dcrnn/smoke/
 # FL checkpoints (fl.checkpoint)
 checkpoints/
 
-# Local-only: Claude commands, systemd unit templates, IAIMS26 paper workspace
+# Local-only: Claude commands, systemd unit templates
 .claude/commands/
 deploy/
-iaims26/
 # Generated outputs (scripts/wind_eval/export_paper_metrics.py, eval_testmode.py)
 /paper_export/
 /figures/

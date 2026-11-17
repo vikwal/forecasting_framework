@@ -34,7 +34,7 @@ Alle Experimente werden über YAML in `configs/` gesteuert
 Namensmuster für alles Weitere: `train_*.py`, `hpo_*.py`, `get_test_results*.py`.
 `trianel_*` gehört zum Trianel-Datensatz.
 Nicht selbsterklärende Verzeichnisse: `studies/` (Optuna-DBs), `data_cache/`
-(gehashte preprocessed Daten), `runs/`, `reports/`, `archiv/` (alte Stände, nicht in git), `iaims26/` (Paper-Arbeitsbereich, nicht in git).
+(gehashte preprocessed Daten), `runs/`, `reports/`, `archiv/` (alte Stände, nicht in git).
 
 ## Use Cases
 
