@@ -18,7 +18,7 @@
 # Hauptexperiments (ruehrt dessen Test-Split nicht an).
 #
 # RMSE der drei Laeufe sind NICHT kommensurabel — Auswertung auf gemeinsamem
-# 30-min-Raster (kgV), siehe scripts/compare_solar_raster.py
+# 30-min-Raster (kgV), siehe archiv/scripts_20261117/compare_solar_raster.py
 
 data:
   use_case: solar

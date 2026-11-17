@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 root = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(root / 'scripts'), str(root)]
+sys.path[:0] = [str(root / 'scripts' / 'pv'), str(root)]
 import pv_quantile_coldstart as m
 
 

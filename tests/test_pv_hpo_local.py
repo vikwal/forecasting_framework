@@ -1,4 +1,4 @@
-"""scripts/pv_hpo_local.py: search space, variant-B folds, model wrapper (2026-11-13)."""
+"""scripts/pv/pv_hpo_local.py: search space, variant-B folds, model wrapper (2026-11-13)."""
 import sys
 from pathlib import Path
 
@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts' / 'pv'))
 import pv_hpo_local as h  # noqa: E402
 
 

@@ -127,8 +127,8 @@ ausschließen, per Station RMSE, dann Stationsmittel. Bausteine in
 Als Vorlage nutzbar (nicht ungeprüft übernehmen — beide sind auf die vorige,
 fold-basierte Auswertung zugeschnitten):
 
-- `scripts/eval_expwin.py` — Filterung, per-Station-RMSE, Wilcoxon + Holm
-- `scripts/eval_testyear.py` — dieselbe Filterung plus zehn Abbildungen
+- `scripts/wind_eval/eval_expwin.py` — Filterung, per-Station-RMSE, Wilcoxon + Holm
+- `scripts/wind_eval/eval_testyear.py` — dieselbe Filterung plus zehn Abbildungen
   (Balken-RMSE, Fold-Streuung, gepaarte Differenz-Boxplots, Fehler über
   Prognosehorizont, über Windklasse, über Monat, Scatter, Skill-Verteilung,
   Val-gegen-Test). Läuft auf l1 (ältere pandas/matplotlib): kein
@@ -185,7 +185,7 @@ nicht auf.
 ### Configs
 
 `configs/testmode/{full,step1,step2,step3}/config_wind_<arm>_fold1.yaml`,
-erzeugt von `scripts/gen_testmode_configs.py` (idempotent, nur
+erzeugt von `scripts/wind_eval/gen_testmode_configs.py` (idempotent, nur
 `test_start`/`test_end` geändert). Dateinamen absichtlich identisch zur Basis —
 die Optuna-Auflösung strippt `_fold\d+$` nur am Zeilenende. Geprüft: 153 Train-
 und 50 Teststationen je Config, Überschneidung 0; alle fünf Studies lösen auf
@@ -232,14 +232,14 @@ Joblogs `logs/testmode/<rawname>.log`.
    auf dem 2-Tage-Schwanz an, den kein Run-Paar als Ziel hat. An
    `train_dcrnn.py` angeglichen (§ 4 des genannten Dokuments).
 
-**Preflight vor dem Start:** `scripts/preflight_testmode.py` lädt für alle 9 Configs
+**Preflight vor dem Start:** `scripts/wind_eval/preflight_testmode.py` lädt für alle 9 Configs
 Messreihen + Imputationen (ohne NWP, ohne Training) und meldet die NaN-Bilanz je
 Spalte im jeweiligen Auditfenster. Wiederholbar; das ist der Schritt, der beide
 `wind_direction`-Befunde vor dem ersten GPU-Lauf sichtbar gemacht hätte.
 
 ### Auswertung
 
-`scripts/eval_testmode.py` — Filterung wie § 14–18, per-Station-RMSE,
+`scripts/wind_eval/eval_testmode.py` — Filterung wie § 14–18, per-Station-RMSE,
 Stationsmittel, Wilcoxon + Holm über die 50 Teststationen. Zwei
 Tabellenvarianten (je Arm auf eigenen Zeilen / auf dem gemeinsamen Schnitt über
 `station_id, run_time, horizon`), dazu die Tabelle je 4-Monats-Fenster und acht
@@ -268,4 +268,4 @@ Schritt-1-HIST-Checkpoints ueber das volle Testjahr aus (`testmode_*_nwp_hist_on
 gerechnet 2026-09-05 auf l1), MOS und TFT laufen im Testjahr auf l2
 (`configs/baselines/config_wind_mos_testyear_fold1.yaml`, `configs/tft_bc/*_testyear.yaml`),
 Seed-Wiederholungen A/D' auf ws (`~/queue_scripts/seedrep_worker.sh`). Sammeln und
-exportieren: `bash scripts/collect_testyear_20260905.sh && ./frcst/bin/python scripts/export_paper_metrics.py all`.
+exportieren: `bash archiv/scripts_20261117/collect_testyear_20260905.sh && ./frcst/bin/python scripts/wind_eval/export_paper_metrics.py all`.

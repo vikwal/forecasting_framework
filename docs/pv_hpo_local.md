@@ -16,10 +16,10 @@ Code-Referenz. Plan, Entscheidungen und Ergebnisse: `~/Work/pv_sim2real/docs/pla
 
 | Datei | Inhalt |
 |---|---|
-| `scripts/pv_hpo_local.py` | Modi: `prepare`, `pilot` (A/B-Protokollvergleich ohne J3), `losscmp` (Pinball gegen MSE), `hpo` (ein Optuna-Worker einer Fold-Studie), `candidates` (Top 3 je Fold + bisheriges Rezept), `eval` (Konfigurationen × Seeds je Park; Protokoll `A` = J1 → J2 nur Pool-Parks, `final` = J1+J2 → J3 nur Testparks), `launch --stage pilot\|losscmp\|hpo\|eval` (GPU-Warteschlange `local_training.run_jobs`) |
-| `scripts/pv_park_split.py` | 179 Parks mit vollem J1: 60 Testparks (KMeans 60, je ein Park), Pool in 3 Folds (KMeans 50, Cluster auf die Folds verteilt), Auswahl der ausgewogensten von 500 Ziehungen; Merkmale Breite, Länge, Höhe, Neigung, Azimut (sin/cos), DC/AC |
-| `scripts/pv_hpo_local_pilot_report.py` | Auswertung Pilot und Verlustvergleich |
-| `scripts/pv_quantile_finetune.py` `train` | neu: `lr`, `batch_size`, `weight_decay`, `save`, `val_fn` (Defaults wie bisher) |
+| `scripts/pv/pv_hpo_local.py` | Modi: `prepare`, `pilot` (A/B-Protokollvergleich ohne J3), `losscmp` (Pinball gegen MSE), `hpo` (ein Optuna-Worker einer Fold-Studie), `candidates` (Top 3 je Fold + bisheriges Rezept), `eval` (Konfigurationen × Seeds je Park; Protokoll `A` = J1 → J2 nur Pool-Parks, `final` = J1+J2 → J3 nur Testparks), `launch --stage pilot\|losscmp\|hpo\|eval` (GPU-Warteschlange `local_training.run_jobs`) |
+| `scripts/pv/pv_park_split.py` | 179 Parks mit vollem J1: 60 Testparks (KMeans 60, je ein Park), Pool in 3 Folds (KMeans 50, Cluster auf die Folds verteilt), Auswahl der ausgewogensten von 500 Ziehungen; Merkmale Breite, Länge, Höhe, Neigung, Azimut (sin/cos), DC/AC |
+| `scripts/pv/pv_hpo_local_pilot_report.py` | Auswertung Pilot und Verlustvergleich |
+| `scripts/pv/pv_quantile_finetune.py` `train` | neu: `lr`, `batch_size`, `weight_decay`, `save`, `val_fn` (Defaults wie bisher) |
 
 ## HPO
 
@@ -32,11 +32,11 @@ Code-Referenz. Plan, Entscheidungen und Ergebnisse: `~/Work/pv_sim2real/docs/pla
 
 ```bash
 O=results/parks_pv_v4_30min/hpo_local_cnnrnn_2026-11-13_v1
-python scripts/pv_hpo_local.py launch --stage hpo --output $O --gpus 0-7 --per-gpu 3 --workers 8
-python scripts/pv_hpo_local.py candidates --output $O
-python scripts/pv_hpo_local.py launch --stage eval --name candidates_pool --parks pool --protocol A \
+python scripts/pv/pv_hpo_local.py launch --stage hpo --output $O --gpus 0-7 --per-gpu 3 --workers 8
+python scripts/pv/pv_hpo_local.py candidates --output $O
+python scripts/pv/pv_hpo_local.py launch --stage eval --name candidates_pool --parks pool --protocol A \
     --configs-json $O/hpo/candidates.json --output $O --gpus 0-7 --per-gpu 3
-python scripts/pv_hpo_local.py launch --stage eval --name test --parks test --protocol final \
+python scripts/pv/pv_hpo_local.py launch --stage eval --name test --parks test --protocol final \
     --configs-json <recipe + chosen>.json --output $O --gpus 0-7 --per-gpu 3
 ```
 

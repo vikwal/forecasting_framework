@@ -24,11 +24,15 @@ Alle Experimente werden über YAML in `configs/` gesteuert
 | `hpo_cl.py`, `hpo_fl.py` | Optuna-HPO; GPU-Launcher (`launch_*_worker.sh`) liegen in `scripts/` |
 | `geostatistics/` | **GNN-Pfad**: `train_dcrnn.py`, `train_mtgnn.py`, `train_wavenet.py`, Kriging, Variogramme, `fold_dashboard.py` |
 | `utils/` | `preprocessing.py` (Hauptpipeline, modell- und quellenabhängig), `solar.py` (Solar-Pendant), `models.py` (`get_model()`), `federated.py` (FedAvg, Ray), `fedgradient.py` (FedGradient), `hpo.py`, `eval.py`, `tools.py`, `data_cache.py` (Hash-Keys), `meteo.py` (pvlib), `db_connector.py` (PostGIS) |
-| `*_dashboard.py` | `optuna_dashboard.py` (8504), `geostatistics/fold_dashboard.py` (8511), `eval_dashboard.py` |
+| `*_dashboard.py` | `optuna_dashboard.py` (8504), `geostatistics/fold_dashboard.py` (8511) |
+| `scripts/ops/` | Host-Betrieb: `sync.sh`, `status.sh`, `sync_results.sh`, HPO-Worker-Launcher und -Wächter |
+| `scripts/wind_eval/` | Wind-Paper: Testmode/Testjahr, Retrain, `export_paper_metrics.py` |
+| `scripts/parks_v1/` | Wind-Parks FL: Inputs, FL-Szenarien, Fold-Finals, Holdout |
+| `scripts/pv/` | PV-Studien (`pv_*`), aktuelle Arbeit |
 | `deploy/` | systemd-Unit-Vorlagen, **nicht in git** (host-weite Dienstübersicht: `~/docs/services.md`) |
 
-Namensmuster für alles Weitere: `train_*.py`, `hpo_*.py`, `get_test_results*.py`,
-`check_*.py`. `trianel_*` gehört zum Trianel-Datensatz.
+Namensmuster für alles Weitere: `train_*.py`, `hpo_*.py`, `get_test_results*.py`.
+`trianel_*` gehört zum Trianel-Datensatz.
 Nicht selbsterklärende Verzeichnisse: `studies/` (Optuna-DBs), `data_cache/`
 (gehashte preprocessed Daten), `runs/`, `reports/`, `archiv/` (alte Stände, nicht in git), `iaims26/` (Paper-Arbeitsbereich, nicht in git).
 

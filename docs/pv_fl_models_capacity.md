@@ -16,8 +16,8 @@ Keine HPO; die Kapazitätsreihe ist eine Ablation mit festen Werten (Go Viktor 1
 | `utils/patch_models.py` | `PatchEncoder` (2D-CNN je Zeitschritt, optional erste Faltung über `t_kernel` Schritte als Conv3d), `PatchTFT` (Encoder-Einbettung 16-dim neben den Punktmerkmalen in den TFT), `tft_kwargs` (TFT-Argumente wie `models.get_model`) |
 | `utils/models.py` (`CNNRNN`) | neu: `num_quantiles` (Ausgabe `(batch, horizon, Q)`; `get_model` übergibt die Zahl aus `model.tft.quantiles`, bei einem Quantil unverändert) und Hyperparameter `step_output` (Default aus): eine Ausgabe je Prognoseschritt aus dem RNN-Zustand dieses Schritts statt des ganzen Horizonts aus dem letzten Zustand. Für PV day-ahead ist der Zustandskopf rund 33 % schlechter als der TFT, der Schrittkopf 3–4 % besser |
 | `archiv/cnn_lstm_q_2026-11-12.py` | erste, eigene CNN-LSTM-Variante (Residualblöcke, Dilatation, GroupNorm, Schrittkopf) der Läufe `cnnlstm_pers_2026-11-12_v1` und `boundary_synthetic_cnnlstm_2026-11-12_v1`; ersetzt durch `CNNRNN(step_output=True)`, gleich gut |
-| `scripts/pv_patch_data.py` | ICON-D2-16×16-Ausschnitte laden (`$DATA_ROOT/nwp_ready_pv/icon-d2_patch16/SL/09/park_<id>/`, Dateien über `points.csv` → `point_key`), GTI je Gitterpunkt in der Modulebene des Parks (`pv_parks._add_park_irradiance`, Sonnenstand am Park) und `clct`; Spalten `pgti_<i>`, `pclct_<i>` (zeilenweise, Zeile 0 = Süden); `add_stats` (Mittel/Std über 3×3, 7×7, 16×16); `attach` (innerer Join auf `starttime, forecasttime`); `extended_scaler` (Punktmerkmale mit dem bisherigen Scaler, Patchkanäle mit einem Mittelwert/Std je Kanal) |
-| `scripts/pv_quantile_finetune.py` | `train(..., factory=None)`: optionale Modell-Factory; ohne Angabe `models.get_model` wie bisher |
+| `scripts/pv/pv_patch_data.py` | ICON-D2-16×16-Ausschnitte laden (`$DATA_ROOT/nwp_ready_pv/icon-d2_patch16/SL/09/park_<id>/`, Dateien über `points.csv` → `point_key`), GTI je Gitterpunkt in der Modulebene des Parks (`pv_parks._add_park_irradiance`, Sonnenstand am Park) und `clct`; Spalten `pgti_<i>`, `pclct_<i>` (zeilenweise, Zeile 0 = Süden); `add_stats` (Mittel/Std über 3×3, 7×7, 16×16); `attach` (innerer Join auf `starttime, forecasttime`); `extended_scaler` (Punktmerkmale mit dem bisherigen Scaler, Patchkanäle mit einem Mittelwert/Std je Kanal) |
+| `scripts/pv/pv_quantile_finetune.py` | `train(..., factory=None)`: optionale Modell-Factory; ohne Angabe `models.get_model` wie bisher |
 
 ## Runner
 
@@ -34,11 +34,11 @@ Keine HPO; die Kapazitätsreihe ist eine Ablation mit festen Werten (Go Viktor 1
 ```bash
 export DATA_ROOT=/mnt/lambda1/nvme1
 O=results/parks_pv_v4_30min
-frcst/bin/python scripts/pv_patch_cnn.py --prepare --output $O/patch_cnn_2026-11-12_v1          # einmal
-frcst/bin/python scripts/pv_patch_cnn.py --seed 42 --gpu 0 --output $O/patch_cnn_2026-11-12_v1   # Seeds 43, 44 analog
-frcst/bin/python scripts/pv_trainfit.py --gpu 0 --output $O/trainfit_2026-11-12_v1
-frcst/bin/python scripts/pv_capacity_synthetic.py --seed 42 --gpu 0 --output $O/capacity_synthetic_2026-11-12_v1
-frcst/bin/python scripts/pv_cnnlstm_pers.py --arch framework_step --seed 42 --gpu 0 --output $O/cnnlstm_pers_framework_step_2026-11-12_v1
+frcst/bin/python scripts/pv/pv_patch_cnn.py --prepare --output $O/patch_cnn_2026-11-12_v1          # einmal
+frcst/bin/python scripts/pv/pv_patch_cnn.py --seed 42 --gpu 0 --output $O/patch_cnn_2026-11-12_v1   # Seeds 43, 44 analog
+frcst/bin/python scripts/pv/pv_trainfit.py --gpu 0 --output $O/trainfit_2026-11-12_v1
+frcst/bin/python scripts/pv/pv_capacity_synthetic.py --seed 42 --gpu 0 --output $O/capacity_synthetic_2026-11-12_v1
+frcst/bin/python scripts/pv/pv_cnnlstm_pers.py --arch framework_step --seed 42 --gpu 0 --output $O/cnnlstm_pers_framework_step_2026-11-12_v1
 bash $O/boundary_synthetic_partners_v2_2026-11-12_v1/run.sh        # Partnerkurve TFT (5/40 auf l2) + CNN-LSTM-Karte
 # 80/130 Partner: l1, Codekopie ~/runs/fl_partner_curve_2026-11-12/run_l1.sh, Ergebnisse nach .../partners_v2.../l1/
 ```

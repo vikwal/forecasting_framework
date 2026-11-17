@@ -87,7 +87,7 @@ Codewechsel — Richtung nicht mehr aus KNN — gehört sichtbar in den Schlüss
 ## 3. Beleg
 
 Messung über die 203 Stationen der Testmode-Configs, Zeitachse des Frameworks
-(2023-07-24 … 2026-09-01, 5 534 592 Zellen), Skript `scripts/measure_dir.py`
+(2023-07-24 … 2026-09-01, 5 534 592 Zellen), Skript `archiv/scripts_20261117/measure_dir.py`
 (read-only, wiederholbar).
 
 **48 429 Richtungslücken (0,875 %).** Davon füllt:

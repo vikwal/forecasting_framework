@@ -40,7 +40,7 @@ Dateien unter `results/solar/` (TFT Arm A/B), `results/solar_dcrnn_*_v5_*.pkl`
 (DCRNN) und `data/{test_results,raw_preds}/tft_solar_tft_fold<N>*` (HPO-Retrain).
 Die Auswertung der beiden TFT-Arme steht im Gesprächsverlauf, ein Skript dafür
 gibt es noch nicht; der Architekturvergleich läuft über
-`scripts/eval_solar_arch.py`.
+`archiv/scripts_20261117/eval_solar_arch.py`.
 
 Der HPO-Retrain liegt **nicht** besser als Arm A, obwohl er dessen Aufgabe mit
 optimierten Hyperparametern löst. Das ist der Beleg für den HPO-Befund aus
@@ -50,7 +50,7 @@ lesen, nicht schärfer.
 
 ### 2.1 Architekturvergleich DCRNN ↔ TFT (15.09.2026)
 
-Gemeinsame Auswertung über `scripts/eval_solar_arch.py`: beide Seiten liefern
+Gemeinsame Auswertung über `archiv/scripts_20261117/eval_solar_arch.py`: beide Seiten liefern
 nur Rohvorhersagen, Filter und Aggregation liegen einmal darüber. 5 628 006
 gepaarte Zeilen (21 Zielstationen × ~1 440 Läufe × 96 Leads × 2 Zielgrößen),
 Validierungsjahr 2024-08…2025-07. NWP-Baseline für alle Quellen identisch:
@@ -112,7 +112,7 @@ Es bleibt bei `altitude`, `latitude`, `longitude`.
 > **Stand 15.09.2026:** die sechs `v4`-Arme waren davon betroffen und sind
 > durch `v5` ersetzt. Der Abschnitt bleibt stehen, weil der Fehler die Art von
 > Fehler ist, die dieser Pfad wiederholt produziert — und weil der Test, der
-> ihn findet, jetzt in `scripts/eval_solar_arch.py` fest eingebaut ist.
+> ihn findet, jetzt in `archiv/scripts_20261117/eval_solar_arch.py` fest eingebaut ist.
 
 Die sechs DCRNN-Arme (`results/solar_dcrnn_*v4*.pkl`, Modelle unter
 `models/solar_dcrnn_*_v4_*.pt`) waren **mit einem um 30 Minuten verschobenen
@@ -137,7 +137,7 @@ Der alte Code fuhr +30 min, also **9.0 % RMSE** über alle Läufe.
 mussten neu trainiert werden, erneutes Auswerten reichte nicht. Erledigt am
 15.09.2026 (`v5`, 08:52–09:52 auf l2, je 41–56 Epochen bis Early Stopping).
 
-`scripts/eval_solar_arch.py` fährt denselben Test jetzt bei jeder Auswertung:
+`archiv/scripts_20261117/eval_solar_arch.py` fährt denselben Test jetzt bei jeder Auswertung:
 beide Seiten über ±2 Schritte gegen die Messreihe, Abbruch wenn das
 RMSE-Minimum nicht bei 0 liegt. Gegen die alten `v4`-Parquets gehalten findet
 er deren +30 min selbständig wieder — der Test ist also scharf, nicht
@@ -241,14 +241,14 @@ Daten.
 
 Die drei blockierenden Punkte sind abgearbeitet:
 
-1. **`eval.exclude_imputed: true`** steht in `scripts/make_solar_dcrnn_configs.py`,
+1. **`eval.exclude_imputed: true`** steht in `archiv/scripts_20261117/make_solar_dcrnn_configs.py`,
    die sechs Configs sind neu erzeugt (Diff: genau zwei Zeilen je Datei).
 2. **Die sechs Arme sind neu trainiert** (`v5`) und ausgewertet:
-   `scripts/run_solar_dcrnn_arms.sh` startet das Training, die GPU hängt am
-   Armnamen statt an der Aufrufreihenfolge; `scripts/run_solar_dcrnn_eval.sh`
+   `archiv/scripts_20261117/run_solar_dcrnn_arms.sh` startet das Training, die GPU hängt am
+   Armnamen statt an der Aufrufreihenfolge; `archiv/scripts_20261117/run_solar_dcrnn_eval.sh`
    schreibt die Rohvorhersagen nach
    `data/raw_preds/solar_dcrnn_v5_<arm>_raw.parquet`.
-3. **Die gemeinsame Auswertung** liegt als `scripts/eval_solar_arch.py` vor,
+3. **Die gemeinsame Auswertung** liegt als `archiv/scripts_20261117/eval_solar_arch.py` vor,
    Ergebnis in §2.1.
 
 Was dabei über die Aufgabe hinaus anfiel und ebenfalls behoben ist: der
@@ -262,7 +262,7 @@ abgebrochen wegen Konvergenz.** Ergebnis und Arbeitsauftrag stehen in §5.1.2.
 
 `configs/solar_tft/config_solar_tft_hpo.yaml`, Studie
 `cl_m-tft-bc_out-96_freq-30min_solar_tft_hpo`, zuletzt 18 Worker über l2/l1/ws
-(`scripts/run_solar_hpo.sh`). Räumliche 3-Fold-CV über `configs/solar_folds.yaml`,
+(`archiv/scripts_20261117/run_solar_hpo.sh`). Räumliche 3-Fold-CV über `configs/solar_folds.yaml`,
 Training bis `val_start` 2024-08-01, Validierung bis `test_start` 2025-08-01 —
 das Testjahr blieb unberührt.
 
@@ -510,7 +510,7 @@ Zwei Belege, dass die Kette sauber sitzt:
 **Die vier Configs wären nach dem vollständigen Preprocessing abgebrochen.** Sie
 erbten aus `configs/solar_final/config_solar_final_lag.yaml` `hpo.kfolds: 12`,
 `train_cl_tft_bc.py` verlangt aber genau einen Fold; `cv_mode` setzte der
-Generator nur für die HPO-Config. Behoben in `scripts/make_solar_tft_configs.py`
+Generator nur für die HPO-Config. Behoben in `archiv/scripts_20261117/make_solar_tft_configs.py`
 (Commit `d024146`) — die Configs sind **generiert und nicht von Hand zu pflegen**:
 
 * `fold{1,2,3}`: `cv_mode: spatial`, `kfolds: 1`, Zeitachse der HPO-Studie
@@ -681,7 +681,7 @@ Lead 0, 0.099 zwischen 1 und 6 h, 0.122 ab 36 h.
 Dateien: `models/train_tft_bc_m-tft_c-solar_tft_testyear.pt`,
 `data/test_results/tft_solar_tft_testyear.csv`,
 `data/raw_preds/tft_solar_tft_testyear_raw.parquet`. Bericht:
-`frcst/bin/python scripts/report_solar_folds.py --folds 0 --stem tft_solar_tft_testyear`.
+`frcst/bin/python archiv/scripts_20261117/report_solar_folds.py --folds 0 --stem tft_solar_tft_testyear`.
 
 ### 5.1.4 Was die eigene Messhistorie beiträgt — und der Arm ohne sie
 
@@ -689,7 +689,7 @@ Die Solar-Configs führen beide Zielgrößen als `observed_features`, das Modell
 sieht also 48 h eigene Vergangenheit; wegen `target_transform: nwp_residual`
 genauer: 48 h NWP-Fehlerhistorie der Zielstation. Im Wind-Sprachgebrauch ist das
 die **`hist`-Variante**. Gemessen am fertigen Modell
-(`scripts/ablate_solar_observed.py`, 12 Stationen über alle drei Folds,
+(`archiv/scripts_20261117/ablate_solar_observed.py`, 12 Stationen über alle drei Folds,
 observed-Fenster über die Läufe permutiert):
 
 | Lead | 0.0 h | 0.5 h | 1 h | 1.5–3 h | 3–6 h | 24–48 h |
@@ -859,7 +859,7 @@ dürfen so bleiben.
 | `train_fl.py:685,727` | reicht `exclude_imputed` nicht durch — FL-Solar misst auf gefüllten Zielen, CL-Solar nicht. |
 | `utils/preprocessing.py:3853`, `utils/data_cache.py:519` | `Timedelta(hours=history_length)`, wobei `history_length` Schritte zählt. Vorbestehend; beide Stellen spiegeln einander, die Grenze wandert nur konservativ. |
 | `geostatistics/solar_preprocessing.py:16-21` | Docstring behauptet, SL-Dateinamen seien lon-first und die Spalten vertauscht. Nachgemessen ist es lat-first ohne Vertauschung — der **Code ist richtig, der Docstring falsch**. |
-| `scripts/eval_testyear.py` | Abbildungen 04/05/06 behalten Wind-Beschriftungen („m/s", „Windklasse"), laufen bei Multi-Target aber je Zielgröße. |
+| `scripts/wind_eval/eval_testyear.py` | Abbildungen 04/05/06 behalten Wind-Beschriftungen („m/s", „Windklasse"), laufen bei Multi-Target aber je Zielgröße. |
 | ~~`get_test_results_tft_bc.py`, `pers_ref`~~ | **erledigt 17.09.2026** — war durchgängig NaN (auch beim Wind), `reindex` traf den MultiIndex nicht. Alte Wind-Parquets tragen die Lücke weiterhin, `skill` ist dort leer. |
 | DCRNN-Featuresatz | `kt_nwp` fehlt als einziges der 13 TFT-Features. Aus `ghi_nwp` und `ghi_clearsky` ableitbar, beide im Modell. |
 

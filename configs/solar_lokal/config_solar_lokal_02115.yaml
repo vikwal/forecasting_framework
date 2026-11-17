@@ -4,7 +4,7 @@
 # Zeitgrenze test_start. Transduktiv: die Station ist im Training bekannt,
 # ein Schluss auf unbekannte Stationen ist daraus NICHT moeglich.
 #
-# Erzeugt von scripts/make_solar_lokal_configs.py — nicht von Hand pflegen.
+# Erzeugt von archiv/scripts_20261117/make_solar_lokal_configs.py — nicht von Hand pflegen.
 
 data:
   use_case: solar

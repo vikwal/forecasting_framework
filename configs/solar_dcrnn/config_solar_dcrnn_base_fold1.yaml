@@ -3,7 +3,7 @@
 # 41 Trainings-, 21 Zielstationen aus configs/solar_folds.yaml.
 # Abweichung von Arm A: {'nwp_nodes': False}
 #
-# Erzeugt von scripts/make_solar_dcrnn_configs.py — nicht von Hand pflegen.
+# Erzeugt von archiv/scripts_20261117/make_solar_dcrnn_configs.py — nicht von Hand pflegen.
 
 data:
   use_case: solar

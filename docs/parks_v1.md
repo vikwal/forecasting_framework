@@ -8,7 +8,7 @@ Berichte: `FL_Contribution/reports/park_synthesis_v1.md`, `nwp_extraction_plan.m
 ## Ablauf
 
 ```bash
-python scripts/build_parks_v1_inputs.py            # data/parks_v1/{stations_master,wind_parameter,turbine_parameter}.csv
+python scripts/parks_v1/build_parks_v1_inputs.py            # data/parks_v1/{stations_master,wind_parameter,turbine_parameter}.csv
 python train_cl.py -c configs/parks_v1/config_parks_v1_cl_smoke -m tft   # 3 Parks, 1 Epoche
 python train_cl.py -c configs/parks_v1/config_parks_v1_cl -m tft         # 90 Parks
 ```
@@ -156,8 +156,8 @@ Bericht `FL_Contribution/reports/fl_scenarios_v1.md`. Neue Schalter:
 Der Cache-Schlüssel enthält jetzt `train_start` (nur reale Parks; der geladene Zeitraum und `park_age` hängen davon
 ab) und `target_mask`.
 
-Configs: `python scripts/make_fl_scenarios.py` → `configs/parks_v1/scenarios/` (81 Configs + `manifest.csv`);
-Ausführen: `python scripts/run_fl_scenarios.py --scenarios scarce lopo mask --methods fl_fedgradient fl_fedavg cl80 local --gpus …`
+Configs: `python scripts/parks_v1/make_fl_scenarios.py` → `configs/parks_v1/scenarios/` (81 Configs + `manifest.csv`);
+Ausführen: `python scripts/parks_v1/run_fl_scenarios.py --scenarios scarce lopo mask --methods fl_fedgradient fl_fedavg cl80 local --gpus …`
 (wiederaufnehmbar, Sperrdateien für parallele Warteschlangen, Logs `logs/scenarios/`). FL-Läufe vertragen sich
 parallel: auf l1 liefen 6 gleichzeitig ohne längere Rundenzeiten.
 
@@ -174,7 +174,7 @@ Training von null.
 | `data.station_history_start: {station: date}` | die Station hat im Trainingszeitraum erst ab diesem Datum Daten (neuer Park mit kurzer Historie); im Cache-Schlüssel |
 | `data.target_mask: market_env_grid50` | Direktvermarkter-Maske plus die Hälfte der Netzereignisse (deterministisch je `grid_event_id`) |
 
-Configs Teil 2: `python scripts/make_fl_scenarios.py --part 2` → `configs/parks_v1/scenarios2/`. Mehrere Rechner
+Configs Teil 2: `python scripts/parks_v1/make_fl_scenarios.py --part 2` → `configs/parks_v1/scenarios2/`. Mehrere Rechner
 arbeiten eine Liste ab, wenn `--log-dir` auf ein gemeinsames NFS-Verzeichnis zeigt (Sperrdateien
 `*.running`, Fertig-Marken `*.done`), z. B. l2 `${DATA_ROOT}/runs/fl_scenarios2`, l1 `/mnt/nvme1/runs/fl_scenarios2`.
 Bericht: `FL_Contribution/reports/fl_scenarios_v2.md`.
@@ -186,7 +186,7 @@ Bericht: `FL_Contribution/reports/fl_scenarios_v2.md`.
 | `data.target_kind: wind_speed_hub` | nur `power_col`-Modus: Ziel ist die Nabenhöhen-Windgeschwindigkeit des Parks statt der Leistung — Mittel der Gruppenspalten `wind_speed_hub_<turbine>` des Releases, gewichtet mit `n_turbines × rated_kw` (`preprocessing.park_hub_wind`), geteilt durch `WIND_TARGET_SCALE` = 25 m/s statt durch die Leistung. Der Lag (`observed_features: ['power']`) ist dann die vergangene Windgeschwindigkeit. Nicht mit `target_mask` kombinierbar; im Cache-Schlüssel. Standard `power` = bisheriges Verhalten. |
 
 Die Abregelung wirkt nicht auf die Windgeschwindigkeit, das Ziel ist auf x1 und x4 identisch. Configs:
-`python scripts/make_fl_scenarios.py --part wind` → `configs/parks_v1/scenarios_wind/` (FedGradient, FedAvg mit
+`python scripts/parks_v1/make_fl_scenarios.py --part wind` → `configs/parks_v1/scenarios_wind/` (FedGradient, FedAvg mit
 Fine-Tune-Varianten, CL80; lokal = `train_local.py` auf der FedGradient-Config; mit/ohne Lag; Seeds 42–44).
 
 ### HPO-Vorbereitung und Review-Korrekturen (2026-10-11)
@@ -224,7 +224,7 @@ Bekannte, bewusst belassene Punkte:
 | `make_fl_scenarios.py --part drift` | `scenarios_drift/`: 10/5/2/1 Parks je Client (8/16/40/80 Clients), FedAvg mit 5 lokalen Epochen, Mengen-Schiefe 25..2 Parks (`skew_clients`), Runden/Patience mit 10/k skaliert |
 | `make_fl_scenarios.py --part nolag` | `scenarios_nolag/`: 1/3 Monate und neue Parks (Folds 0–4) ohne Leistungs-Lag |
 | `make_fl_scenarios.py --part trianel` | `configs/trianel/`: 12 reale Trianel-Parks (`data.use_case: trianel`, s. u.), je Park ein Client, mit/ohne Lag, Seeds 42–44, dazu leave-one-park-out (12 Folds) |
-| `scripts/launch_prehpo_queues.sh l2 \| l1a \| l1b \| trianel` | gemeinsame NFS-Warteschlangen `${DATA_ROOT}/runs/{fl_drift,fl_nolag,trianel}` |
+| `scripts/parks_v1/launch_prehpo_queues.sh l2 \| l1a \| l1b \| trianel` | gemeinsame NFS-Warteschlangen `${DATA_ROOT}/runs/{fl_drift,fl_nolag,trianel}` |
 
 **Reale Parks (`data.use_case: trianel`):** `_get_data_from_config_files` ruft `preprocess_trianel_tft` auf (15-min-SCADA
 `real_data_path`, Normierung auf das Maximum der Messung, ICON-D2 ML aus `nwp_path/ML/<HH>/<park>/`, ECMWF SL aus

@@ -691,7 +691,7 @@ def _evaluate_single_target(data: pd.DataFrame,
             raise KeyError(
                 f"eval.exclude_imputed ist gesetzt, aber '{obs_col}' fehlt im Datensatz. "
                 "Die Spalte entsteht nur im Solar-Preprocessing; fuer Wind gibt es sie "
-                "nicht (dort filtert scripts/eval_testmode.py nachtraeglich).")
+                "nicht (dort filtert scripts/wind_eval/eval_testmode.py nachtraeglich).")
         observed = _column_by_run(data, obs_col, df_true)
         if observed is None:
             raise ValueError(

@@ -7,13 +7,13 @@ Vergleich von Zero-shot, lokalem und zentralem Fine-Tuning sowie FedGradient auf
 Im Framework mit gesetztem `DATA_ROOT`, vorhandenen Quantil-Checkpoints für Seeds 42/43/44:
 
 ```bash
-frcst/bin/python scripts/pv_quantile_finetune.py --seed 42 --gpu 0 --output results/parks_pv_v4_30min/quantile_ft_<new_version>
+frcst/bin/python scripts/pv/pv_quantile_finetune.py --seed 42 --gpu 0 --output results/parks_pv_v4_30min/quantile_ft_<new_version>
 ```
 
 Für Seeds 43 und 44 wiederholen. Das jeweilige Seed-Verzeichnis darf noch nicht existieren. Modelle und Vorhersagen bleiben im Framework. Auswertung nach Abschluss aller Seeds:
 
 ```bash
-frcst/bin/python scripts/pv_quantile_report.py results/parks_pv_v4_30min/quantile_ft_<new_version> --export <new_csv_directory>
+frcst/bin/python scripts/pv/pv_quantile_report.py results/parks_pv_v4_30min/quantile_ft_<new_version> --export <new_csv_directory>
 ```
 
 ## Protokoll

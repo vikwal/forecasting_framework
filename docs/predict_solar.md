@@ -205,8 +205,8 @@ Was beim Umsetzen dazukam:
 Drei identische TFT-Läufe, nur `data.freq` und die daran gekoppelte Schrittzahl
 verschieden (48 h Horizont in allen dreien). Station 02712, Training
 2023-08 → 2024-08, Test 2024-08 → 2025-08, `lookup_hpo: False`.
-Reproduzierbar über `scripts/launch_solar_raster.sh` und
-`scripts/compare_solar_raster.py`, Configs in `configs/solar_raster/`.
+Reproduzierbar über `archiv/scripts_20261117/launch_solar_raster.sh` und
+`archiv/scripts_20261117/compare_solar_raster.py`, Configs in `configs/solar_raster/`.
 
 | | | `ghi` | | | `dhi` | |
 |---|---|---|---|---|---|---|

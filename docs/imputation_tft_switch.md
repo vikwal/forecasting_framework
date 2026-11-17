@@ -201,7 +201,7 @@ Weitere Kennzahlen der Messung:
 
 **36.3 % der Fuellungen (16 729 von 46 084) sind `kontextfrei`.**
 
-Messskript: `scripts/measure_imputation_switch.py` (read-only, wiederholbar —
+Messskript: `archiv/scripts_20261117/measure_imputation_switch.py` (read-only, wiederholbar —
 laedt die Messreihen neu und vergleicht alle drei Quellen an denselben Zellen).
 
 ---

@@ -10,7 +10,7 @@ bis auf §6 „Offen" abgearbeitet).
 
 Alle Zahlen aus TFT-Läufen mit **untunten Default-Hyperparametern** — eine
 Solar-HPO hat es bis zum 14.09.2026 nicht gegeben. Nachrechenbar mit
-`scripts/compare_solar_ablation.py` und `scripts/bilanz_solar_final.py`.
+`archiv/scripts_20261117/compare_solar_ablation.py` und `archiv/scripts_20261117/bilanz_solar_final.py`.
 
 ### 1.1 Ablationsleiter (13.–17.08.2026)
 
@@ -163,7 +163,7 @@ reicht über seinen 48-h-Horizont in den Testzeitraum und überschneidet damit
 gepaart und beantwortet die gestellte Frage: bringen neun zusätzliche
 Trainingsstationen den 62 etwas?
 
-Erzeugt mit `scripts/make_solar_tft_configs.py` (idempotent, `--force` zum
+Erzeugt mit `archiv/scripts_20261117/make_solar_tft_configs.py` (idempotent, `--force` zum
 Überschreiben). Kein Suffix hinter `_fold<N>` — die Optuna-Studienauflösung
 leitet den Namen aus dem Dateinamen ab.
 
@@ -179,8 +179,8 @@ leitet den Namen aus dem Dateinamen ab.
 | `train_cl.py` | reicht `eval.exclude_imputed` durch |
 | `geostatistics/spatial_cv.py` | `extra_train` in `station_pool`/`build_folds` |
 | `hpo_tft_bc.py` | liest `hpo.extra_train_files` |
-| `scripts/make_solar_tft_configs.py` | **neu** |
-| `scripts/bilanz_solar_final.py`, `preflight_testmode.py`, `measure_dir.py` | `yaml.safe_load` → `load_config` (seit der `!ENV`-Umstellung kaputt) |
+| `archiv/scripts_20261117/make_solar_tft_configs.py` | **neu** |
+| `archiv/scripts_20261117/bilanz_solar_final.py`, `preflight_testmode.py`, `measure_dir.py` | `yaml.safe_load` → `load_config` (seit der `!ENV`-Umstellung kaputt) |
 
 ### 4.1 Warum elementweise gefiltert wird
 
@@ -189,7 +189,7 @@ hat. Bei 96 Leads à 30 min kostete ein einziger imputierter Schritt damit 48
 Stunden Auswertung. Die Filterung imputierter Ziele läuft deshalb elementweise
 über eine `(Lauf × Lead)`-Maske — dieselbe Stichprobe für Modell und Baselines,
 sodass `Skill` und `Skill_NWP` weiterhin Quotienten über derselben Menge sind.
-Das entspricht dem Vorgehen beim Wind (`scripts/eval_testmode.py`, dort
+Das entspricht dem Vorgehen beim Wind (`scripts/wind_eval/eval_testmode.py`, dort
 nachträglich auf `(station_id, run_time, horizon)`).
 
 Ohne `eval.exclude_imputed` ist das Verhalten unverändert — verifiziert:

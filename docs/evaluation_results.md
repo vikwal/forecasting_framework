@@ -1308,7 +1308,7 @@ Auftrag und Ausführung: `docs/expanding_window_retrain_handoff.md`. 5 Arme × 3
 × 3 Zeitschritte = 45 Trainings- und Eval-Läufe, 27.08.–29.08.2026 auf GPU 2
 (zwei parallele Worker, 50,6 h Wall-Clock, **45/45 mit `train=0 eval=0`, 0 Fehler**).
 Hyperparameter unverändert aus den bestehenden Optuna-Studies (`--hpo-study auto`),
-variiert wurde ausschliesslich das Zeitfenster. Auswertung: `scripts/eval_expwin.py`.
+variiert wurde ausschliesslich das Zeitfenster. Auswertung: `scripts/wind_eval/eval_expwin.py`.
 
 ### 17.1 Der Aufbau misst die gestellte Frage nicht direkt
 
@@ -1426,7 +1426,7 @@ zu füllen; die Arme ohne Historie sind bei ~12 Monaten Trainingsdaten bereits g
 **Stand 2026-09-01 08:40 — 12 der 15 Läufe fertig, 0 Fehler.** Es fehlen noch
 `mtgnn_nwp_hist` fold2/fold3 und `mtgnn_nwp` fold3 (laufen, s. § 18.6). Alle
 MTGNN-Zahlen unten sind daher noch nicht über drei Folds gemittelt und können
-sich verschieben. Auswertung: `scripts/eval_testyear.py`, Abbildungen unter
+sich verschieben. Auswertung: `scripts/wind_eval/eval_testyear.py`, Abbildungen unter
 `figures/testyear/`.
 
 ### 18.1 Aufbau — und warum er vom Auftrag abweicht
@@ -1589,7 +1589,7 @@ Koordinaturreparatur neu geschrieben.
 | Run-Zeitpunkte | 1450, 2025-08-01 06:00 … 2026-07-29 15:00 UTC |
 
 **Bei allen fünf Armen dieselben Zahlen.** Damit fallen die beiden
-Tabellenvarianten aus `scripts/eval_testmode.py` — je Arm auf eigenen Zeilen und
+Tabellenvarianten aus `scripts/wind_eval/eval_testmode.py` — je Arm auf eigenen Zeilen und
 auf dem gemeinsamen Zeilenschnitt — auf die Stelle genau zusammen. Der
 Armvergleich ist frei von Abdeckungsartefakten; anders als in §14–18 gab es hier
 keine armabhängigen Run-Paar-Ausschlüsse (`grid-NaN: 0` in allen neun Läufen,
@@ -1717,4 +1717,4 @@ Tabellen `data/test_results/testmode_{overview,overview_paired,by_chunk,wilcoxon
 Abbildungen `figures/testmode/01..08` (Balken-RMSE, RMSE je Fenster, gepaarte
 Differenz-Boxplots, Fehler über Prognosehorizont / Windklasse / Monat, Scatter,
 Skill-Verteilung). Rohvorhersagen `data/raw_preds/testmode_*_raw.parquet`,
-Modelle `models/wind_*_testmode*.pt`. Erzeugt von `scripts/eval_testmode.py`.
+Modelle `models/wind_*_testmode*.pt`. Erzeugt von `scripts/wind_eval/eval_testmode.py`.

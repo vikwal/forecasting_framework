@@ -209,3 +209,6 @@ checkpoints/
 .claude/commands/
 deploy/
 iaims26/
+# Generated outputs (scripts/wind_eval/export_paper_metrics.py, eval_testmode.py)
+/paper_export/
+/figures/

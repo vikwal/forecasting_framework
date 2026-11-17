@@ -21,7 +21,7 @@
 # echter Messwerte 0.85, Minimum 0.12). Mit eval.exclude_imputed bleibt davon
 # entsprechend weniger Auswertungsmasse — vor der Interpretation nachzaehlen.
 #
-# Erzeugt von scripts/make_solar_tft_configs.py — nicht von Hand pflegen.
+# Erzeugt von archiv/scripts_20261117/make_solar_tft_configs.py — nicht von Hand pflegen.
 
 data:
   use_case: solar

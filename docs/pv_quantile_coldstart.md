@@ -22,13 +22,13 @@ Die vorhandenen vollständigen Daten werden zunächst durch die bisherige Pipeli
 
 ```bash
 export DATA_ROOT=/mnt/lambda1/nvme1
-frcst/bin/python scripts/pv_quantile_coldstart.py --seed 42 --gpu 0 --output results/parks_pv_v4_30min/quantile_coldstart_<new_version>
+frcst/bin/python scripts/pv/pv_quantile_coldstart.py --seed 42 --gpu 0 --output results/parks_pv_v4_30min/quantile_coldstart_<new_version>
 ```
 
 Seeds43/44 ebenfalls ausführen. Vorhandene Seed-Verzeichnisse werden nicht überschrieben. Nach vollständigem Abschluss:
 
 ```bash
-frcst/bin/python scripts/pv_quantile_coldstart_report.py results/parks_pv_v4_30min/quantile_coldstart_<new_version> --export <new_export_directory>
+frcst/bin/python scripts/pv/pv_quantile_coldstart_report.py results/parks_pv_v4_30min/quantile_coldstart_<new_version> --export <new_export_directory>
 ```
 
 Der Report prüft alle Budget/Park/Methoden/Selection-Kombinationen. Mittelwerte: zuerst gleich über Parks je Seed, dann über Seeds; Fehlerbalken sind Seed-Standardabweichungen, keine Konfidenzintervalle. Eigene vollständige Daten und Zero-shot dienen aus dem vorherigen Versuch als Kontext, werden nicht nochmals trainiert.

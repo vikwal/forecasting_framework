@@ -7,7 +7,7 @@
 #             of the same day), 1 grid point each = the point nearest to the park centre;
 #             power of the last 48 h as observed (lag) input
 #   split     train runs 2023-07-24 .. 2024-07-31, validation runs 2024-08-01 .. 2025-07-31
-# Parameter tables: scripts/build_parks_v1_inputs.py -> data/parks_v1/
+# Parameter tables: scripts/parks_v1/build_parks_v1_inputs.py -> data/parks_v1/
 data:
   use_case: 'wind'
   path: !ENV '${DATA_ROOT}/synthetic/wind/parks_v1_curt_v11'

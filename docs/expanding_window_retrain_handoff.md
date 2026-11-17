@@ -251,7 +251,7 @@ in § 8.4 war 57 h, die ursprüngliche in § 8.3 93 h). Artefakte vollständig:
 45 Modelle, 45 Metrik-CSVs (`data/test_results/expwin_*.csv`), 45 Roh-Parquets
 (`data/raw_preds/expwin_*_raw.parquet`).
 
-**Auswertung: `scripts/eval_expwin.py` → `docs/evaluation_results.md` § 17.**
+**Auswertung: `scripts/wind_eval/eval_expwin.py` → `docs/evaluation_results.md` § 17.**
 
 Wichtig für das Verständnis der Ergebnisse: der in § 3 spezifizierte Aufbau
 beantwortet die Kernfrage aus § 7 **nicht direkt**, weil die drei Zeitschritte

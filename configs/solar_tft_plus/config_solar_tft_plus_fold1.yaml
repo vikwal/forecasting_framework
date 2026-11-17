@@ -16,7 +16,7 @@
 #       --model-tag train_tft_bc_m-tft_c-solar_tft_plus_fold1 --eval-split val
 # Ohne das Flag misst die Auswertung im Testjahr (test_start 2025-08-01).
 #
-# Erzeugt von scripts/make_solar_tft_configs.py — nicht von Hand pflegen.
+# Erzeugt von archiv/scripts_20261117/make_solar_tft_configs.py — nicht von Hand pflegen.
 
 data:
   use_case: solar
