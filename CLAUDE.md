@@ -21,16 +21,16 @@ Alle Experimente werden über YAML in `configs/` gesteuert
 | Wo | Was |
 |---|---|
 | `train_cl.py`, `train_fl.py`, `train_local.py` | Training CL bzw. FL (FL nutzt Ray); `train_local.py`: je FL-Client ein lokales Modell, parallel über GPUs ([local_training.md](docs/local_training.md)) |
-| `hpo_cl.py`, `hpo_fl.py` | Optuna-HPO; `launch_multi_gpu.sh` startet parallele Prozesse über mehrere GPUs |
+| `hpo_cl.py`, `hpo_fl.py` | Optuna-HPO; GPU-Launcher (`launch_*_worker.sh`) liegen in `scripts/` |
 | `geostatistics/` | **GNN-Pfad**: `train_dcrnn.py`, `train_mtgnn.py`, `train_wavenet.py`, Kriging, Variogramme, `fold_dashboard.py` |
 | `utils/` | `preprocessing.py` (Hauptpipeline, modell- und quellenabhängig), `solar.py` (Solar-Pendant), `models.py` (`get_model()`), `federated.py` (FedAvg, Ray), `fedgradient.py` (FedGradient), `hpo.py`, `eval.py`, `tools.py`, `data_cache.py` (Hash-Keys), `meteo.py` (pvlib), `db_connector.py` (PostGIS) |
 | `*_dashboard.py` | `optuna_dashboard.py` (8504), `geostatistics/fold_dashboard.py` (8511), `eval_dashboard.py` |
-| `deploy/` | systemd-Unit-Vorlagen (host-weite Dienstübersicht: `~/docs/services.md`) |
+| `deploy/` | systemd-Unit-Vorlagen, **nicht in git** (host-weite Dienstübersicht: `~/docs/services.md`) |
 
 Namensmuster für alles Weitere: `train_*.py`, `hpo_*.py`, `get_test_results*.py`,
-`check_*.py`, `run_*_all_stations.sh`. `trianel_*` gehört zum Trianel-Datensatz.
+`check_*.py`. `trianel_*` gehört zum Trianel-Datensatz.
 Nicht selbsterklärende Verzeichnisse: `studies/` (Optuna-DBs), `data_cache/`
-(gehashte preprocessed Daten), `runs/`, `reports/`, `archiv/` (alte Stände).
+(gehashte preprocessed Daten), `runs/`, `reports/`, `archiv/` (alte Stände, nicht in git), `iaims26/` (Paper-Arbeitsbereich, nicht in git).
 
 ## Use Cases
 

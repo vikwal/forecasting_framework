@@ -22,90 +22,8 @@ A comprehensive framework for time series forecasting with support for hyperpara
 ### Basic Usage
 
 1. **Configure your experiment**: Create a configuration file in `configs/` directory
-2. **Run hyperparameter optimization**: Use `hpo_cl.py` for single GPU or `launch_multi_gpu.sh` for multi-GPU
+2. **Run hyperparameter optimization**: Use `hpo_cl.py` (one process per GPU; multi-GPU launchers live in `scripts/`)
 3. **Train final model**: Use `train_cl.py` with optimized hyperparameters
-
-## Multi-GPU Training with `launch_multi_gpu.sh`
-
-### Overview
-
-The `launch_multi_gpu.sh` script orchestrates parallel hyperparameter optimization across multiple GPUs with shared data caching for maximum efficiency.
-
-### Usage
-
-```bash
-./launch_multi_gpu.sh <config.yaml> <model_name> [options]
-```
-
-### Required Arguments
-
-- `config.yaml`: Path to configuration file (e.g., `configs/wind_config.yaml`)
-- `model_name`: Model architecture (`fnn`, `lstm`, `tft`, etc.)
-
-### Optional Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--gpus` | `1,2,3,4,5,6,7` | Comma-separated GPU IDs |
-| `--trials-per-gpu` | `10` | Number of HPO trials per GPU |
-| `--force-preprocess` | `false` | Force data reprocessing even if cache exists |
-| `--no-cache` | `false` | Disable caching (for small datasets) |
-| `--cache-dir` | `data_cache` | Directory for cached data |
-| `--venv` | `./frcst` | Path to virtual environment |
-
-### Examples
-
-```bash
-# Basic multi-GPU HPO with default settings
-./launch_multi_gpu.sh configs/wind_config.yaml fnn
-
-# Custom GPU selection and trial count
-./launch_multi_gpu.sh configs/solar_config.yaml lstm --gpus 0,1,2 --trials-per-gpu 20
-
-# Small dataset without caching
-./launch_multi_gpu.sh configs/small_config.yaml fnn --no-cache
-
-# Force data reprocessing
-./launch_multi_gpu.sh configs/config.yaml tft --force-preprocess
-
-# Custom cache directory
-./launch_multi_gpu.sh configs/config.yaml model --cache-dir /custom/path
-```
-
-### How To Stop processes
-
-```bash
-sudo pkill -f "hpo_cl.py"
-# or
-sudo pkill -f "config.yaml"
-```
-
-### How It Works
-
-1. **Environment Setup**: Activates virtual environment and configures PyTorch settings
-2. **Data Preprocessing**: Creates or loads cached preprocessed data (shared across all GPUs)
-3. **Parallel Execution**: Launches separate HPO processes on each specified GPU
-4. **Monitoring**: Tracks progress and provides real-time status updates
-5. **Logging**: Individual log files for each GPU process
-
-### Output Files
-
-- **Log files**: `logs/hpo_cl_m-{model}_gpu{id}.log`
-- **Study databases**: Optuna study files for HPO results
-- **Cached data**: Preprocessed data in `data_cache/` directory
-
-### Cache Management Commands
-
-```bash
-# Force cache refresh
-./launch_multi_gpu.sh config.yaml model --force-preprocess
-
-# Disable caching for small datasets
-./launch_multi_gpu.sh config.yaml model --no-cache
-
-# Custom cache directory
-./launch_multi_gpu.sh config.yaml model --cache-dir /custom/path
-```
 
 ## Single-GPU Hyperparameter Optimization with `hpo_cl.py`
 
@@ -273,7 +191,6 @@ forecasting_framework/
 │   └── tools.py             # General utilities
 ├── hpo_cl.py                 # HPO script
 ├── train_cl.py              # Training script
-└── launch_multi_gpu.sh      # Multi-GPU launcher
 ```
 
 ## Logging and Monitoring
@@ -309,7 +226,7 @@ Optuna studies are automatically managed:
 
 ### GPU Utilization
 
-1. **Multi-GPU setup**: Use all available GPUs with `launch_multi_gpu.sh`
+1. **Multi-GPU setup**: one HPO process per GPU, launchers in `scripts/`
 2. **GPU selection**: Exclude GPU 0 if used by other processes
 3. **Trial distribution**: Balance trials across GPUs based on their capabilities
 

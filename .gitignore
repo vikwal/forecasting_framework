@@ -204,3 +204,8 @@ configs/solar_dcrnn/smoke/
 
 # FL checkpoints (fl.checkpoint)
 checkpoints/
+
+# Local-only: Claude commands, systemd unit templates, IAIMS26 paper workspace
+.claude/commands/
+deploy/
+iaims26/
